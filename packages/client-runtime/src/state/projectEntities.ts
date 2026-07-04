@@ -3,6 +3,7 @@ import type {
   OrchestrationProjectShell,
   OrchestrationShellSnapshot,
   ProjectId,
+  RoamingProjectShell,
   ScopedProjectRef,
 } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
@@ -13,6 +14,7 @@ import type { EnvironmentCatalogState } from "./connections.ts";
 import { arrayElementsEqual, parseProjectKey, projectKey, projectRefsEqual } from "./entities.ts";
 
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = Object.freeze([]);
+const EMPTY_ROAMING_PROJECTS: ReadonlyArray<RoamingProjectShell> = Object.freeze([]);
 const EMPTY_PROJECT_INDEX: ReadonlyMap<ProjectId, OrchestrationProjectShell> = new Map();
 
 export function createEnvironmentProjectAtoms(input: {
@@ -94,6 +96,35 @@ export function createEnvironmentProjectAtoms(input: {
     return previousProjects;
   }).pipe(Atom.withLabel("environment-project-list"));
 
+  const environmentRoamingProjectsAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make(
+      (get): ReadonlyArray<RoamingProjectShell> =>
+        get(input.snapshotAtom(environmentId))?.roamingProjects ?? EMPTY_ROAMING_PROJECTS,
+    ).pipe(Atom.withLabel(`environment-roaming-projects:${environmentId}`)),
+  );
+
+  let previousRoamingProjects: ReadonlyArray<EnvironmentRoamingProject> = [];
+  const roamingProjectsAtom = Atom.make((get) => {
+    const next: EnvironmentRoamingProject[] = [];
+    for (const environmentId of get(input.catalogValueAtom).entries.keys()) {
+      for (const roamingProject of get(environmentRoamingProjectsAtom(environmentId))) {
+        next.push({ environmentId, roamingProject });
+      }
+    }
+    const unchanged =
+      previousRoamingProjects.length === next.length &&
+      next.every(
+        (entry, index) =>
+          previousRoamingProjects[index]?.environmentId === entry.environmentId &&
+          previousRoamingProjects[index]?.roamingProject === entry.roamingProject,
+      );
+    if (unchanged) {
+      return previousRoamingProjects;
+    }
+    previousRoamingProjects = next;
+    return previousRoamingProjects;
+  }).pipe(Atom.withLabel("environment-roaming-project-list"));
+
   return {
     environmentProjectsAtom,
     environmentProjectIndexAtom,
@@ -101,5 +132,12 @@ export function createEnvironmentProjectAtoms(input: {
     projectRefsAtom,
     projectsAtom,
     projectAtom: (ref: ScopedProjectRef) => projectAtomFamily(projectKey(ref)),
+    environmentRoamingProjectsAtom,
+    roamingProjectsAtom,
   };
+}
+
+export interface EnvironmentRoamingProject {
+  readonly environmentId: EnvironmentId;
+  readonly roamingProject: RoamingProjectShell;
 }

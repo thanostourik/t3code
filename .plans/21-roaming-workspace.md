@@ -1,6 +1,7 @@
 # Roaming workspace — local-first plan
 
-> **Status:** M0 complete 2026-07-04 — both spikes GO (see [M0 results](#m0-results-2026-07-04)); M1 next.
+> **Status:** M1 complete 2026-07-04 — exit criteria pass on the harness
+> (`scripts/roaming/accept-m1.mjs`; see [M1 results](#m1-results-2026-07-04)); M2 next.
 > **Decisions log:** 2026-07-04 — v1 transport for small state = machine-to-machine
 > mirror (user decision); cloud store backend (private git repo or T3 relay)
 > deferred to explicit milestone M7 behind the same interface.
@@ -574,6 +575,44 @@ the plan says.
   TTL/scopes) and stores it in `ServerSecretStore`. One direction of
   connectivity suffices: mirror RPCs reconcile manifests both ways per
   contact, so A→B credentials give bidirectional data flow.
+
+## M1 results (2026-07-04)
+
+Landed as four reviewed PRs into `feature/roaming`: contracts (#2), blob
+store (#3), enrollment + PeerMirror (#4), client shell/UI (#5). Exit
+criteria verified end-to-end by `scripts/roaming/accept-m1.mjs` on the M0
+harness: enroll on A → registry entry (title, repository, per-machine root)
+on B after a mirror pass → A killed → B still serves its local copy.
+
+Decisions/deviations recorded during implementation and review:
+
+- **Enrollment is administrative.** The enrollment/mint HTTP routes require
+  `access:write`, not `orchestration:operate` (any standard client could
+  otherwise mint 365-day mirror credentials). Consequently the D4 handshake
+  needs an admin-scoped pairing credential: `t3 auth pairing create --admin`
+  (new flag). Mirror RPCs require `roaming:mirror`, which is granted nowhere
+  by default.
+- **Peer records are tamper-resistant.** A caller of the machine-credential
+  route is recorded insert-only (`RoamingPeers.ensurePeer`) and its
+  advertised base URLs are ignored — overwriting a credentialed peer's URLs
+  would have redirected our authenticated mirror traffic to an attacker.
+- **Enroll ordering:** `project.roaming.enroll` dispatches before the
+  registry blob write, so the decider gates concurrent double-enrolls and no
+  orphan blob can mirror out; the idempotent re-enroll path self-heals a
+  missing blob.
+- **Honest staleness:** `last_contact_at` is written only by a completed
+  mirror pass. Accepted M1 simplification: `lastMirrorContactAt` in the
+  shell is a global max across peers, not per-project (revisit ~M4).
+- **Flag-off behavior:** shell snapshots hide `roamingProjects` and the live
+  roaming stream while the `roaming` setting is off, consistent with the
+  routes 404ing. Local blob data is retained.
+- **Roaming shell stream events carry `sequence: 0`** (they ride outside the
+  event log); the client reducer applies them by key and owns all sequencing
+  rules (the redundant outer gate in shell sync was removed).
+- **Reconciliation hardening from review:** the blob store serializes its
+  read-modify-write behind a semaphore (fiber interleaving could defeat
+  equal-version conflict detection) and verifies ingested `contentHash`
+  against the payload before applying.
 
 ## Execution process
 
