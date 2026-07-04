@@ -81,11 +81,19 @@ const tokenOnlyFlag = Flag.boolean("token-only").pipe(
   Flag.withDefault(false),
 );
 
+const adminFlag = Flag.boolean("admin").pipe(
+  Flag.withDescription(
+    "Issue with administrative scopes (device management, e.g. roaming machine enrollment).",
+  ),
+  Flag.withDefault(false),
+);
+
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
   ttl: ttlFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
+  admin: adminFlag,
   json: jsonFlag,
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
@@ -95,7 +103,7 @@ const pairingCreateCommand = Command.make("create", {
       (environmentAuth) =>
         Effect.gen(function* () {
           const issued = yield* environmentAuth.createPairingLink({
-            scopes: AuthStandardClientScopes,
+            scopes: flags.admin ? AuthAdministrativeScopes : AuthStandardClientScopes,
             subject: "one-time-token",
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
