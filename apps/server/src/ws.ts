@@ -94,6 +94,7 @@ import {
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import {
@@ -525,6 +526,7 @@ const makeWsRpcLayer = (
             return Effect.void;
         }
       };
+      const roamingBlobStore = yield* RoamingBlobStore;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
@@ -1450,6 +1452,14 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
+              // Roaming visibility follows the setting at subscribe time
+              // (consistent with the roaming routes 404ing while off);
+              // flipping the flag takes effect on the next subscription.
+              const roamingEnabled = yield* serverSettings.getSettings.pipe(
+                Effect.map((settings) => settings.roaming),
+                Effect.orElseSucceed(() => false),
+              );
+
               // Coalesce the live shell stream per aggregate over a small window
               // so bursts of high-frequency events (streaming message deltas,
               // activity appends) collapse into a single shell refetch and never
@@ -1512,6 +1522,41 @@ const makeWsRpcLayer = (
                 Stream.flatMap((items) => Stream.fromIterable(items)),
               );
 
+              // Registry blob changes are not domain events; merge them in as
+              // roaming shell stream items (sequence 0 — applied by key, not
+              // by snapshot ordering). They bypass the coalescing buffer: they
+              // are keyed upserts, not sequenced domain events.
+              const roamingLive = Stream.unwrap(
+                roamingBlobStore.subscribeChanges.pipe(
+                  Effect.map((subscription) =>
+                    Stream.fromSubscription(subscription).pipe(
+                      Stream.filter((record) => record.kind === "registry"),
+                      Stream.mapEffect((record) =>
+                        projectionSnapshotQuery.listRoamingProjectShells().pipe(
+                          Effect.map((shells) =>
+                            shells.find((shell) => shell.workspaceProjectId === record.key),
+                          ),
+                          Effect.orElseSucceed(() => undefined),
+                        ),
+                      ),
+                      Stream.flatMap((shell) =>
+                        shell === undefined
+                          ? Stream.empty
+                          : Stream.succeed({
+                              kind: "roaming-project-upserted" as const,
+                              sequence: 0,
+                              roamingProject: shell,
+                            }),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+
+              const liveTail = roamingEnabled
+                ? Stream.merge(bufferedLiveStream, roamingLive)
+                : bufferedLiveStream;
+
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
                   Effect.logError("orchestration shell snapshot load failed", { cause }),
@@ -1522,6 +1567,11 @@ const makeWsRpcLayer = (
                       message: "Failed to load orchestration shell snapshot",
                       cause,
                     }),
+                ),
+                // Roaming projects are hidden while the flag is off; every
+                // snapshot-emitting path below masks through this one helper.
+                Effect.map((snapshot) =>
+                  roamingEnabled ? snapshot : { ...snapshot, roamingProjects: [] },
                 ),
               );
 
@@ -1539,9 +1589,9 @@ const makeWsRpcLayer = (
                           Effect.flatMap(coalesceRetainedInputs),
                         ),
                       ).pipe(Stream.flatMap((items) => Stream.fromIterable(items))),
-                      bufferedLiveStream,
+                      liveTail,
                     )
-                  : bufferedLiveStream,
+                  : liveTail,
               );
 
               // When the client already holds a shell snapshot (cached, or loaded

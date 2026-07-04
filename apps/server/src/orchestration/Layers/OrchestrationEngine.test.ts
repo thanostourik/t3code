@@ -434,6 +434,7 @@ describe("OrchestrationEngine", () => {
               roamingProjects: [],
               updatedAt: projectionSnapshot.updatedAt,
             }),
+          listRoamingProjectShells: () => Effect.succeed([]),
           getArchivedShellSnapshot: () =>
             Effect.succeed({
               snapshotSequence: projectionSnapshot.snapshotSequence,
