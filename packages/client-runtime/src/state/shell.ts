@@ -159,9 +159,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           : Option.match(next.snapshot, {
               onNone: () => null,
               onSome: (snapshot) =>
-                item.sequence > snapshot.snapshotSequence
-                  ? applyShellStreamEvent(snapshot, item)
-                  : snapshot,
+                applyShellStreamEvent(snapshot, item),
             });
       if (nextSnapshot === null) continue;
       receivedSnapshot ||= item.kind === "snapshot";

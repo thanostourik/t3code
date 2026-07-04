@@ -125,6 +125,7 @@ import {
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
   useThreadShells,
+  useRoamingProjects,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
@@ -226,7 +227,7 @@ import {
   ComboboxTrigger,
   useComboboxFilter,
 } from "./ui/combobox";
-import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
+import { SidebarContent, SidebarGroup, SidebarMenu, SidebarMenuItem, SidebarMenuButton, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -2104,6 +2105,61 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     </li>
   );
 });
+
+/**
+ * Registry entries mirrored from other machines that are not materialized
+ * here. Read-only in M1 (materialize arrives with M2); rendered greyed with
+ * an honest staleness label — the data is only as fresh as the last mirror
+ * contact.
+ */
+function SidebarRoamingProjects() {
+  const roamingProjects = useRoamingProjects();
+  const remoteOnly = roamingProjects.filter(
+    (entry) => entry.roamingProject.localProjectId === null,
+  );
+  if (remoteOnly.length === 0) {
+    return null;
+  }
+  return (
+    <SidebarGroup className="px-2 pb-2">
+      <div className="mb-1 pl-2">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+          Roaming
+        </span>
+      </div>
+      <SidebarMenu>
+        {remoteOnly.map(({ environmentId, roamingProject }) => {
+          const repository =
+            roamingProject.repository.displayName ??
+            roamingProject.repository.name ??
+            roamingProject.repository.locator.remoteUrl;
+          const staleness =
+            roamingProject.lastMirrorContactAt === null
+              ? "never synced"
+              : `synced ${formatRelativeTimeLabel(roamingProject.lastMirrorContactAt)}`;
+          return (
+            <SidebarMenuItem key={`${environmentId}:${roamingProject.workspaceProjectId}`}>
+              <div
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 opacity-60"
+                title={`${roamingProject.title} — on another machine (${staleness})`}
+              >
+                <CloudIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm text-muted-foreground">
+                    {roamingProject.title}
+                  </div>
+                  <div className="truncate text-[10px] text-muted-foreground/60">
+                    {repository} · {staleness}
+                  </div>
+                </div>
+              </div>
+            </SidebarMenuItem>
+          );
+        })}
+      </SidebarMenu>
+    </SidebarGroup>
+  );
+}
 
 export default function Sidebar() {
   const projects = useProjects();
@@ -4924,6 +4980,7 @@ export default function Sidebar() {
             </div>
           ) : null}
         </SidebarGroup>
+        <SidebarRoamingProjects />
       </SidebarContent>
       <SidebarChromeFooter />
     </>
