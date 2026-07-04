@@ -132,10 +132,10 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         ? item.snapshot
         : Option.match(current.snapshot, {
             onNone: () => null,
-            onSome: (snapshot) =>
-              item.sequence > snapshot.snapshotSequence
-                ? applyShellStreamEvent(snapshot, item)
-                : snapshot,
+            // Sequencing rules live in the reducer (roaming events ride
+            // sequence 0 and are applied by key; sequenced events are
+            // ignored when stale and return the same reference).
+            onSome: (snapshot) => applyShellStreamEvent(snapshot, item),
           });
     if (nextSnapshot === null) {
       return;
