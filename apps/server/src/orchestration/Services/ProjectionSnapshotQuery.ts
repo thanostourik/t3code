@@ -15,6 +15,7 @@ import type {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
   OrchestrationShellSnapshot,
+  RoamingProjectShell,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadShell,
@@ -82,6 +83,16 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getShellSnapshot: () => Effect.Effect<
     OrchestrationShellSnapshot,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Read the roaming registry entries as shell items (from the local blob
+   * copies — no peer contact involved). Also used to hydrate the live
+   * roaming shell stream events.
+   */
+  readonly listRoamingProjectShells: () => Effect.Effect<
+    ReadonlyArray<RoamingProjectShell>,
     ProjectionRepositoryError
   >;
 

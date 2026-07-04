@@ -57,6 +57,11 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
+import { layer as RoamingBlobStoreLayer } from "./roaming/RoamingBlobStore.ts";
+import { layer as RoamingPeersLayer } from "./roaming/RoamingPeers.ts";
+import { layer as PeerMirrorLayer } from "./roaming/PeerMirror.ts";
+import { layer as RoamingServiceLayer } from "./roaming/RoamingService.ts";
+import { roamingRoutesLayer } from "./roaming/http.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -212,6 +217,14 @@ const PlatformServicesLive = Layer.unwrap(
   }),
 );
 
+const RoamingLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(RoamingServiceLayer),
+  Layer.provideMerge(PeerMirrorLayer),
+  Layer.provideMerge(RoamingPeersLayer),
+  Layer.provideMerge(RoamingBlobStoreLayer),
+  Layer.provide(ServerSecretStore.layer),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
@@ -219,6 +232,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provideMerge(RoamingLayerLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
@@ -417,6 +431,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),
     otlpTracesProxyRouteLayer,
+    roamingRoutesLayer,
     assetRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,

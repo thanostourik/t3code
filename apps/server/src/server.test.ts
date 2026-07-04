@@ -76,6 +76,8 @@ import * as ServerConfig from "./config.ts";
 import * as HttpResponseCompression from "./httpCompression/HttpResponseCompression.ts";
 import { makeRoutesLayer } from "./server.ts";
 import { resolveAvailableEditorsForConfig } from "./ws.ts";
+import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
+import { RoamingService } from "./roaming/RoamingService.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -769,7 +771,12 @@ const buildAppUnderTest = (options?: {
       ),
     );
 
-    const appLayer = servedRoutesLayer.pipe(
+    const appLayer = servedRoutesLayer
+      .pipe(
+        Layer.provide(Layer.mock(RoamingBlobStore)({})),
+        Layer.provide(Layer.mock(RoamingService)({})),
+      )
+      .pipe(
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(
         Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
