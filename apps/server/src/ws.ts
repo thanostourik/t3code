@@ -67,6 +67,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
@@ -395,6 +396,7 @@ const makeWsRpcLayer = (
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const roamingBlobStore = yield* RoamingBlobStore;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1063,6 +1065,13 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
+              // Roaming visibility follows the setting at subscribe time
+              // (consistent with the roaming routes 404ing while off);
+              // flipping the flag takes effect on the next subscription.
+              const roamingEnabled = yield* serverSettings.getSettings.pipe(
+                Effect.map((settings) => settings.roaming),
+                Effect.orElseSucceed(() => false),
+              );
               const snapshot = yield* projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
                   Effect.logError("orchestration shell snapshot load failed", { cause }),
@@ -1083,12 +1092,42 @@ const makeWsRpcLayer = (
                 ),
               );
 
+              // Registry blob changes are not domain events; merge them in as
+              // roaming shell stream items (sequence 0 — applied by key, not
+              // by snapshot ordering).
+              const roamingLive = Stream.unwrap(
+                roamingBlobStore.subscribeChanges.pipe(
+                  Effect.map((subscription) =>
+                    Stream.fromSubscription(subscription).pipe(
+                      Stream.filter((record) => record.kind === "registry"),
+                      Stream.mapEffect((record) =>
+                        projectionSnapshotQuery.listRoamingProjectShells().pipe(
+                          Effect.map((shells) =>
+                            shells.find((shell) => shell.workspaceProjectId === record.key),
+                          ),
+                          Effect.orElseSucceed(() => undefined),
+                        ),
+                      ),
+                      Stream.flatMap((shell) =>
+                        shell === undefined
+                          ? Stream.empty
+                          : Stream.succeed({
+                              kind: "roaming-project-upserted" as const,
+                              sequence: 0,
+                              roamingProject: shell,
+                            }),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
-                  snapshot,
+                  snapshot: roamingEnabled ? snapshot : { ...snapshot, roamingProjects: [] },
                 }),
-                liveStream,
+                roamingEnabled ? Stream.merge(liveStream, roamingLive) : liveStream,
               );
             }),
             { "rpc.aggregate": "orchestration" },
