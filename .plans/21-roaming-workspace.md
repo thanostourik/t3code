@@ -9,6 +9,13 @@
 > fast-forward chains). Server-to-server auth GO (pairing credential →
 > `/oauth/token` bearer exchange works headless; default bearer TTL 30 days —
 > the D4 machine credential rides this machinery with custom TTL/scopes).
+> 2026-07-04 — M1 analysis pass done (see [M1 analysis](#m1-analysis-2026-07-04)):
+> plan assumptions hold with four deviations — `roaming` flag becomes a
+> `ServerSettings` boolean (T3 Connect's env-gating is precedent-by-analogy
+> only); reactors gate themselves internally (no conditional-start hook);
+> peer LAN/Tailscale endpoint discovery does not exist server-side, so M1
+> records peer base URLs at enrollment; mirror RPCs go on raw authenticated
+> HTTP routes with schemas in `roaming.ts` (not `environmentHttp.ts`).
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
 > section at the end. Milestones run strictly in order (M0 → M7).
@@ -495,6 +502,78 @@ Operational notes for later milestones: state lands in `<baseDir>/userdata`
 (`<baseDir>/dev` only when a dev URL is set); ports 148xx avoid both the direct
 default (3773) and dev-runner default (13773); never pass `--tailscale-serve`
 to harness instances (fixed serve port would clash).
+
+## M1 analysis (2026-07-04)
+
+Assumption check against current code before M1 implementation. Confirmed as
+planned: migrations pattern (`apps/server/src/persistence/Migrations.ts`,
+statically imported entries; copy migration 031/032 style), branded-id pattern
+(`makeEntityId<Brand>()` in `packages/contracts/src/baseSchemas.ts`, barrel
+export from `index.ts`), reactor building blocks (`DrainableWorker.ts`,
+`KeyedCoalescingWorker.ts` in `packages/shared`; `AgentAwarenessRelay` +
+`CheckpointReactor` as models, boot wiring via
+`orchestration/Layers/OrchestrationReactor.ts` → `serverRuntimeStartup.ts`),
+`createPairingLink`/`issueSession` accept custom TTL/scopes, `/oauth/token`
+exchange implemented in `apps/server/src/auth/http.ts`, `ServerSecretStore`
+available, persisted `environmentId` via `ServerEnvironment.getEnvironmentId`,
+`RepositoryIdentityResolver.resolve(cwd)` + `GitVcsDriver.listRemotes`,
+`OrchestrationShellSnapshot` + `shellReducer.ts`/`projectEntities.ts` all where
+the plan says.
+
+**Deviations recorded (design deltas applied to step 1):**
+
+- **Reactor gating:** there is no "don't start this reactor" hook keyed on a
+  setting. Pattern in use (`AgentAwarenessRelay`) is: service always starts,
+  internally no-ops when unconfigured. `PeerMirror` follows it — starts, reads
+  the `roaming` setting via `serverSettings` (`getSettings`/`streamChanges`),
+  and does nothing while the flag is off.
+- **`roaming` flag:** T3 Connect is gated by env/build config, not
+  `ServerSettings` — precedent by analogy only. The flag becomes a proper
+  boolean in the settings schema (`packages/contracts/src/settings.ts`,
+  default `false`) so the harness can flip it per instance.
+- **Peer endpoint discovery (real gap):** LAN/Tailscale advertised-endpoint
+  machinery lives in desktop code (`DesktopServerExposure.ts`,
+  `tailscaleEndpointProvider.ts`; shaping in
+  `packages/shared/src/advertisedEndpoint.ts`) — `apps/server` only knows its
+  own local origin (`serverRuntimeState.ts`). M1 therefore stores peer base
+  URLs explicitly in the peer record at enrollment time; PeerMirror tries the
+  recorded URLs in order. Server-side reuse of advertised-endpoint discovery
+  is deferred (revisit at M4/M5 when real two-box usage starts).
+- **Mirror RPC transport:** raw authenticated HTTP routes (helper at
+  `apps/server/src/http.ts:82`) with request/response schemas in
+  `packages/contracts/src/roaming.ts` — deliberately *not* added to
+  `environmentHttp.ts`, keeping the upstream-file touch minimal. A roaming
+  auth scope extends the scope schema in `packages/contracts/src/auth.ts`
+  (small additive upstream-file touch, unavoidable).
+- **No command registry:** `project.enroll-roaming` follows the schema+decider
+  path end to end: contracts command/event union → `orchestration/decider.ts`
+  → `orchestration/projector.ts` → shell snapshot → client-runtime
+  `operations/commands.ts` → web UI. Matches plan intent; listed here because
+  the touch list is longer than "decider + contracts".
+- **UI slot:** project list renders in `apps/web/src/components/Sidebar.tsx`
+  (`SidebarProjectsContent`; grouping in `sidebarProjectGrouping.ts`), so the
+  greyed-out roaming section lands there; `CommandPalette.tsx` is only the
+  add-project flow.
+- **Blob address convention (D0/D3 sharpened, from contracts review):** the
+  wire/manifest address is `(kind, key)` with a contractual per-kind key
+  derivation (registry/vault/recipe/lease → workspaceProjectId; wip →
+  workspaceProjectId/environmentId; transcript/brief → threadId);
+  `workspaceProjectId` on the record is a denormalized grouping attribute.
+  Conflict records retain the full remote record so resolution flows can
+  show both payloads. Payload strings are byte-authoritative for hashing.
+- **Projection persistence (from contracts review):** `workspaceProjectId`
+  must also be persisted in the SQL projection path
+  (`projection_projects` column + pipeline write + `ProjectionSnapshotQuery`
+  read) — the in-memory projector alone loses the link in shell snapshots.
+  Lands with the server enrollment PR.
+- **Peer credential shape (D4 concretized):** enrollment handshake = operator
+  mints a pairing credential on the peer (`t3 auth pairing create`, works
+  headless per M0), enrolling server exchanges it at the peer's
+  `/oauth/token`, then immediately calls a roaming endpoint on the peer to
+  mint a long-lived scoped machine credential (`issueSession` with custom
+  TTL/scopes) and stores it in `ServerSecretStore`. One direction of
+  connectivity suffices: mirror RPCs reconcile manifests both ways per
+  contact, so A→B credentials give bidirectional data flow.
 
 ## Execution process
 
