@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId, WorkspaceProjectId } from "@t3tools/contracts";
 import type { OrchestrationShellSnapshot, OrchestrationShellStreamEvent } from "@t3tools/contracts";
 
 import { applyShellStreamEvent } from "./shellReducer.ts";
@@ -44,7 +44,58 @@ const stubThread = {
   session: null,
 } as const;
 
+const stubRoamingProject = {
+  workspaceProjectId: WorkspaceProjectId.make("wp-1"),
+  title: "Roaming Project",
+  repository: {
+    canonicalKey: "github.com/acme/app",
+    locator: {
+      source: "git-remote" as const,
+      remoteName: "origin",
+      remoteUrl: "git@github.com:acme/app.git",
+    },
+  },
+  localProjectId: null,
+  authorEnvironmentId: EnvironmentId.make("env-desktop"),
+  perMachineRoots: {},
+  lastMirrorContactAt: null,
+  updatedAt: "2026-04-01T00:00:00.000Z",
+} as const;
+
 describe("applyShellStreamEvent", () => {
+  it("applies roaming upserts and removals by key without touching snapshotSequence", () => {
+    const withHighSequence: OrchestrationShellSnapshot = {
+      ...baseSnapshot,
+      snapshotSequence: 10,
+    };
+
+    // Roaming events carry sequence 0 and must not be dropped by the guard.
+    const upserted = applyShellStreamEvent(withHighSequence, {
+      kind: "roaming-project-upserted",
+      sequence: 0,
+      roamingProject: stubRoamingProject,
+    });
+    expect(upserted.roamingProjects).toEqual([stubRoamingProject]);
+    expect(upserted.snapshotSequence).toBe(10);
+
+    const replaced = applyShellStreamEvent(upserted, {
+      kind: "roaming-project-upserted",
+      sequence: 0,
+      roamingProject: { ...stubRoamingProject, title: "Renamed" },
+    });
+    expect(replaced.roamingProjects).toHaveLength(1);
+    expect(replaced.roamingProjects[0]?.title).toBe("Renamed");
+
+    const removed = applyShellStreamEvent(replaced, {
+      kind: "roaming-project-removed",
+      sequence: 0,
+      workspaceProjectId: stubRoamingProject.workspaceProjectId,
+    });
+    expect(removed.roamingProjects).toEqual([]);
+    expect(removed.snapshotSequence).toBe(10);
+  });
+
+
   it("ignores stale project upserts without mutating the snapshot", () => {
     const snapshotWithProject: OrchestrationShellSnapshot = {
       ...baseSnapshot,
