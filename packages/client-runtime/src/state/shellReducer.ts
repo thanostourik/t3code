@@ -13,6 +13,33 @@ export function applyShellStreamEvent(
   snapshot: OrchestrationShellSnapshot,
   event: OrchestrationShellStreamEvent,
 ): OrchestrationShellSnapshot {
+  // Roaming events ride outside the event-log sequence (the server emits
+  // them with sequence 0): apply by key and leave snapshotSequence alone.
+  if (event.kind === "roaming-project-upserted") {
+    const exists = snapshot.roamingProjects.some(
+      (entry) => entry.workspaceProjectId === event.roamingProject.workspaceProjectId,
+    );
+    return {
+      ...snapshot,
+      roamingProjects: exists
+        ? Arr.map(snapshot.roamingProjects, (entry) =>
+            entry.workspaceProjectId === event.roamingProject.workspaceProjectId
+              ? event.roamingProject
+              : entry,
+          )
+        : Arr.append(snapshot.roamingProjects, event.roamingProject),
+    };
+  }
+  if (event.kind === "roaming-project-removed") {
+    return {
+      ...snapshot,
+      roamingProjects: Arr.filter(
+        snapshot.roamingProjects,
+        (entry) => entry.workspaceProjectId !== event.workspaceProjectId,
+      ),
+    };
+  }
+
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 
   switch (event.kind) {
