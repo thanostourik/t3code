@@ -72,6 +72,8 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
 import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
+import { RoamingService } from "./roaming/RoamingService.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -733,7 +735,12 @@ const buildAppUnderTest = (options?: {
       ),
     );
 
-    const appLayer = servedRoutesLayer.pipe(
+    const appLayer = servedRoutesLayer
+      .pipe(
+        Layer.provide(Layer.mock(RoamingBlobStore)({})),
+        Layer.provide(Layer.mock(RoamingService)({})),
+      )
+      .pipe(
       Layer.provide(
         Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
           record: () => Effect.void,
