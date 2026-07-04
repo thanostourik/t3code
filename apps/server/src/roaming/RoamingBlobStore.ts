@@ -26,8 +26,10 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
+import type * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { PersistenceDecodeError, PersistenceSqlError } from "../persistence/Errors.ts";
@@ -71,8 +73,18 @@ export class RoamingBlobStore extends Context.Service<
       ReadonlyArray<RoamingBlobConflict>,
       RoamingBlobStoreError
     >;
-    /** Every accepted write (local or remote) in arrival order. */
-    readonly changes: Stream.Stream<RoamingBlobRecord>;
+    /**
+     * Subscribe to accepted writes (local or remote). The subscription is
+     * established when this effect returns, so no write after that point is
+     * missed. Writes made while nobody is subscribed are dropped — that is
+     * fine for the mirror, which also syncs on startup and on interval; the
+     * trigger is an optimization, not the delivery guarantee.
+     */
+    readonly subscribeChanges: Effect.Effect<
+      PubSub.Subscription<RoamingBlobRecord>,
+      never,
+      Scope.Scope
+    >;
   }
 >()("t3/roaming/RoamingBlobStore") {}
 
@@ -109,8 +121,13 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const changesPubSub = yield* PubSub.unbounded<RoamingBlobRecord>();
+  // Serializes every read-modify-write. Statements on the shared SQLite
+  // connection are async Effects, so without this two fibers can both read a
+  // row before either writes — losing updates and defeating equal-version
+  // conflict detection.
+  const writeSemaphore = yield* Semaphore.make(1);
 
-  const selectRow = (ref: RoamingBlobRef) =>
+  const selectRow = (ref: RoamingBlobRef, operation = "roaming.blob.get") =>
     sql<typeof BlobRowSchema.Type>`
       SELECT
         kind,
@@ -124,7 +141,7 @@ const make = Effect.gen(function* () {
         payload
       FROM roaming_blobs
       WHERE kind = ${ref.kind} AND key = ${ref.key}
-    `.pipe(Effect.mapError(sqlError("roaming.blob.get")));
+    `.pipe(Effect.mapError(sqlError(operation)));
 
   // An accepted write supersedes any recorded conflict for the key — the
   // local state has moved past the version the conflict was about.
@@ -167,25 +184,32 @@ const make = Effect.gen(function* () {
 
   const writeLocal: RoamingBlobStore["Service"]["writeLocal"] = Effect.fn(
     "RoamingBlobStore.writeLocal",
-  )(function* (input) {
-    const environmentId = yield* serverEnvironment.getEnvironmentId;
-    const existing = yield* selectRow({ kind: input.kind, key: input.key });
-    const record = yield* decodeRecord({
-      schemaVersion: 1,
-      kind: input.kind,
-      key: input.key,
-      workspaceProjectId: input.workspaceProjectId,
-      version: (existing[0]?.version ?? 0) + 1,
-      contentHash: contentHashOf(input.payload),
-      authorEnvironmentId: environmentId,
-      updatedAt: yield* nowIso,
-      payload: input.payload,
-    }).pipe(Effect.mapError(decodeError("roaming.blob.write-local")));
-    yield* upsertRow(record, "roaming.blob.write-local");
-    yield* clearConflict(record, "roaming.blob.write-local");
-    yield* PubSub.publish(changesPubSub, record);
-    return record;
-  });
+  )((input) =>
+    writeSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const environmentId = yield* serverEnvironment.getEnvironmentId;
+        const existing = yield* selectRow(
+          { kind: input.kind, key: input.key },
+          "roaming.blob.write-local",
+        );
+        const record = yield* decodeRecord({
+          schemaVersion: 1,
+          kind: input.kind,
+          key: input.key,
+          workspaceProjectId: input.workspaceProjectId,
+          version: (existing[0]?.version ?? 0) + 1,
+          contentHash: contentHashOf(input.payload),
+          authorEnvironmentId: environmentId,
+          updatedAt: yield* nowIso,
+          payload: input.payload,
+        }).pipe(Effect.mapError(decodeError("roaming.blob.write-local")));
+        yield* upsertRow(record, "roaming.blob.write-local");
+        yield* clearConflict(record, "roaming.blob.write-local");
+        yield* PubSub.publish(changesPubSub, record);
+        return record;
+      }),
+    ),
+  );
 
   const recordConflict = (local: typeof BlobRowSchema.Type, remote: RoamingBlobRecord) =>
     Effect.gen(function* () {
@@ -212,23 +236,38 @@ const make = Effect.gen(function* () {
 
   const applyRemote: RoamingBlobStore["Service"]["applyRemote"] = Effect.fn(
     "RoamingBlobStore.applyRemote",
-  )(function* (record) {
-    const existing = (yield* selectRow({ kind: record.kind, key: record.key }))[0];
-    if (existing !== undefined && record.version < existing.version) {
-      return "stale" as const;
-    }
-    if (existing !== undefined && record.version === existing.version) {
-      if (record.contentHash === existing.contentHash) {
+  )((record) =>
+    writeSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        // Integrity gate: a record whose hash disagrees with its payload
+        // would poison reconciliation against every other peer.
+        if (contentHashOf(record.payload) !== record.contentHash) {
+          return yield* new PersistenceSqlError({
+            operation: "roaming.blob.apply-remote",
+            detail: `contentHash mismatch for (${record.kind}, ${record.key}) from ${record.authorEnvironmentId}`,
+          });
+        }
+        const existing = (yield* selectRow(
+          { kind: record.kind, key: record.key },
+          "roaming.blob.apply-remote",
+        ))[0];
+        if (existing !== undefined && record.version < existing.version) {
+          return "stale" as const;
+        }
+        if (existing !== undefined && record.version === existing.version) {
+          if (record.contentHash === existing.contentHash) {
+            return "applied" as const;
+          }
+          yield* recordConflict(existing, record);
+          return "conflict" as const;
+        }
+        yield* upsertRow(record, "roaming.blob.apply-remote");
+        yield* clearConflict(record, "roaming.blob.apply-remote");
+        yield* PubSub.publish(changesPubSub, record);
         return "applied" as const;
-      }
-      yield* recordConflict(existing, record);
-      return "conflict" as const;
-    }
-    yield* upsertRow(record, "roaming.blob.apply-remote");
-    yield* clearConflict(record, "roaming.blob.apply-remote");
-    yield* PubSub.publish(changesPubSub, record);
-    return "applied" as const;
-  });
+      }),
+    ),
+  );
 
   const getMany: RoamingBlobStore["Service"]["getMany"] = Effect.fn("RoamingBlobStore.getMany")(
     function* (refs) {
@@ -311,7 +350,7 @@ const make = Effect.gen(function* () {
     getMany,
     manifest,
     listConflicts,
-    changes: Stream.fromPubSub(changesPubSub),
+    subscribeChanges: PubSub.subscribe(changesPubSub),
   } satisfies RoamingBlobStore["Service"];
 });
 

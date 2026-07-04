@@ -3,10 +3,9 @@ import { createHash } from "node:crypto";
 import { EnvironmentId, RoamingBlobRecord, WorkspaceProjectId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -148,14 +147,11 @@ layer("RoamingBlobStore", (it) => {
     }),
   );
 
-  it.effect("changes emits for accepted writes only", () =>
+  it.effect("subscribeChanges emits for accepted writes only", () =>
     Effect.gen(function* () {
       const store = yield* RoamingBlobStore;
-      const collector = yield* Stream.runCollect(Stream.take(store.changes, 3)).pipe(
-        Effect.forkChild,
-      );
-      // Give the subscriber a beat to attach before publishing.
-      yield* Effect.yieldNow;
+      // Subscription is established when subscribeChanges returns — no race.
+      const changes = yield* store.subscribeChanges;
 
       yield* store.writeLocal({
         kind: "registry",
@@ -167,7 +163,7 @@ layer("RoamingBlobStore", (it) => {
         remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":5}' }),
       );
       assert.equal(applied, "applied");
-      // Neither a stale write nor a conflict may emit…
+      // Stale, conflict, and idempotent equal-version applies must all be silent…
       const staleOutcome = yield* store.applyRemote(
         remoteRecord({ key: "wp-changes", version: 2, payload: '{"c":2}' }),
       );
@@ -176,6 +172,10 @@ layer("RoamingBlobStore", (it) => {
         remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":"other"}' }),
       );
       assert.equal(conflictOutcome, "conflict");
+      const idempotentOutcome = yield* store.applyRemote(
+        remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":5}' }),
+      );
+      assert.equal(idempotentOutcome, "applied");
       // …so the third emission must be this trailing local write.
       yield* store.writeLocal({
         kind: "registry",
@@ -184,14 +184,97 @@ layer("RoamingBlobStore", (it) => {
         payload: '{"c":6}',
       });
 
-      const emissions = Array.from(yield* Fiber.join(collector));
-      assert.equal(emissions.length, 3);
+      const emissions = [
+        yield* PubSub.take(changes),
+        yield* PubSub.take(changes),
+        yield* PubSub.take(changes),
+      ];
       assert.equal(emissions[0]?.version, 1);
       assert.equal(emissions[0]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
       assert.equal(emissions[1]?.version, 5);
       assert.equal(emissions[1]?.authorEnvironmentId, REMOTE_ENVIRONMENT_ID);
       assert.equal(emissions[2]?.version, 6);
       assert.equal(emissions[2]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
+      assert.deepEqual(Array.from(yield* PubSub.takeUpTo(changes, 10)), []);
+    }),
+  );
+
+  it.effect("rejects remote records whose hash disagrees with the payload", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      const poisoned = {
+        ...remoteRecord({ key: "wp-poison", version: 1, payload: '{"ok":true}' }),
+        contentHash: "0".repeat(64),
+      };
+      const result = yield* store.applyRemote(poisoned).pipe(Effect.flip);
+      assert.equal(result._tag, "PersistenceSqlError");
+      assert.equal(yield* store.get({ kind: "registry", key: "wp-poison" }), null);
+    }),
+  );
+
+  it.effect("serializes concurrent same-version writes into applied + conflict", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      yield* store.applyRemote(remoteRecord({ key: "wp-race", version: 2, payload: '{"r":2}' }));
+
+      const outcomes = yield* Effect.all(
+        [
+          store.applyRemote(remoteRecord({ key: "wp-race", version: 3, payload: '{"r":"a"}' })),
+          store.applyRemote(remoteRecord({ key: "wp-race", version: 3, payload: '{"r":"b"}' })),
+        ],
+        { concurrency: 2 },
+      );
+      assert.deepEqual([...outcomes].sort(), ["applied", "conflict"]);
+      const conflicts = yield* store.listConflicts();
+      assert.equal(conflicts.filter((conflict) => conflict.key === "wp-race").length, 1);
+    }),
+  );
+
+  it.effect("getMany returns found records, omitting misses, across kinds", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      // Same key under two kinds must coexist (PK is (kind, key)).
+      yield* store.writeLocal({
+        kind: "registry",
+        key: "wp-shared",
+        workspaceProjectId: WORKSPACE_PROJECT_ID,
+        payload: '{"kind":"registry"}',
+      });
+      yield* store.writeLocal({
+        kind: "lease",
+        key: "wp-shared",
+        workspaceProjectId: WORKSPACE_PROJECT_ID,
+        payload: '{"kind":"lease"}',
+      });
+
+      const records = yield* store.getMany([
+        { kind: "registry", key: "wp-shared" },
+        { kind: "lease", key: "wp-shared" },
+        { kind: "vault", key: "wp-missing" },
+      ]);
+      assert.deepEqual(
+        records.map((record) => [record.kind, record.payload]),
+        [
+          ["registry", '{"kind":"registry"}'],
+          ["lease", '{"kind":"lease"}'],
+        ],
+      );
+    }),
+  );
+
+  it.effect("a newer conflict for a key replaces the previously recorded one", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      yield* store.applyRemote(remoteRecord({ key: "wp-two", version: 1, payload: '{"t":1}' }));
+      yield* store.applyRemote(remoteRecord({ key: "wp-two", version: 1, payload: '{"t":"x"}' }));
+      const second = remoteRecord({ key: "wp-two", version: 1, payload: '{"t":"y"}' });
+      yield* store.applyRemote(second);
+
+      const conflicts = (yield* store.listConflicts()).filter(
+        (conflict) => conflict.key === "wp-two",
+      );
+      assert.equal(conflicts.length, 1);
+      assert.deepEqual(conflicts[0]?.remote, second);
     }),
   );
 });
