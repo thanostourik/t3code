@@ -313,6 +313,38 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "project.roaming.enroll": {
+      const project = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      if (
+        project.workspaceProjectId !== undefined &&
+        project.workspaceProjectId !== command.workspaceProjectId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' is already enrolled as '${project.workspaceProjectId}'.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "project.meta-updated",
+        payload: {
+          projectId: command.projectId,
+          workspaceProjectId: command.workspaceProjectId,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
     case "project.delete": {
       yield* requireProject({
         readModel,

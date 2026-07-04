@@ -367,6 +367,9 @@ export function projectEvent(
                   ...(payload.workspaceRoot !== undefined
                     ? { workspaceRoot: payload.workspaceRoot }
                     : {}),
+                  ...(payload.workspaceProjectId !== undefined
+                    ? { workspaceProjectId: payload.workspaceProjectId }
+                    : {}),
                   ...(payload.defaultModelSelection !== undefined
                     ? { defaultModelSelection: payload.defaultModelSelection }
                     : {}),

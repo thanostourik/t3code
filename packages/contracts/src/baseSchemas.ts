@@ -168,3 +168,12 @@ export const ApprovalRequestId = makeEntityId("ApprovalRequestId");
 export type ApprovalRequestId = typeof ApprovalRequestId.Type;
 export const CheckpointRef = makeEntityId("CheckpointRef");
 export type CheckpointRef = typeof CheckpointRef.Type;
+
+/**
+ * Machine-independent project identity for roaming (decision D1). Minted on
+ * first enrollment and carried in the mirrored registry; local `ProjectId`
+ * semantics are untouched — a local project links to this via an optional
+ * field.
+ */
+export const WorkspaceProjectId = makeEntityId("WorkspaceProjectId");
+export type WorkspaceProjectId = typeof WorkspaceProjectId.Type;
