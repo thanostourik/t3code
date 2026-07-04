@@ -33,6 +33,7 @@ const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   snapshotSequence: 1,
   projects: [],
   threads: [],
+  roamingProjects: [],
   updatedAt: "2026-06-06T00:00:00.000Z",
 };
 
