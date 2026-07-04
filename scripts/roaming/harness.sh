@@ -37,15 +37,24 @@ start_instance() {
     >"$dir/server.log" 2>&1 &
   echo $! >"$dir/server.pid"
 
+  # Readiness = our child is alive AND the port answers with our own
+  # environment id — a foreign server squatting the port must not pass.
+  local descriptor envid
   for _ in $(seq 1 60); do
-    if curl -fsS "http://$HOST:$port/.well-known/t3/environment" >/dev/null 2>&1; then
-      echo "$name up: http://$HOST:$port (pid $(cat "$dir/server.pid"), base dir $dir/basedir)"
-      return 0
-    fi
     if ! kill -0 "$(cat "$dir/server.pid")" 2>/dev/null; then
-      echo "$name died during startup; log tail:" >&2
+      echo "$name died during startup (port $port already taken?); log tail:" >&2
       tail -20 "$dir/server.log" >&2
+      rm -f "$dir/server.pid"
       return 1
+    fi
+    if descriptor="$(curl -fsS "http://$HOST:$port/.well-known/t3/environment" 2>/dev/null)"; then
+      envid="$(cat "$dir/basedir/userdata/environment-id" 2>/dev/null || true)"
+      case "$descriptor" in
+        *"$envid"*) [ -n "$envid" ] && {
+          echo "$name up: http://$HOST:$port (pid $(cat "$dir/server.pid"), base dir $dir/basedir)"
+          return 0
+        } ;;
+      esac
     fi
     sleep 0.5
   done
