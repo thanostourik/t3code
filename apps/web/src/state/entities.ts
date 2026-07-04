@@ -22,6 +22,7 @@ import { Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
+import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
 import { environmentServerConfigsAtom } from "./server";
 import { allEnvironmentShellsBootstrappedAtom } from "./shell";
 import { environmentThreadDetails, environmentThreadShells } from "./threads";
@@ -110,6 +111,10 @@ export function useEnvironmentThreadRefs(
 
 export function useProjects(): ReadonlyArray<EnvironmentProject> {
   return useAtomValue(environmentProjects.projectsAtom);
+}
+
+export function useRoamingProjects(): ReadonlyArray<EnvironmentRoamingProject> {
+  return useAtomValue(environmentProjects.roamingProjectsAtom);
 }
 
 export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
