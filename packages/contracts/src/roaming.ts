@@ -30,6 +30,17 @@ export const RoamingBlobKind = Schema.Literals([
 ]);
 export type RoamingBlobKind = typeof RoamingBlobKind.Type;
 
+/**
+ * The reconciliation address is `(kind, key)`. `key` must be globally unique
+ * within its kind; the derivation is part of this contract:
+ *
+ * - `registry`, `vault`, `recipe`, `lease` → `<workspaceProjectId>`
+ * - `wip`                                  → `<workspaceProjectId>/<environmentId>`
+ * - `transcript`, `brief`                  → `<threadId>`
+ *
+ * `workspaceProjectId` on the record is a denormalized grouping attribute
+ * (indexing, per-project listing), not part of the address.
+ */
 export const RoamingBlobRef = Schema.Struct({
   kind: RoamingBlobKind,
   key: TrimmedNonEmptyString,
@@ -41,7 +52,14 @@ export const RoamingBlobRecord = Schema.Struct({
   kind: RoamingBlobKind,
   key: TrimmedNonEmptyString,
   workspaceProjectId: WorkspaceProjectId,
-  /** Monotonic per (kind, key); writers bump it on every change. */
+  /**
+   * Monotonic per (kind, key); writers bump it on every change. Accepted
+   * limitation: a scalar version only detects concurrency at *equal*
+   * versions — if two machines diverge and one races ahead, higher-version-
+   * wins overwrites silently. Registry-class data changes rarely enough
+   * that the common both-bumped-once case is the one that matters (and it
+   * does surface as a conflict).
+   */
   version: PositiveInt,
   /** Hex sha-256 of the exact `payload` string; must be stable across machines. */
   contentHash: TrimmedNonEmptyString,
@@ -51,7 +69,9 @@ export const RoamingBlobRecord = Schema.Struct({
    * Kind-specific content. Registry entries are JSON text (see
    * `RoamingRegistryPayload`); binary kinds encode as base64. Kept a plain
    * string so hashing and storage are byte-exact, and so M7 can swap in
-   * ciphertext without changing the record shape.
+   * ciphertext without changing the record shape. The payload string is
+   * authoritative: store and transport it verbatim, and never re-serialize
+   * a decoded payload before hashing — re-encoding is not byte-stable.
    */
   payload: Schema.String,
 });
@@ -68,7 +88,9 @@ export type RoamingBlobManifestEntry = typeof RoamingBlobManifestEntry.Type;
 /**
  * Concurrent writes to the same (kind, key) at the same version. Recorded
  * locally by the blob store and surfaced to the user; resolution is always
- * an explicit pick, never a merge.
+ * an explicit pick, never a merge. The full remote record is retained so
+ * the resolution flow can show both payloads (the local one lives in the
+ * store).
  */
 export const RoamingBlobConflict = Schema.Struct({
   kind: RoamingBlobKind,
@@ -76,8 +98,7 @@ export const RoamingBlobConflict = Schema.Struct({
   workspaceProjectId: WorkspaceProjectId,
   version: PositiveInt,
   localContentHash: TrimmedNonEmptyString,
-  remoteContentHash: TrimmedNonEmptyString,
-  remoteAuthorEnvironmentId: EnvironmentId,
+  remote: RoamingBlobRecord,
   detectedAt: IsoDateTime,
 });
 export type RoamingBlobConflict = typeof RoamingBlobConflict.Type;

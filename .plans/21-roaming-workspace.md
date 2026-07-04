@@ -554,6 +554,18 @@ the plan says.
   (`SidebarProjectsContent`; grouping in `sidebarProjectGrouping.ts`), so the
   greyed-out roaming section lands there; `CommandPalette.tsx` is only the
   add-project flow.
+- **Blob address convention (D0/D3 sharpened, from contracts review):** the
+  wire/manifest address is `(kind, key)` with a contractual per-kind key
+  derivation (registry/vault/recipe/lease → workspaceProjectId; wip →
+  workspaceProjectId/environmentId; transcript/brief → threadId);
+  `workspaceProjectId` on the record is a denormalized grouping attribute.
+  Conflict records retain the full remote record so resolution flows can
+  show both payloads. Payload strings are byte-authoritative for hashing.
+- **Projection persistence (from contracts review):** `workspaceProjectId`
+  must also be persisted in the SQL projection path
+  (`projection_projects` column + pipeline write + `ProjectionSnapshotQuery`
+  read) — the in-memory projector alone loses the link in shell snapshots.
+  Lands with the server enrollment PR.
 - **Peer credential shape (D4 concretized):** enrollment handshake = operator
   mints a pairing credential on the peer (`t3 auth pairing create`, works
   headless per M0), enrolling server exchanges it at the peer's
