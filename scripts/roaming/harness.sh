@@ -66,7 +66,7 @@ start_instance() {
 stop_instance() {
   local name="$1" dir="$HARNESS_DIR/$1"
   if [ -f "$dir/server.pid" ] && kill -0 "$(cat "$dir/server.pid")" 2>/dev/null; then
-    kill "$(cat "$dir/server.pid")"
+    kill "$(cat "$dir/server.pid")" 2>/dev/null || true
     echo "$name stopped"
   else
     echo "$name not running"
