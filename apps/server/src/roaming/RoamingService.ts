@@ -115,6 +115,39 @@ const make = Effect.gen(function* () {
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+  const writeRegistryBlob = (input: {
+    readonly workspaceProjectId: WorkspaceProjectId;
+    readonly title: string;
+    readonly workspaceRoot: string;
+  }) =>
+    Effect.gen(function* () {
+      const repository = yield* identityResolver.resolve(input.workspaceRoot);
+      if (repository === null) {
+        return yield* new RoamingEnrollError({
+          reason: "no-git-remote",
+          detail: `${input.workspaceRoot} has no usable git remote`,
+        });
+      }
+      const environmentId = yield* serverEnvironment.getEnvironmentId;
+      // Registry payload is encoded once here; the resulting string is
+      // byte-authoritative from now on (never re-serialized).
+      const payloadJson = yield* encodeRegistryPayloadJson({
+        workspaceProjectId: input.workspaceProjectId,
+        title: input.title,
+        repository,
+        vaultManifest: [],
+        perMachineRoots: { [environmentId]: input.workspaceRoot },
+      }).pipe(Effect.mapError(internalError("registry payload encode failed")));
+      yield* blobStore
+        .writeLocal({
+          kind: "registry",
+          key: input.workspaceProjectId,
+          workspaceProjectId: input.workspaceProjectId,
+          payload: payloadJson,
+        })
+        .pipe(Effect.mapError(internalError("registry blob write failed")));
+    });
+
   const enrollProject: RoamingService["Service"]["enrollProject"] = Effect.fn(
     "RoamingService.enrollProject",
   )(function* (projectId) {
@@ -125,42 +158,31 @@ const make = Effect.gen(function* () {
       return yield* new RoamingEnrollError({ reason: "project-not-found", detail: projectId });
     }
     const project = projectRow.value;
+
+    // Idempotent re-enroll, self-healing: if a previous attempt linked the
+    // project but the registry blob write failed, write it now.
     if (project.workspaceProjectId != null) {
+      const existing = yield* blobStore
+        .get({ kind: "registry", key: project.workspaceProjectId })
+        .pipe(Effect.mapError(internalError("registry blob lookup failed")));
+      if (existing === null) {
+        yield* writeRegistryBlob({
+          workspaceProjectId: project.workspaceProjectId,
+          title: project.title,
+          workspaceRoot: project.workspaceRoot,
+        });
+        yield* peerMirror.syncNow();
+      }
       return project.workspaceProjectId;
     }
 
-    const repository = yield* identityResolver.resolve(project.workspaceRoot);
-    if (repository === null) {
-      return yield* new RoamingEnrollError({
-        reason: "no-git-remote",
-        detail: `${project.workspaceRoot} has no usable git remote`,
-      });
-    }
-
-    const environmentId = yield* serverEnvironment.getEnvironmentId;
     const workspaceProjectId = WorkspaceProjectId.make(
       yield* crypto.randomUUIDv4.pipe(Effect.orDie),
     );
 
-    // Registry payload is encoded once here; the resulting string is
-    // byte-authoritative from now on (never re-serialized).
-    const payloadJson = yield* encodeRegistryPayloadJson({
-      workspaceProjectId,
-      title: project.title,
-      repository,
-      vaultManifest: [],
-      perMachineRoots: { [environmentId]: project.workspaceRoot },
-    }).pipe(Effect.mapError(internalError("registry payload encode failed")));
-
-    yield* blobStore
-      .writeLocal({
-        kind: "registry",
-        key: workspaceProjectId,
-        workspaceProjectId,
-        payload: payloadJson,
-      })
-      .pipe(Effect.mapError(internalError("registry blob write failed")));
-
+    // Dispatch first: the decider is the gate against concurrent double
+    // enrollment, so a losing race never leaves an orphan registry blob
+    // that would mirror to peers as a ghost entry.
     yield* engine
       .dispatch({
         type: "project.roaming.enroll",
@@ -170,6 +192,12 @@ const make = Effect.gen(function* () {
         createdAt: yield* nowIso,
       })
       .pipe(Effect.mapError(internalError("project link dispatch failed")));
+
+    yield* writeRegistryBlob({
+      workspaceProjectId,
+      title: project.title,
+      workspaceRoot: project.workspaceRoot,
+    });
 
     yield* peerMirror.syncNow();
     return workspaceProjectId;
@@ -240,10 +268,12 @@ const make = Effect.gen(function* () {
               new TextEncoder().encode(credential.token),
             )
             .pipe(Effect.mapError(internalError("peer credential store failed")));
+          // lastContactAt stays null until a mirror pass actually completes —
+          // enrollment moving zero blobs must not read as "just synced".
           const peer: RoamingPeer = {
             environmentId: credential.environmentId,
             baseUrls: input.baseUrls,
-            lastContactAt: yield* nowIso,
+            lastContactAt: null,
             enrolledAt: yield* nowIso,
           };
           yield* peers.upsert(peer).pipe(Effect.mapError(internalError("peer record failed")));
@@ -253,10 +283,12 @@ const make = Effect.gen(function* () {
         lastCause = attempt.cause;
       }
 
+      // Log the cause locally but do not attach it to the returned error:
+      // failed exchange attempts can embed the pairing credential.
+      yield* Effect.logDebug("roaming: peer enrollment failed", { cause: lastCause });
       return yield* new RoamingEnrollError({
         reason: "peer-unreachable",
         detail: `no base URL of ${input.baseUrls.join(", ")} completed enrollment`,
-        cause: lastCause,
       });
     },
   );
@@ -274,15 +306,12 @@ const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError(internalError("machine credential issue failed")));
 
-    // Record the caller as a peer. Base URLs may be empty — then we can only
-    // be reached by them, which still yields bidirectional data flow.
+    // Record the caller's existence only. Its advertised base URLs are
+    // deliberately ignored: a caller identifying itself is not authority to
+    // (re)direct our outbound mirror traffic, and we hold no credential for
+    // it anyway — data flows when it contacts us.
     yield* peers
-      .upsert({
-        environmentId: input.callerEnvironmentId,
-        baseUrls: input.callerBaseUrls,
-        lastContactAt: yield* nowIso,
-        enrolledAt: yield* nowIso,
-      })
+      .ensurePeer(input.callerEnvironmentId, yield* nowIso)
       .pipe(Effect.mapError(internalError("caller peer record failed")));
 
     return {

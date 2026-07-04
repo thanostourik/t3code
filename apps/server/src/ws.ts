@@ -1065,6 +1065,13 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
+              // Roaming visibility follows the setting at subscribe time
+              // (consistent with the roaming routes 404ing while off);
+              // flipping the flag takes effect on the next subscription.
+              const roamingEnabled = yield* serverSettings.getSettings.pipe(
+                Effect.map((settings) => settings.roaming),
+                Effect.orElseSucceed(() => false),
+              );
               const snapshot = yield* projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
                   Effect.logError("orchestration shell snapshot load failed", { cause }),
@@ -1118,9 +1125,9 @@ const makeWsRpcLayer = (
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
-                  snapshot,
+                  snapshot: roamingEnabled ? snapshot : { ...snapshot, roamingProjects: [] },
                 }),
-                Stream.merge(liveStream, roamingLive),
+                roamingEnabled ? Stream.merge(liveStream, roamingLive) : liveStream,
               );
             }),
             { "rpc.aggregate": "orchestration" },

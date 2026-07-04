@@ -3,12 +3,14 @@
  *
  * Mirror RPCs (manifest/fetch/push) are peer-to-peer and require the
  * `roaming:mirror` scope carried by the D4 machine credential. Enrollment
- * RPCs are local user actions and require `orchestration:operate`. Every
+ * RPCs mint credentials and register peers — device management — so they
+ * require the administrative `access:write` scope, which standard client
+ * sessions do not hold. Every
  * route 404s while the `roaming` server setting is off, so a disabled
  * server does not advertise the feature at all.
  */
 import {
-  AuthOrchestrationOperateScope,
+  AuthAccessWriteScope,
   AuthRoamingMirrorScope,
   type AuthEnvironmentScope,
   ROAMING_ENROLL_PROJECT_PATH,
@@ -176,7 +178,7 @@ const machineCredentialRoute = HttpRouter.add(
   ROAMING_MACHINE_CREDENTIAL_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthOrchestrationOperateScope);
+      yield* requireRoamingScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingMachineCredentialRequest);
       const roamingService = yield* RoamingService;
       const response = yield* roamingService
@@ -195,7 +197,7 @@ const addPeerRoute = HttpRouter.add(
   ROAMING_PEERS_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthOrchestrationOperateScope);
+      yield* requireRoamingScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingAddPeerRequest);
       const roamingService = yield* RoamingService;
       const peer = yield* roamingService.addPeer(body).pipe(
@@ -215,7 +217,7 @@ const enrollProjectRoute = HttpRouter.add(
   ROAMING_ENROLL_PROJECT_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthOrchestrationOperateScope);
+      yield* requireRoamingScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingEnrollProjectRequest);
       const roamingService = yield* RoamingService;
       const workspaceProjectId = yield* roamingService.enrollProject(body.projectId).pipe(

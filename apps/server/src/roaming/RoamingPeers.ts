@@ -25,6 +25,11 @@ export class RoamingPeers extends Context.Service<
   RoamingPeers,
   {
     readonly upsert: (peer: RoamingPeer) => Effect.Effect<void, RoamingPeersError>;
+    /** Record a peer's existence without touching an existing row. */
+    readonly ensurePeer: (
+      environmentId: EnvironmentId,
+      enrolledAt: string,
+    ) => Effect.Effect<void, RoamingPeersError>;
     readonly list: () => Effect.Effect<ReadonlyArray<RoamingPeer>, RoamingPeersError>;
     readonly recordContact: (
       environmentId: EnvironmentId,
@@ -60,6 +65,19 @@ const make = Effect.gen(function* () {
         last_contact_at = COALESCE(excluded.last_contact_at, roaming_peers.last_contact_at)
     `.pipe(Effect.mapError(sqlError("roaming.peers.upsert")));
   });
+
+  const ensurePeer: RoamingPeers["Service"]["ensurePeer"] = Effect.fn("RoamingPeers.ensurePeer")(
+    function* (environmentId, enrolledAt) {
+      // Insert-only: a caller identifying itself must never overwrite the
+      // base URLs (or anything else) of a peer we already enrolled — that
+      // would let it redirect our outbound mirror traffic.
+      yield* sql`
+        INSERT INTO roaming_peers (environment_id, base_urls, last_contact_at, enrolled_at)
+        VALUES (${environmentId}, ${"[]"}, ${null}, ${enrolledAt})
+        ON CONFLICT (environment_id) DO NOTHING
+      `.pipe(Effect.mapError(sqlError("roaming.peers.ensure")));
+    },
+  );
 
   const list: RoamingPeers["Service"]["list"] = Effect.fn("RoamingPeers.list")(function* () {
     const rows = yield* sql<{
@@ -107,7 +125,7 @@ const make = Effect.gen(function* () {
     `.pipe(Effect.mapError(sqlError("roaming.peers.record-contact")));
   });
 
-  return { upsert, list, recordContact } satisfies RoamingPeers["Service"];
+  return { upsert, ensurePeer, list, recordContact } satisfies RoamingPeers["Service"];
 });
 
 export const layer = Layer.effect(RoamingPeers, make);
