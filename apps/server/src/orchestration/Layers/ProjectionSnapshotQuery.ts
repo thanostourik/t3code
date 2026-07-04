@@ -24,6 +24,8 @@ import {
   type OrchestrationThreadShell,
   ModelSelection,
   ProjectId,
+  RoamingProjectShell,
+  RoamingRegistryPayload,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
@@ -279,6 +281,7 @@ function mapProjectShellRow(
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity,
+    ...(row.workspaceProjectId !== null ? { workspaceProjectId: row.workspaceProjectId } : {}),
     defaultModelSelection: row.defaultModelSelection,
     scripts: row.scripts,
     createdAt: row.createdAt,
@@ -1557,6 +1560,76 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         }),
       );
 
+  const decodeRegistryPayload = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(RoamingRegistryPayload),
+  );
+
+  const listRoamingProjectShells: ProjectionSnapshotQueryShape["listRoamingProjectShells"] = () =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{
+        readonly key: string;
+        readonly payload: string;
+        readonly authorEnvironmentId: string;
+        readonly updatedAt: string;
+        readonly localProjectId: string | null;
+      }>`
+        SELECT
+          blobs.key AS "key",
+          blobs.payload AS "payload",
+          blobs.author_environment_id AS "authorEnvironmentId",
+          blobs.updated_at AS "updatedAt",
+          projects.project_id AS "localProjectId"
+        FROM roaming_blobs AS blobs
+        LEFT JOIN projection_projects AS projects
+          ON projects.workspace_project_id = blobs.key AND projects.deleted_at IS NULL
+        WHERE blobs.kind = 'registry'
+        ORDER BY blobs.key
+      `.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingProjectShells:query"),
+        ),
+      );
+
+      const contactRows = yield* sql<{ readonly lastContactAt: string | null }>`
+        SELECT MAX(last_contact_at) AS "lastContactAt" FROM roaming_peers
+      `.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingProjectShells:contact"),
+        ),
+      );
+      const lastMirrorContactAt = contactRows[0]?.lastContactAt ?? null;
+
+      const shells: RoamingProjectShell[] = [];
+      for (const row of rows) {
+        // A payload this machine cannot decode (newer schema from a peer)
+        // must not take down the whole shell — skip it and log.
+        const payload = yield* decodeRegistryPayload(row.payload).pipe(
+          Effect.map(Option.some),
+          Effect.catch((cause) =>
+            Effect.logWarning("roaming: undecodable registry payload", {
+              key: row.key,
+              cause,
+            }).pipe(Effect.as(Option.none())),
+          ),
+        );
+        if (Option.isNone(payload)) {
+          continue;
+        }
+        shells.push({
+          workspaceProjectId: payload.value.workspaceProjectId,
+          title: payload.value.title,
+          repository: payload.value.repository,
+          localProjectId: row.localProjectId as RoamingProjectShell["localProjectId"],
+          authorEnvironmentId:
+            row.authorEnvironmentId as RoamingProjectShell["authorEnvironmentId"],
+          perMachineRoots: payload.value.perMachineRoots,
+          lastMirrorContactAt,
+          updatedAt: row.updatedAt,
+        });
+      }
+      return shells;
+    });
+
   const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
     sql
       .withTransaction(
@@ -1674,6 +1747,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     } satisfies OrchestrationThreadShell)
                   : Result.failVoid,
               ),
+              roamingProjects: yield* listRoamingProjectShells(),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
 
@@ -2261,6 +2335,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getCommandReadModel,
     getSnapshot,
     getShellSnapshot,
+    listRoamingProjectShells,
     getArchivedShellSnapshot,
     searchThreads,
     getSnapshotSequence,
