@@ -126,6 +126,14 @@ const make = Effect.gen(function* () {
       WHERE kind = ${ref.kind} AND key = ${ref.key}
     `.pipe(Effect.mapError(sqlError("roaming.blob.get")));
 
+  // An accepted write supersedes any recorded conflict for the key — the
+  // local state has moved past the version the conflict was about.
+  const clearConflict = (ref: RoamingBlobRef, operation: string) =>
+    sql`
+      DELETE FROM roaming_blob_conflicts
+      WHERE kind = ${ref.kind} AND key = ${ref.key}
+    `.pipe(Effect.mapError(sqlError(operation)));
+
   const upsertRow = (record: RoamingBlobRecord, operation: string) =>
     sql`
       INSERT INTO roaming_blobs (
@@ -174,6 +182,7 @@ const make = Effect.gen(function* () {
       payload: input.payload,
     }).pipe(Effect.mapError(decodeError("roaming.blob.write-local")));
     yield* upsertRow(record, "roaming.blob.write-local");
+    yield* clearConflict(record, "roaming.blob.write-local");
     yield* PubSub.publish(changesPubSub, record);
     return record;
   });
@@ -216,6 +225,7 @@ const make = Effect.gen(function* () {
       return "conflict" as const;
     }
     yield* upsertRow(record, "roaming.blob.apply-remote");
+    yield* clearConflict(record, "roaming.blob.apply-remote");
     yield* PubSub.publish(changesPubSub, record);
     return "applied" as const;
   });

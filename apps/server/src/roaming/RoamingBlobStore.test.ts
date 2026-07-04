@@ -141,6 +141,10 @@ layer("RoamingBlobStore", (it) => {
       assert.equal(conflicts[0]?.key, "wp-rec");
       assert.equal(conflicts[0]?.version, 3);
       assert.deepEqual(conflicts[0]?.remote, conflicting);
+
+      // An accepted write for the key supersedes the recorded conflict.
+      yield* store.applyRemote(remoteRecord({ key: "wp-rec", version: 4, payload: '{"v":4}' }));
+      assert.deepEqual(yield* store.listConflicts(), []);
     }),
   );
 
