@@ -20,8 +20,10 @@ import {
   TrimmedNonEmptyString,
   TrimmedString,
   TurnId,
+  WorkspaceProjectId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { RoamingProjectShell } from "./roaming.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -215,6 +217,8 @@ export const OrchestrationProject = Schema.Struct({
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  /** Present iff the project is enrolled in roaming (decision D1). */
+  workspaceProjectId: Schema.optional(WorkspaceProjectId),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
@@ -400,6 +404,8 @@ export const OrchestrationProjectShell = Schema.Struct({
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  /** Present iff the project is enrolled in roaming (decision D1). */
+  workspaceProjectId: Schema.optional(WorkspaceProjectId),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
@@ -441,6 +447,10 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProjectShell),
   threads: Schema.Array(OrchestrationThreadShell),
+  /** Registry entries from the roaming blob store; empty while roaming is off. */
+  roamingProjects: Schema.Array(RoamingProjectShell).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -465,6 +475,16 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("thread-removed"),
     sequence: NonNegativeInt,
     threadId: ThreadId,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("roaming-project-upserted"),
+    sequence: NonNegativeInt,
+    roamingProject: RoamingProjectShell,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("roaming-project-removed"),
+    sequence: NonNegativeInt,
+    workspaceProjectId: WorkspaceProjectId,
   }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
@@ -885,6 +905,20 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+/**
+ * Links a local project to a minted `WorkspaceProjectId`. Dispatched by the
+ * roaming service after it resolves the repo remote and writes the registry
+ * blob — not client-dispatchable; enrollment goes through the roaming HTTP
+ * RPC. Emits `project.meta-updated`.
+ */
+const ProjectRoamingEnrollCommand = Schema.Struct({
+  type: Schema.Literal("project.roaming.enroll"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  workspaceProjectId: WorkspaceProjectId,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -894,6 +928,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ProjectRoamingEnrollCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -953,6 +988,8 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  /** Set once by `project.roaming.enroll`; additive and replay-safe. */
+  workspaceProjectId: Schema.optional(WorkspaceProjectId),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
   updatedAt: IsoDateTime,
