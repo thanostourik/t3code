@@ -184,6 +184,7 @@ describe("OrchestrationEngine", () => {
               projects: [],
               threads: [],
               roamingProjects: [],
+              roamingMaterializations: [],
               updatedAt: projectionSnapshot.updatedAt,
             }),
           listRoamingProjectShells: () => Effect.succeed([]),
@@ -193,6 +194,7 @@ describe("OrchestrationEngine", () => {
               projects: [],
               threads: [],
               roamingProjects: [],
+              roamingMaterializations: [],
               updatedAt: projectionSnapshot.updatedAt,
             }),
           getSnapshotSequence: () =>

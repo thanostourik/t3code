@@ -727,6 +727,7 @@ const buildAppUnderTest = (options?: {
               projects: [],
               threads: [],
               roamingProjects: [],
+              roamingMaterializations: [],
               updatedAt: "1970-01-01T00:00:00.000Z",
             }),
           getArchivedShellSnapshot: () =>
@@ -735,6 +736,7 @@ const buildAppUnderTest = (options?: {
               projects: [],
               threads: [],
               roamingProjects: [],
+              roamingMaterializations: [],
               updatedAt: "1970-01-01T00:00:00.000Z",
             }),
           searchThreads: () => Effect.succeed({ matches: [] }),
