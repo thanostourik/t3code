@@ -475,8 +475,6 @@ export type RoamingMirrorUnavailableReason = typeof RoamingMirrorUnavailableReas
  * Unified handshake result. `attach` is always present — without it the
  * pairing failed and the route errors instead. `peer` is set iff the mirror
  * was established; otherwise `mirrorUnavailableReason` says why not.
- * (Replaces the M2 `RoamingAddPeerResponse` `{ peer }` shape; the server
- * switches over in the M2.5 server PR.)
  */
 export const RoamingPairMachineResponse = Schema.Struct({
   attach: RoamingAttachGrant,
@@ -484,11 +482,6 @@ export const RoamingPairMachineResponse = Schema.Struct({
   mirrorUnavailableReason: Schema.NullOr(RoamingMirrorUnavailableReason),
 });
 export type RoamingPairMachineResponse = typeof RoamingPairMachineResponse.Type;
-
-export const RoamingAddPeerResponse = Schema.Struct({
-  peer: RoamingPeer,
-});
-export type RoamingAddPeerResponse = typeof RoamingAddPeerResponse.Type;
 
 /** Local (user-session) RPC: enroll a local project into roaming. */
 export const RoamingEnrollProjectRequest = Schema.Struct({
