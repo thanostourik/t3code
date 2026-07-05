@@ -127,6 +127,7 @@ import {
   useEnvironments,
   usePrimaryEnvironment,
 } from "~/state/environments";
+import { MachineSyncSection } from "./MachineSyncSettings";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
@@ -3295,6 +3296,8 @@ export function ConnectionsSettings() {
           <CloudLinkRow canManageRelay={canManageRelay} />
         </SettingsSection>
       )}
+
+      <MachineSyncSection />
 
       <SettingsSection
         title="Remote environments"
