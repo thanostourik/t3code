@@ -1,0 +1,127 @@
+/**
+ * Raw HTTP calls to the primary server's roaming routes. These routes live
+ * outside `EnvironmentHttpApi` on purpose (fork discipline — see the roaming
+ * plan), so they can't ride `PrimaryEnvironmentHttpClient`; this module
+ * mirrors the auth behavior of `httpLayer.ts` for plain fetch: same-origin
+ * browser sends the session cookie, desktop sends the bearer token.
+ */
+import {
+  ROAMING_CONFLICT_GET_PATH,
+  ROAMING_CONFLICT_RESOLVE_PATH,
+  ROAMING_MATERIALIZE_PATH,
+  ROAMING_PEERS_PATH,
+  RoamingAddPeerRequest,
+  RoamingAddPeerResponse,
+  RoamingConflictGetRequest,
+  RoamingConflictGetResponse,
+  RoamingConflictResolveRequest,
+  RoamingConflictResolveResponse,
+  RoamingMaterializeRequest,
+  RoamingMaterializeResponse,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
+import { readDesktopPrimaryBearerToken } from "./desktopAuth";
+import { resolvePrimaryEnvironmentHttpUrl } from "./target";
+
+export class PrimaryRoamingRequestError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly status: number | null,
+    detail: string,
+  ) {
+    super(`${operation} failed${status === null ? "" : ` (${status})`}: ${detail}`);
+    this.name = "PrimaryRoamingRequestError";
+  }
+}
+
+async function postRoaming<
+  Req extends Schema.Top & { readonly EncodingServices: never },
+  Res extends Schema.Top & { readonly DecodingServices: never },
+>(input: {
+  operation: string;
+  path: string;
+  requestSchema: Req;
+  responseSchema: Res;
+  body: Req["Type"];
+}): Promise<Res["Type"]> {
+  const bearerToken = await readDesktopPrimaryBearerToken();
+  const encoded = await Effect.runPromise(
+    Schema.encodeUnknownEffect(input.requestSchema)(input.body),
+  );
+  let response: Response;
+  try {
+    response = await fetch(resolvePrimaryEnvironmentHttpUrl(input.path), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(bearerToken ? { authorization: `Bearer ${bearerToken}` } : {}),
+      },
+      credentials: bearerToken ? "omit" : "include",
+      body: JSON.stringify(encoded),
+    });
+  } catch (error) {
+    throw new PrimaryRoamingRequestError(
+      input.operation,
+      null,
+      error instanceof Error ? error.message : "network error",
+    );
+  }
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new PrimaryRoamingRequestError(
+      input.operation,
+      response.status,
+      detail || response.statusText,
+    );
+  }
+  const json: unknown = await response.json();
+  return Effect.runPromise(Schema.decodeUnknownEffect(input.responseSchema)(json));
+}
+
+export function addRoamingPeer(body: RoamingAddPeerRequest): Promise<RoamingAddPeerResponse> {
+  return postRoaming({
+    operation: "roaming.add-peer",
+    path: ROAMING_PEERS_PATH,
+    requestSchema: RoamingAddPeerRequest,
+    responseSchema: RoamingAddPeerResponse,
+    body,
+  });
+}
+
+export function materializeRoamingProject(
+  body: RoamingMaterializeRequest,
+): Promise<RoamingMaterializeResponse> {
+  return postRoaming({
+    operation: "roaming.materialize",
+    path: ROAMING_MATERIALIZE_PATH,
+    requestSchema: RoamingMaterializeRequest,
+    responseSchema: RoamingMaterializeResponse,
+    body,
+  });
+}
+
+export function getRoamingConflict(
+  body: RoamingConflictGetRequest,
+): Promise<RoamingConflictGetResponse> {
+  return postRoaming({
+    operation: "roaming.conflict-get",
+    path: ROAMING_CONFLICT_GET_PATH,
+    requestSchema: RoamingConflictGetRequest,
+    responseSchema: RoamingConflictGetResponse,
+    body,
+  });
+}
+
+export function resolveRoamingConflict(
+  body: RoamingConflictResolveRequest,
+): Promise<RoamingConflictResolveResponse> {
+  return postRoaming({
+    operation: "roaming.conflict-resolve",
+    path: ROAMING_CONFLICT_RESOLVE_PATH,
+    requestSchema: RoamingConflictResolveRequest,
+    responseSchema: RoamingConflictResolveResponse,
+    body,
+  });
+}

@@ -144,6 +144,7 @@ import {
   useRelayEnvironmentDiscovery,
 } from "~/state/environments";
 import { relayEnvironmentDiscovery } from "~/state/relay";
+import { MachineSyncSection } from "./MachineSyncSettings";
 import { useAtomCommand } from "../../state/use-atom-command";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
@@ -3605,6 +3606,8 @@ export function ConnectionsSettings() {
           <CloudLinkRow canManageRelay={canManageRelay} />
         </SettingsSection>
       )}
+
+      <MachineSyncSection />
 
       <SettingsSection
         title="Remote environments"
