@@ -15,7 +15,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
-import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
+import { isForkDesktopVersion, isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 
 export interface MakeDesktopEnvironmentInput {
   readonly dirname: string;
@@ -95,6 +95,9 @@ function resolveDesktopAppStageLabel(input: {
   if (input.isDevelopment) {
     return "Dev";
   }
+  if (isForkDesktopVersion(input.appVersion)) {
+    return "Fork";
+  }
 
   return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Alpha";
 }
@@ -157,11 +160,6 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const baseDir = resolveDesktopBaseDir({
-    homeDirectory,
-    joinPath: path.join,
-    t3Home: config.t3Home,
-  });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const serverRoot =
@@ -172,6 +170,13 @@ const make = Effect.fn("desktop.environment.make")(function* (
     isDevelopment,
     appVersion: input.appVersion,
   });
+  const isFork = branding.stageLabel === "Fork";
+  const baseDir = resolveDesktopBaseDir({
+    homeDirectory,
+    joinPath: path.join,
+    t3Home: config.t3Home,
+    isFork,
+  });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({
     baseDir,
@@ -179,8 +184,12 @@ const make = Effect.fn("desktop.environment.make")(function* (
     joinPath: path.join,
     t3Home: config.t3Home,
   });
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
+  const userDataDirName = isDevelopment ? "t3code-dev" : isFork ? "t3code-fork" : "t3code";
+  const legacyUserDataDirName = isDevelopment
+    ? "T3 Code (Dev)"
+    : isFork
+      ? "T3 Code (Fork)"
+      : "T3 Code (Alpha)";
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",

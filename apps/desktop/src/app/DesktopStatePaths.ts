@@ -14,9 +14,12 @@ export function resolveDesktopBaseDir(input: {
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
   readonly t3Home: Option.Option<string>;
+  // Fork builds default to ~/.t3-fork: sharing ~/.t3 with a stable
+  // install would run the fork's DB migrations on the stable database.
+  readonly isFork?: boolean;
 }): string {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
-    input.joinPath(input.homeDirectory, ".t3"),
+    input.joinPath(input.homeDirectory, input.isFork ? ".t3-fork" : ".t3"),
   );
 }
 
