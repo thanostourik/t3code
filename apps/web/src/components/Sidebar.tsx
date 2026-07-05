@@ -119,6 +119,7 @@ import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
+import { environmentShellStatusesAtom } from "../state/shell";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -3350,9 +3351,28 @@ export default function Sidebar() {
       ),
     [environments],
   );
+  // A disconnected remote keeps its cached shell snapshot, so its projects
+  // would linger here as live-looking rows AND suppress the mirrored
+  // offline rows (the canonicalKey dedup) — the "visible but dead" state
+  // the pairing flow must never produce. Filter to live environments at
+  // this single point: everything downstream (rendered rows and the
+  // offline-row dedup) derives from it. Synchronizing counts as live so
+  // reconnects don't flap rows to offline; the primary and desktop-local
+  // sandboxes are never dead peers.
+  const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
+  const liveProjects = useMemo(
+    () =>
+      projects.filter((project) => {
+        if (project.environmentId === primaryEnvironmentId) return true;
+        if (desktopLocalEnvironmentIds.has(project.environmentId)) return true;
+        const status = environmentShellStatuses.get(project.environmentId);
+        return status === "live" || status === "synchronizing";
+      }),
+    [projects, primaryEnvironmentId, desktopLocalEnvironmentIds, environmentShellStatuses],
+  );
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
-      items: projects,
+      items: liveProjects,
       preferredIds: projectOrder,
       getId: getProjectOrderKey,
       getPreferenceIds: (project) => [
@@ -3360,7 +3380,7 @@ export default function Sidebar() {
         legacyProjectCwdPreferenceKey(project.workspaceRoot),
       ],
     });
-  }, [projectOrder, projects]);
+  }, [projectOrder, liveProjects]);
 
   // Build a mapping from physical project key → logical project key for
   // cross-environment grouping.  Projects that share a repositoryIdentity
