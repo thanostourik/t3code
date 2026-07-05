@@ -17,6 +17,12 @@
 > peer LAN/Tailscale endpoint discovery does not exist server-side, so M1
 > records peer base URLs at enrollment; mirror RPCs go on raw authenticated
 > HTTP routes with schemas in `roaming.ts` (not `environmentHttp.ts`).
+> 2026-07-05 — M2 analysis pass done (see [M2 analysis](#m2-analysis-2026-07-05)):
+> assumptions hold with deltas — vault bundles are JSON (no tar dep); capture
+> is top-level + gitignored-only; secrets consent = per-machine
+> `roamingSecretsSync` setting; materialize = synchronous HTTP + shell-stream
+> progress; auto-enroll reactor replaces the missing pairing-completed event;
+> M1 already shipped add-peer RPC and conflict storage.
 > 2026-07-05 — Product model locked (user decision; supersedes the step-1 UI
 > as merged in M1): **one project list, no user-visible "roaming" concept or
 > enrollment step**. Pairing gains a JetBrains-style sync-options dialog
@@ -646,6 +652,102 @@ Decisions/deviations recorded during implementation and review:
   read-modify-write behind a semaphore (fiber interleaving could defeat
   equal-version conflict detection) and verifies ingested `contentHash`
   against the payload before applying.
+
+## M2 analysis (2026-07-05)
+
+Assumption check against current code before M2 implementation. Confirmed as
+planned: file-watch + debounce pattern (`startWatcher` /
+`Stream.debounce(100ms)` in `apps/server/src/serverSettings.ts:499`),
+`makeDrainableWorker`/`makeKeyedCoalescingWorker` in `packages/shared` (note:
+the keyed worker's active precedent is `terminal/Manager.ts`, not the
+reactors), boot wiring via `OrchestrationReactor.ts` → `serverRuntimeStartup`;
+`SourceControlRepositoryService.cloneRepository` + contracts schemas
+(`sourceControl.ts:67`), `GitVcsDriver.listRemotes`,
+`RepositoryIdentityResolver`; `addProjectBaseDirectory` in the settings
+schema; `project.create` command path with server-side dispatch via
+`OrchestrationEngineService.dispatch` (startup bootstrap is the precedent);
+migrations at 034 (M2's `roaming_materializations` becomes 035); the
+`roaming` flag + PeerMirror internal-gating pattern for new reactors to copy.
+M1 left more in place than the plan assumed: `RoamingAddPeerRequest` /
+`POST /api/roaming/peers` already exists as the local add-peer RPC (the
+pairing dialog drives it), conflict *detection and storage* already exist
+(`roaming_blob_conflicts` table + `listConflicts`; M2 adds only surfacing and
+pick-a-side resolution), and the registry's `repository: RepositoryIdentity`
+carries `locator.remoteUrl` — the clone URL for materialize needs no new
+field.
+
+**Deviations recorded (design deltas applied to steps 2–3 and the product
+model):**
+
+- **Vault bundle format is JSON, not tar.** No tar/zip utility or dependency
+  exists server-side, and blob payloads are TEXT. Bundle payload =
+  `{ schemaVersion, capturedAt, files: [{ path, mode, sha256, contentBase64 }] }`.
+  Per-file hashes directly serve the planned per-file conflict comparison.
+  The size cap applies to total decoded bytes (default 2 MiB); an oversize
+  capture is skipped with a surfaced warning, never silently shipped.
+- **Registry vault field reshaped.** M1's placeholder `vaultManifest:
+  string[]` becomes `vaultOverrides: { include: string[], exclude: string[] }`;
+  effective set = shared default pattern list (contract constant
+  `DEFAULT_VAULT_PATTERNS`) + include − exclude. Only harness data exists, so
+  no blob migration (old payloads decode via defaults).
+- **Vault capture scope: top-level + untracked-only.** There is no
+  per-project watcher infra and no recursive-glob machinery worth building:
+  default patterns match files at the project root's top level only; nested
+  secrets are added via explicit per-project include paths (relative paths,
+  not globs). A file is captured only if it is pattern-matched **and
+  untracked** — committed lookalikes (`.env.example`) are excluded via
+  `git ls-files` on the candidates. (Reviewer catch: the plausible-looking
+  reuse of `GitVcsDriver.filterIgnoredPaths` is wrong — it runs
+  `check-ignore --no-index`, which reports committed files matching a
+  `.gitignore` pattern as ignored. Tracked-status, not ignore-status, is
+  the invariant: tracked files travel via git.) Watch = `FileSystem.watch`
+  on the project root dir (+ parents of explicit includes), debounced, plus
+  a startup rescan.
+- **Secrets consent is a per-machine setting.** `roamingSecretsSync` boolean
+  (default `false`) in `ServerSettings`, set by the pairing sync-options
+  dialog; VaultSync captures only while it (and `roaming`) are on. Not
+  mirrored — each machine consents to shipping its own files. Materialize
+  with no local vault blob (or an empty one) completes with an explicit
+  "no secret files synced" notice.
+- **Materialize transport: synchronous HTTP + shell-stream progress.**
+  `cloneRepository` has no progress callback, and step-level progress is all
+  that's honest anyway. `POST /api/roaming/materialize` runs (or resumes) the
+  step machine and returns the final record; live progress is a *new* event
+  source (the step machine's own PubSub, not the blob-change subscription)
+  merged at the same `subscribeShell` merge point M1 uses, as
+  `roaming-materialization-updated` events, with a
+  `roamingMaterializations` snapshot field so clients connecting mid-run
+  see state. No new streaming RPC. Steps persisted per D3-style record in
+  `roaming_materializations` (035): resolve-path, clone, apply-vault,
+  restore-wip (recorded-as-skipped until M4), register-project, bootstrap
+  (skipped until M3). The prompt-before-overwrite guard rail cannot fire
+  inside a synchronous RPC: materialize's apply-vault step never overwrites
+  an existing differing file — it skips it and adds a notice; interactive
+  overwrite lives on the on-demand "pull vault files" path.
+- **Auto-enroll hook (no pairing-completed event exists).** A small
+  `RoamingAutoEnroll` reactor enrolls every unenrolled local project when
+  `roaming` is on and ≥1 peer exists — triggered on startup, on peer-added
+  (both directions: local `addPeer` success and inbound
+  `ensurePeer` insert from the machine-credential route — each machine
+  enrolls *its own* projects; `ensurePeer` is a bare INSERT today, so the
+  peer-added signal is a new hook, not free), and on `project.created`
+  domain events via
+  `OrchestrationEngine.streamDomainEvents`. Startup reconciliation makes it
+  self-healing; `project.roaming.enroll` stays the idempotent unit.
+- **Pairing dialog placement.** Machine pairing UI = ConnectionsSettings
+  (`AuthorizedClientsHeaderAction` mints pairing links; a new "Pair machine
+  for sync" flow drives `POST /api/roaming/peers`). The sync-options dialog
+  is that flow's confirm step: Projects row always-on (checked, disabled),
+  Secret files row pre-checked (sets `roamingSecretsSync`). WIP and
+  Conversations rows are *not rendered* until M4/M6. Confirming the first
+  peer also flips the `roaming` setting on — the dialog is how the flag
+  turns on outside the harness.
+- **Conflict surfacing.** `RoamingProjectShell` gains a `conflicts` array
+  (kind + detectedAt, default empty); detail + resolution go over new routes
+  `POST /api/roaming/conflicts/get` / `.../resolve` (POST bodies, mirror-RPC
+  style — `wip` keys contain `/`). Resolution = pick a side, written as a
+  new higher-version local blob (the store already clears the conflict row
+  on supersede); never a merge.
 
 ## Execution process
 
