@@ -98,6 +98,40 @@ describe("applyShellStreamEvent", () => {
   });
 
 
+  it("applies materialization updates by workspaceProjectId despite sequence 0", () => {
+    const materialization = {
+      workspaceProjectId: WorkspaceProjectId.make("wp-1"),
+      status: "running" as const,
+      steps: [{ step: "clone" as const, status: "running" as const }],
+      notices: [],
+      targetPath: null,
+      localProjectId: null,
+      error: null,
+      startedAt: "2026-04-01T00:00:00.000Z",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+    };
+    const withHighSequence: OrchestrationShellSnapshot = {
+      ...baseSnapshot,
+      snapshotSequence: 10,
+    };
+
+    const upserted = applyShellStreamEvent(withHighSequence, {
+      kind: "roaming-materialization-updated",
+      sequence: 0,
+      materialization,
+    });
+    expect(upserted.roamingMaterializations).toEqual([materialization]);
+    expect(upserted.snapshotSequence).toBe(10);
+
+    const completed = applyShellStreamEvent(upserted, {
+      kind: "roaming-materialization-updated",
+      sequence: 0,
+      materialization: { ...materialization, status: "completed" as const },
+    });
+    expect(completed.roamingMaterializations).toHaveLength(1);
+    expect(completed.roamingMaterializations[0]?.status).toBe("completed");
+  });
+
   it("ignores stale project upserts without mutating the snapshot", () => {
     const snapshotWithProject: OrchestrationShellSnapshot = {
       ...baseSnapshot,

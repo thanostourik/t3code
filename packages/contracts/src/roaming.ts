@@ -113,6 +113,11 @@ export type RoamingBlobConflict = typeof RoamingBlobConflict.Type;
 // drops files the defaults matched. Effective set = defaults + include −
 // exclude.
 
+/**
+ * Matching alone never captures: the server additionally requires the file
+ * to be untracked (committed lookalikes like `.env.example` match `.env.*`
+ * but travel via git and stay out).
+ */
 export const DEFAULT_VAULT_PATTERNS = [
   ".env",
   ".env.*",
@@ -120,6 +125,8 @@ export const DEFAULT_VAULT_PATTERNS = [
   "*.pem",
   "*.key",
   "*.crt",
+  "*.p12",
+  "*.pfx",
 ] as const;
 
 /**
@@ -256,7 +263,7 @@ export const RoamingMaterializationRecord = Schema.Struct({
       /** Human-readable outcome ("cloned to ~/src/app", failure text). */
       detail: Schema.optional(Schema.String),
     }),
-  ),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   /**
    * Honest caveats that are not failures — e.g. "no secret files synced"
    * when materializing a project whose vault has no local blob.
@@ -275,7 +282,12 @@ export type RoamingMaterializationRecord = typeof RoamingMaterializationRecord.T
 
 export const RoamingMaterializeRequest = Schema.Struct({
   workspaceProjectId: WorkspaceProjectId,
-  /** Overrides perMachineRoots / default-root resolution when set. */
+  /**
+   * Overrides perMachineRoots / default-root resolution when set. Ignored
+   * when a completed materialization already exists for the project — the
+   * RPC then returns that record unchanged (re-materialize to a new path is
+   * not an M2 flow).
+   */
   targetPath: Schema.optional(TrimmedNonEmptyString),
 });
 export type RoamingMaterializeRequest = typeof RoamingMaterializeRequest.Type;
