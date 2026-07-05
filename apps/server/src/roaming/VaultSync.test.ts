@@ -170,6 +170,64 @@ testLayer("VaultSync", (it) => {
       }),
   );
 
+  it.effect("never captures a matched symlink's target", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-symlink");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-symlink-" });
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-outside-" });
+      yield* initGit(workspaceRoot);
+      yield* fs.writeFileString(pathService.join(outside, "target"), "OUTSIDE=1\n");
+      yield* fs.symlink(pathService.join(outside, "target"), pathService.join(workspaceRoot, ".env"));
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".env.local"), "SECRET=real\n");
+
+      const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(result.status, "written");
+      const bundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(
+        bundle.files.map((file) => file.path),
+        [".env.local"],
+      );
+    }),
+  );
+
+  it.effect("refuses to apply through a symlinked directory or onto a symlink", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-apply-link-" });
+      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-apply-out-" });
+      yield* fs.symlink(outside, pathService.join(workspaceRoot, "link"));
+      const entry = (path: string) => ({
+        schemaVersion: 1 as const,
+        capturedAt: "2026-07-05T00:00:00.000Z",
+        files: [
+          {
+            path,
+            sha256: NodeCrypto.createHash("sha256").update("x\n").digest("hex"),
+            contentBase64: Buffer.from("x\n").toString("base64"),
+          },
+        ],
+      });
+
+      const throughDir = yield* applyVaultBundle({
+        workspaceRoot,
+        overwrite: true,
+        bundle: entry("link/escape"),
+      }).pipe(Effect.result);
+      assert.isTrue(Result.isFailure(throughDir));
+
+      const ontoLink = yield* applyVaultBundle({
+        workspaceRoot,
+        overwrite: true,
+        bundle: entry("link"),
+      }).pipe(Effect.result);
+      assert.isTrue(Result.isFailure(ontoLink));
+      assert.equal(yield* fs.exists(pathService.join(outside, "escape")), false);
+    }),
+  );
+
   it.effect("skips oversize captures", () =>
     Effect.gen(function* () {
       const workspaceProjectId = WorkspaceProjectId.make("wp-vault-oversize");

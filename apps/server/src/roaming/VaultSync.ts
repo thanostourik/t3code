@@ -164,10 +164,20 @@ const readTopLevelPatternCandidates = (workspaceRoot: string) =>
       .filter((path): path is string => path !== null);
   });
 
+type TrackedLookup =
+  | { readonly _tag: "tracked"; readonly paths: ReadonlySet<string> }
+  | { readonly _tag: "unavailable" };
+
+/**
+ * The untracked-only invariant must fail closed: on a genuine git failure we
+ * cannot tell tracked from untracked, so the caller skips the capture rather
+ * than shipping committed lookalikes. A workspace that simply isn't a git
+ * repository has no tracked files, so everything is a candidate there.
+ */
 const listTrackedCandidates = (workspaceRoot: string, candidates: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     if (candidates.length === 0) {
-      return new Set<string>();
+      return { _tag: "tracked", paths: new Set<string>() } as TrackedLookup;
     }
     const git = yield* GitVcsDriver;
     const result = yield* git
@@ -185,10 +195,24 @@ const listTrackedCandidates = (workspaceRoot: string, candidates: ReadonlyArray<
           }).pipe(Effect.as(null)),
         ),
       );
-    if (result === null || result.exitCode !== 0) {
-      return new Set<string>();
+    if (result === null) {
+      return { _tag: "unavailable" } as TrackedLookup;
     }
-    return new Set(result.stdout.split("\0").filter((path) => path.length > 0));
+    if (result.exitCode !== 0) {
+      if (result.stderr.includes("not a git repository")) {
+        return { _tag: "tracked", paths: new Set<string>() } as TrackedLookup;
+      }
+      yield* Effect.logWarning("roaming vault: git ls-files exited nonzero, skipping capture", {
+        workspaceRoot,
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+      });
+      return { _tag: "unavailable" } as TrackedLookup;
+    }
+    return {
+      _tag: "tracked",
+      paths: new Set(result.stdout.split("\0").filter((path) => path.length > 0)),
+    } as TrackedLookup;
   });
 
 const buildCandidatePaths = (workspaceRoot: string, workspaceProjectId: WorkspaceProjectId) =>
@@ -221,23 +245,37 @@ const captureBundle = (target: VaultTarget) =>
     const pathService = yield* Path.Path;
     const candidates = yield* buildCandidatePaths(target.workspaceRoot, target.workspaceProjectId);
     const tracked = yield* listTrackedCandidates(target.workspaceRoot, candidates);
+    if (tracked._tag === "unavailable") {
+      return { _tag: "skipped" as const };
+    }
     const files: RoamingVaultFileEntry[] = [];
     let totalBytes = 0;
 
     for (const relativePath of candidates) {
-      if (tracked.has(relativePath)) {
+      if (tracked.paths.has(relativePath)) {
         continue;
       }
       const absolutePath = pathService.join(target.workspaceRoot, relativePath);
+      // stat follows symlinks; a matched symlink (.env -> elsewhere) must not
+      // have its target read and shipped. readLink succeeds only on symlinks.
+      const isSymlink = yield* fs.readLink(absolutePath).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      );
+      if (isSymlink) {
+        continue;
+      }
       const stat = yield* fs.stat(absolutePath).pipe(Effect.orElseSucceed(() => null));
       if (stat?.type !== "File") {
         continue;
       }
-      const content = yield* fs.readFile(absolutePath);
-      totalBytes += content.byteLength;
+      // Enforce the cap from stat before reading: an accidentally matched
+      // huge file must be skipped, not loaded into memory first.
+      totalBytes += Number(stat.size);
       if (totalBytes > ROAMING_VAULT_BUNDLE_MAX_BYTES) {
         return { _tag: "oversize" as const, totalBytes };
       }
+      const content = yield* fs.readFile(absolutePath);
       files.push({
         path: relativePath,
         ...(statMode(stat) !== undefined ? { mode: statMode(stat) } : {}),
@@ -281,7 +319,7 @@ export const captureVaultForProject = Effect.fn("VaultSync.captureVaultForProjec
       }).pipe(Effect.as(null)),
     ),
   );
-  if (captured === null) {
+  if (captured === null || captured._tag === "skipped") {
     return { status: "unchanged" };
   }
   if (captured._tag === "oversize") {
@@ -332,6 +370,9 @@ export const applyVaultBundle = Effect.fn("VaultSync.applyVaultBundle")(function
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const workspaceRoot = pathService.resolve(input.workspaceRoot);
+  const realWorkspaceRoot = yield* fs
+    .realPath(workspaceRoot)
+    .pipe(Effect.orElseSucceed(() => workspaceRoot));
   const applied: string[] = [];
   const skipped: string[] = [];
 
@@ -344,6 +385,17 @@ export const applyVaultBundle = Effect.fn("VaultSync.applyVaultBundle")(function
       relativeToRoot.startsWith(`..${pathService.sep}`) ||
       pathService.isAbsolute(relativeToRoot)
     ) {
+      return yield* new VaultPathEscapeError({ path: entry.path });
+    }
+    // The lexical check above cannot see symlinks: a symlinked directory
+    // inside the workspace (or a symlink at the target path itself) would
+    // redirect the write outside the root. Resolve the real parent and
+    // refuse both.
+    const isSymlinkTarget = yield* fs.readLink(absolutePath).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+    if (isSymlinkTarget) {
       return yield* new VaultPathEscapeError({ path: entry.path });
     }
 
@@ -365,7 +417,20 @@ export const applyVaultBundle = Effect.fn("VaultSync.applyVaultBundle")(function
     }
 
     yield* fs.makeDirectory(pathService.dirname(absolutePath), { recursive: true });
-    yield* fs.writeFile(absolutePath, nextContent);
+    const realParent = yield* fs
+      .realPath(pathService.dirname(absolutePath))
+      .pipe(Effect.orElseSucceed(() => null));
+    if (
+      realParent === null ||
+      (realParent !== realWorkspaceRoot &&
+        !realParent.startsWith(`${realWorkspaceRoot}${pathService.sep}`))
+    ) {
+      return yield* new VaultPathEscapeError({ path: entry.path });
+    }
+    // Secret files must never exist at the umask default, even briefly.
+    yield* fs.writeFile(absolutePath, nextContent, {
+      ...(entry.mode !== undefined ? { mode: entry.mode } : {}),
+    });
     if (entry.mode !== undefined) {
       yield* fs.chmod(absolutePath, entry.mode);
     }
@@ -492,11 +557,20 @@ const make = Effect.gen(function* () {
 
   const installWatcher = (target: VaultTarget) =>
     Effect.gen(function* () {
-      yield* closeWatcher(target.workspaceProjectId);
+      // Swap atomically: rescanProject (registry changes) and rescanAll
+      // (settings toggles) run on independent fibers; a close-then-set pair
+      // would let a concurrent install evict a scope from the map without
+      // closing it, leaking its watch fibers forever.
       const scope = yield* Scope.make("sequential");
-      yield* Ref.update(watcherScopes, (scopes) =>
-        new Map(scopes).set(target.workspaceProjectId, scope),
-      );
+      const previous = yield* Ref.modify(watcherScopes, (scopes) => {
+        const old = scopes.get(target.workspaceProjectId);
+        const next = new Map(scopes);
+        next.set(target.workspaceProjectId, scope);
+        return [old, next] as const;
+      });
+      if (previous !== undefined) {
+        yield* Scope.close(previous, Exit.void);
+      }
       const directories = yield* watchDirectoriesFor(target);
       for (const directory of directories) {
         const events = fs.watch(directory).pipe(Stream.debounce(WATCH_DEBOUNCE));
