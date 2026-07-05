@@ -60,6 +60,7 @@ import { layer as RoamingBlobStoreLayer } from "./roaming/RoamingBlobStore.ts";
 import { layer as RoamingPeersLayer } from "./roaming/RoamingPeers.ts";
 import { layer as PeerMirrorLayer } from "./roaming/PeerMirror.ts";
 import { layer as RoamingServiceLayer } from "./roaming/RoamingService.ts";
+import { layer as VaultSyncLayer } from "./roaming/VaultSync.ts";
 import { roamingRoutesLayer } from "./roaming/http.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -216,6 +217,7 @@ const PlatformServicesLive = Layer.unwrap(
 
 const RoamingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(RoamingServiceLayer),
+  Layer.provideMerge(VaultSyncLayer),
   Layer.provideMerge(PeerMirrorLayer),
   Layer.provideMerge(RoamingPeersLayer),
   Layer.provideMerge(RoamingBlobStoreLayer),

@@ -10,7 +10,7 @@
  * conflict, never merged. Payload strings are byte-authoritative — they are
  * stored and hashed verbatim, never re-serialized.
  */
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import {
   RoamingBlobConflict,
@@ -26,7 +26,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
-import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -102,12 +101,13 @@ const BlobRowSchema = Schema.Struct({
 
 const decodeRecord = Schema.decodeUnknownEffect(RoamingBlobRecord);
 const decodeManifestEntries = Schema.decodeUnknownEffect(Schema.Array(RoamingBlobManifestEntry));
+const decodeConflict = Schema.decodeUnknownEffect(RoamingBlobConflict);
 const RemoteRecordFromJson = Schema.fromJsonString(RoamingBlobRecord);
 const decodeConflictRemote = Schema.decodeUnknownEffect(RemoteRecordFromJson);
 const encodeRemoteRecordJson = Schema.encodeEffect(RemoteRecordFromJson);
 
 const contentHashOf = (payload: string): string =>
-  createHash("sha256").update(payload, "utf8").digest("hex");
+  NodeCrypto.createHash("sha256").update(payload, "utf8").digest("hex");
 
 const sqlError = (operation: string) => (cause: unknown) =>
   new PersistenceSqlError({ operation, cause });
@@ -171,16 +171,16 @@ const make = Effect.gen(function* () {
         payload = excluded.payload
     `.pipe(Effect.mapError(sqlError(operation)));
 
-  const get: RoamingBlobStore["Service"]["get"] = Effect.fn("RoamingBlobStore.get")(function* (
-    ref,
-  ) {
-    const rows = yield* selectRow(ref);
-    const row = rows[0];
-    if (row === undefined) {
-      return null;
-    }
-    return yield* decodeRecord(row).pipe(Effect.mapError(decodeError("roaming.blob.get")));
-  });
+  const get: RoamingBlobStore["Service"]["get"] = Effect.fn("RoamingBlobStore.get")(
+    function* (ref) {
+      const rows = yield* selectRow(ref);
+      const row = rows[0];
+      if (row === undefined) {
+        return null;
+      }
+      return yield* decodeRecord(row).pipe(Effect.mapError(decodeError("roaming.blob.get")));
+    },
+  );
 
   const writeLocal: RoamingBlobStore["Service"]["writeLocal"] = Effect.fn(
     "RoamingBlobStore.writeLocal",
@@ -259,6 +259,10 @@ const make = Effect.gen(function* () {
             return "applied" as const;
           }
           yield* recordConflict(existing, record);
+          const localRecord = yield* decodeRecord(existing).pipe(
+            Effect.mapError(decodeError("roaming.blob.apply-remote")),
+          );
+          yield* PubSub.publish(changesPubSub, localRecord);
           return "conflict" as const;
         }
         yield* upsertRow(record, "roaming.blob.apply-remote");
@@ -329,7 +333,7 @@ const make = Effect.gen(function* () {
         Effect.mapError(decodeError("roaming.blob.list-conflicts")),
       );
       conflicts.push(
-        yield* Schema.decodeUnknownEffect(RoamingBlobConflict)({
+        yield* decodeConflict({
           kind: row.kind,
           key: row.key,
           workspaceProjectId: row.workspaceProjectId,
