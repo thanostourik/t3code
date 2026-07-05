@@ -927,8 +927,18 @@ either side of the unified handshake.
   standard-scoped pairing credential on the peer, returning the resulting
   **standard** attach bearer in `RoamingAddPeerResponse`. The client registers
   the attach from that bearer (the registration half of `connectPairing`,
-  factored out). The client's persistent session stays standard-scoped; the
-  admin bearer is used only inside the handshake and never stored.
+  factored out). The client's persistent session stays standard-scoped.
+  Handshake-credential hygiene (from design review): the exchange requests
+  exactly the scopes the handshake needs (standard + `access:write` — the
+  delegation cap forces standard to be present so the attach code can be
+  minted), never the code's full grant; the handshake session is revoked on
+  the peer best-effort once the mints complete (otherwise every pairing
+  strands a live ~30-day privileged session in the peer's SessionStore); the
+  bearer-bearing `addPeer` response carries `cache-control: no-store` like
+  every auth credential response and the token never reaches logs; and since
+  `addPeer` tries `baseUrls` in order, the response's `attach` block names
+  the base URL that actually worked so the client never registers an
+  unreachable one.
 - **The code carries the capability; the preset carries the UX.** The
   handshake's peer-side mints require `access:write`, so the pairing code for
   your own machine must be admin-scoped. The existing create-pairing-URL
@@ -941,26 +951,54 @@ either side of the unified handshake.
   skips the mirror half and returns that bearer for attach registration, with
   `mirror: null` + reason; the UI attaches normally and shows an honest
   notice. Remote conversations (canonical step 3) work in both outcomes;
-  only offline availability needs the admin-capable code.
-- **The machine-credential route becomes flag-independent and carries
-  consent.** Today all roaming routes 404 while the peer's `roaming` setting
-  is off — the desktop would need a settings ritual before pairing could
-  succeed (chicken-and-egg). The mint route is un-gated from the flag (still
-  `access:write`); a successful mint flips the peer's `roaming` setting on and
-  applies a new `syncOptions: { secretsSync?: boolean }` request field to the
-  peer's `roamingSecretsSync`. Consent story: the desktop user consented by
-  generating the admin-scoped code; the laptop user picked the sync options in
-  the one dialog; both machines belong to the same owner. The sync-options
-  choice propagates to BOTH machines' settings (each machine's setting remains
-  the mechanism; ordinary settings rows remain for changing your mind later).
+  only offline availability needs the admin-capable code. UX-cliff guard
+  (from review): which outcome you get hinges on a preset chosen on the
+  *other* machine at code-generation time, so the degradation notice must say
+  how to get the full pairing (regenerate the code with the
+  "Another machine of yours" preset), and that preset keeps a loud
+  administrative-access warning.
+- **The pairing routes become flag-independent; pairing IS how the flag turns
+  on — on both machines.** Today ALL roaming routes 404 while the `roaming`
+  setting is off, which dead-ends the unified flow twice: the peer's mint
+  route (desktop would need a settings ritual before pairing could succeed)
+  AND the laptop's own `POST /api/roaming/peers` (a fresh laptop defaults to
+  `roaming=false`, so the very call that starts the handshake would 404 —
+  design-review blocker). Both routes are un-gated from the flag (auth
+  unchanged: `access:write`). A successful mint flips the peer's `roaming`
+  on; a successful `addPeer` flips the local one on and applies the dialog's
+  sync options locally. Consent story: the desktop user consented by
+  generating the admin-scoped code; the laptop user confirmed the one dialog.
+- **Sync-options propagation amends M2's "not mirrored" consent decision —
+  deliberately and narrowly.** M2 recorded `roamingSecretsSync` as "not
+  mirrored — each machine consents to shipping its own files"; a unified
+  pairing that leaves the desktop's secrets capture off would regress
+  canonical step 4 (materialize with synced secrets must work out of the box)
+  into a desktop-side settings ritual. Amendment: the mint request gains
+  `syncOptions: { secretsSync?: boolean }`, and the peer applies it **only
+  when the same mint flips `roaming` off→on** (first pairing). A later
+  pairing never touches it, and an explicit prior choice is never overridden
+  remotely — the per-machine setting stays the mechanism and the ordinary
+  settings row stays the way to change your mind. (An `access:write` caller
+  could already reach files via a terminal, so this grants no new capability
+  class; what it changes is turning a manual capability into the standing
+  default flow, which is exactly what the canonical workflow's pre-checked
+  "Secret files" row asks for.)
 - **Live→offline is a real UI gap (reviewer-grade catch).** A disconnected
   bearer environment keeps its cached shell snapshot, so a dead peer's
   projects stay in `projectsAtom` as live-looking rows AND suppress the
   mirrored offline rows via the canonicalKey dedup — exactly the "visible but
-  dead" state the canonical workflow prohibits. Fix in the sidebar merge:
-  rows from a non-live remote environment stop counting as live; the mirrored
-  registry rows then surface as offline + Materialize. (The reverse dedup —
-  peer alive, registry row suppressed — already works.)
+  dead" state the canonical workflow prohibits. Fix in the sidebar merge,
+  with review-specified semantics: liveness = shell status `live` OR
+  `synchronizing` (reconnects pass through synchronizing — flapping rows to
+  offline on every blip is worse than a short stale window); the filter
+  applies only to non-primary, non-desktopLocal environments (the primary and
+  WSL-style local sandboxes are never "dead peers"); and the SAME filtered
+  project set must feed both the rendered rows and the
+  `selectOfflineRoamingProjects` dedup keyset — filtering only one of the two
+  would show a stale live row and its offline twin simultaneously. Accepted:
+  WS disconnect detection has latency, so a brief visible-but-dead window
+  exists before the flip; acknowledged, not fixable at this layer. (The
+  reverse dedup — peer alive, registry row suppressed — already works.)
 - **Peer-introduction seam lands client-side.** `PeerIntroduction =
   { baseUrls, pairingCredential, label? }` with a `pairMachine(introduction,
   syncOptions)` operation in `packages/client-runtime` as the single consumer;
@@ -986,7 +1024,19 @@ either side of the unified handshake.
   `thread.create` dispatched over that attach lands in the peer's shell
   stream. A full LLM turn depends on provider keys being present and is run
   when available; the canonical-workflow UI walk (one list, live rows,
-  offline flip) is demonstrated on the real desktop build.
+  offline flip) is demonstrated on the real desktop build. This split stays
+  in the exit criteria explicitly — the harness half must never quietly
+  substitute for the UI walk.
+
+This design was independently reviewed before implementation (2026-07-05,
+opus-4.8): verdict "ship with changes"; the changes (local route un-gating,
+handshake scope-narrowing + session revoke, first-pairing-only consent
+propagation, credential-response hygiene, precise liveness semantics, UX-cliff
+copy) are folded into the bullets above. The review also settled the
+alternative two-exchange design (mint the code with `remainingUses: 2`)
+against: the uses counter exists only for the in-memory desktop-bootstrap
+grant, not DB-backed pairing links, and a 2-use admin code is strictly weaker
+under interception.
 
 ## Execution process
 
