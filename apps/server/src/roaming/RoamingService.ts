@@ -399,6 +399,13 @@ const make = Effect.gen(function* () {
       // no broader than what plain pairing would have produced.
       if (!exchange.scopes.includes(AuthAccessWriteScope)) {
         const peerEnvironmentId = yield* fetchPeerEnvironmentId(reachableBaseUrl);
+        // Re-pairing an ALREADY-mirrored machine with a standard code must
+        // not claim sync is unavailable — the existing credential keeps the
+        // mirror alive regardless of this handshake (field finding).
+        const existingPeer =
+          (yield* peers.list().pipe(Effect.orElseSucceed(() => []))).find(
+            (candidate) => candidate.environmentId === peerEnvironmentId,
+          ) ?? null;
         return {
           attach: {
             environmentId: peerEnvironmentId,
@@ -406,8 +413,8 @@ const make = Effect.gen(function* () {
             token: exchange.token,
             expiresAt: exchange.expiresAt,
           },
-          peer: null,
-          mirrorUnavailableReason: "credential-not-administrative",
+          peer: existingPeer,
+          mirrorUnavailableReason: existingPeer !== null ? null : "credential-not-administrative",
         } satisfies RoamingPairMachineResponse;
       }
 
