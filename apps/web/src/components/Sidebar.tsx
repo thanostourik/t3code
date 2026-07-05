@@ -1915,6 +1915,51 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, router, serverConfigs, setOpenMobile],
   );
 
+  // A live remote project can be materialized too — online is when the
+  // mirror is freshest (canonical workflow: "ANY of those projects can be
+  // materialized"). Offered when this machine's mirror has the registry
+  // entry and no local checkout exists yet.
+  const roamingEntries = useRoamingProjects();
+  const [materializeInFlight, setMaterializeInFlight] = useState(false);
+  const materializeCandidate = useMemo(() => {
+    if (project.environmentPresence !== "remote-only" || project.allRemoteMembersAreDesktopLocal) {
+      return null;
+    }
+    // Prefer the exact workspace identity the remote members carry; the
+    // repository key is only a fallback (several workspace projects can
+    // share one repository — worktrees, separate enrollments).
+    const workspaceIds = new Set(
+      project.memberProjects.flatMap((member) =>
+        member.workspaceProjectId != null ? [member.workspaceProjectId] : [],
+      ),
+    );
+    const repositoryKeys = new Set(
+      project.memberProjects.flatMap((member) =>
+        member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
+      ),
+    );
+    const available = roamingEntries.filter(
+      (entry) => entry.roamingProject.localProjectId === null,
+    );
+    return (
+      available.find((entry) => workspaceIds.has(entry.roamingProject.workspaceProjectId)) ??
+      available.find((entry) => repositoryKeys.has(entry.roamingProject.repository.canonicalKey)) ??
+      null
+    );
+  }, [project, roamingEntries]);
+  const handleMaterializeClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (materializeCandidate === null || materializeInFlight) return;
+      setMaterializeInFlight(true);
+      void materializeFromMirror(materializeCandidate.roamingProject).finally(() =>
+        setMaterializeInFlight(false),
+      );
+    },
+    [materializeCandidate, materializeInFlight],
+  );
+
   const handleCreateThreadClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -2291,6 +2336,32 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </TooltipPopup>
           </Tooltip>
         )}
+        {materializeCandidate !== null ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className="pointer-events-none absolute top-[calc(50%+1px)] right-7 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:hidden group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
+                  <button
+                    type="button"
+                    aria-label={`Materialize ${project.displayName} on this machine`}
+                    className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
+                    disabled={materializeInFlight}
+                    onClick={handleMaterializeClick}
+                  >
+                    {materializeInFlight ? (
+                      <LoaderIcon className="size-3.5 animate-spin" />
+                    ) : (
+                      <FolderPlusIcon className="size-3.5" />
+                    )}
+                  </button>
+                </div>
+              }
+            />
+            <TooltipPopup side="top">
+              Materialize: clone here with synced secret files, keep working offline
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         <Tooltip>
           <TooltipTrigger
             render={
@@ -2845,6 +2916,36 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
  * list as local/attached projects (no separate section — 2026-07-05 product
  * model), greyed, with an honest staleness label and a Materialize action.
  */
+async function materializeFromMirror(roamingProject: {
+  readonly title: string;
+  readonly workspaceProjectId: EnvironmentRoamingProject["roamingProject"]["workspaceProjectId"];
+}) {
+  try {
+    const { materialization: result } = await materializeRoamingProject({
+      workspaceProjectId: roamingProject.workspaceProjectId,
+    });
+    if (result.status === "failed") {
+      toastManager.add({
+        type: "error",
+        title: `Materialize failed: ${roamingProject.title}`,
+        description: result.error ?? "See the server log for details.",
+      });
+      return;
+    }
+    toastManager.add({
+      type: "success",
+      title: `${roamingProject.title} is ready`,
+      description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
+    });
+  } catch (error) {
+    toastManager.add({
+      type: "error",
+      title: `Materialize failed: ${roamingProject.title}`,
+      description: error instanceof Error ? error.message : "Request failed.",
+    });
+  }
+}
+
 function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
   const { environmentId, roamingProject } = props.entry;
   const materializations = useRoamingMaterializations();
@@ -2871,35 +2972,8 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
 
   const handleMaterialize = useCallback(() => {
     setRequestInFlight(true);
-    void (async () => {
-      try {
-        const { materialization: result } = await materializeRoamingProject({
-          workspaceProjectId: roamingProject.workspaceProjectId,
-        });
-        if (result.status === "failed") {
-          toastManager.add({
-            type: "error",
-            title: `Materialize failed: ${roamingProject.title}`,
-            description: result.error ?? "See the server log for details.",
-          });
-          return;
-        }
-        toastManager.add({
-          type: "success",
-          title: `${roamingProject.title} is ready`,
-          description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
-        });
-      } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: `Materialize failed: ${roamingProject.title}`,
-          description: error instanceof Error ? error.message : "Request failed.",
-        });
-      } finally {
-        setRequestInFlight(false);
-      }
-    })();
-  }, [roamingProject.title, roamingProject.workspaceProjectId]);
+    void materializeFromMirror(roamingProject).finally(() => setRequestInFlight(false));
+  }, [roamingProject]);
 
   return (
     <SidebarMenuItem key={`${environmentId}:${roamingProject.workspaceProjectId}`}>
