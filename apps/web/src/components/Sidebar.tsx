@@ -1923,17 +1923,26 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     if (project.environmentPresence !== "remote-only" || project.allRemoteMembersAreDesktopLocal) {
       return null;
     }
+    // Prefer the exact workspace identity the remote members carry; the
+    // repository key is only a fallback (several workspace projects can
+    // share one repository — worktrees, separate enrollments).
+    const workspaceIds = new Set(
+      project.memberProjects.flatMap((member) =>
+        member.workspaceProjectId != null ? [member.workspaceProjectId] : [],
+      ),
+    );
     const repositoryKeys = new Set(
       project.memberProjects.flatMap((member) =>
         member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
       ),
     );
+    const available = roamingEntries.filter(
+      (entry) => entry.roamingProject.localProjectId === null,
+    );
     return (
-      roamingEntries.find(
-        (entry) =>
-          entry.roamingProject.localProjectId === null &&
-          repositoryKeys.has(entry.roamingProject.repository.canonicalKey),
-      ) ?? null
+      available.find((entry) => workspaceIds.has(entry.roamingProject.workspaceProjectId)) ??
+      available.find((entry) => repositoryKeys.has(entry.roamingProject.repository.canonicalKey)) ??
+      null
     );
   }, [project, roamingEntries]);
   const handleMaterializeClick = useCallback(
