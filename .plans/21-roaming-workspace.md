@@ -17,6 +17,17 @@
 > peer LAN/Tailscale endpoint discovery does not exist server-side, so M1
 > records peer base URLs at enrollment; mirror RPCs go on raw authenticated
 > HTTP routes with schemas in `roaming.ts` (not `environmentHttp.ts`).
+> 2026-07-05 — Product model locked (user decision; supersedes the step-1 UI
+> as merged in M1): **one project list, no user-visible "roaming" concept or
+> enrollment step**. Pairing gains a JetBrains-style sync-options dialog
+> (Projects always on; Secret files pre-checked with default patterns; WIP
+> and Conversations rows arrive with M4/M6). Registry metadata syncs
+> automatically for ALL projects once machines are paired; per-project
+> configuration survives only as a rarely-used vault include/exclude
+> override. M1's separate sidebar section is superseded — replaced by the
+> merged list in M2. Guard rails: vault bundle size cap; prompt before
+> overwriting local files on apply; M7 must re-ask the secrets consent
+> before any cloud backend activates.
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
 > section at the end. Milestones run strictly in order (M0 → M7).
@@ -199,8 +210,11 @@ registry) as a *new* identity alongside the local `ProjectId`. Local projects
 link to it via a persisted field; nothing about local `ProjectId` semantics,
 shell snapshots, or thread routing changes (the codebase mapping flagged
 migrating `ProjectId` semantics as the riskiest possible move — don't). A
-project is "roaming" iff it has a `workspaceProjectId`; enrollment is explicit
-per project.
+project is "roaming" iff it has a `workspaceProjectId`. Ids are minted
+automatically for every project once the machine is paired for sync, and on
+project creation thereafter — there is no user-facing enrollment step
+(2026-07-05 decision; the internal `project.roaming.enroll` command is the
+plumbing the pairing flow drives).
 
 **D2 — The server (not the UI) is the roaming agent.** All registry sync, vault
 watching, snapshotting, and mirror traffic lives in `apps/server` (new
@@ -259,13 +273,19 @@ field (additive event-schema change, replay-safe). New command
 `project.enroll-roaming` mints the id, resolves the remote URL via the existing
 `RepositoryIdentityResolver`/`listRemotes`, and writes the first registry blob.
 
-**Shell/UI:** extend `OrchestrationShellSnapshot` with
-`roamingProjects: RoamingProjectShell[]` (registry entries not materialized
-locally, with per-machine status + last-mirror-contact time so staleness is
-visible, honest UX). Reducer/atom changes in
-`packages/client-runtime/src/state/{shellReducer,projectEntities}.ts`; web UI
-lists them greyed-out with a Materialize action in the existing project list +
-`CommandPalette.tsx` add-project flow.
+**Shell/UI (revised 2026-07-05):** the data plumbing stands as built in M1 —
+`OrchestrationShellSnapshot.roamingProjects` plus reducer/atom changes in
+`packages/client-runtime/src/state/{shellReducer,projectEntities}.ts`. The
+presentation is **one project list**, not a separate section: rows are keyed
+by `WorkspaceProjectId` and merge three sources — local checkout, live remote
+project (existing attach), mirrored registry copy. Row states: *local* /
+*live on <machine>* (open remotely, as attach does today) / *offline —
+available* (served from the local mirror copy, staleness label, Materialize
+action once M2 lands). The M1 sidebar "Roaming" section is a stopgap and is
+deleted when the merged list ships in M2. The sync opt-in lives in the
+pairing flow as a JetBrains-style options dialog: Projects (always on),
+Secret files (pre-checked, default patterns), later WIP (M4) and
+Conversations (M6) rows.
 
 **Risk:** the registry entry is a mutable shared document — versioned LWW with
 surfaced conflicts is fine (it changes rarely); resist the urge to make it a
@@ -273,10 +293,17 @@ CRDT.
 
 ## Step 2 — Vault
 
-**Manifest:** allowlist of repo-relative globs stored in the registry entry
-(`vaultManifest`). Editing it is a project settings UI affordance; suggest
-candidates from `git status --ignored` of common patterns (`.env*`,
-`*.local.*`) but never auto-include.
+**Manifest (revised 2026-07-05):** secrets sync is a **global category
+toggle** in the pairing sync-options dialog (pre-checked), applying a default
+pattern list (`.env`, `.env.*`, `*.local.*`, key/cert files) to every
+project's `vaultManifest` automatically — including projects created later.
+Per-project settings survive only as a rarely-used override: add a file the
+defaults miss, or exclude a matched file. Never sync all gitignored content;
+patterns only. Guard rails: a size cap on the vault bundle (a pattern
+accidentally matching something huge must not silently ship it), and the
+prompt-before-overwrite on apply below. When M7's cloud backend arrives, this
+consent is re-asked — secrets moving to a third place is a different question
+than secrets moving between the user's own two machines.
 
 **Capture:** `roaming/VaultSync.ts` reactor: `FileSystem.watch` on allowlisted
 paths (same debounce pattern as `ServerSettingsService`), coalesced per project
@@ -442,12 +469,12 @@ load-bearing assumptions are cheap to verify before building on them.
 |---|-------|--------------------------------|
 | **M0 — Pre-flight** | (a) Spike: push/fetch `refs/t3/wip/test/*` against the real git hosts in use; verify nonstandard ref namespaces round-trip. (b) Spike: from one running T3 server process, authenticate to a second one and complete an RPC round-trip using existing pairing/bearer machinery (the mirror's load-bearing assumption). (c) Two-instance test harness: two server processes with separate state dirs on one box — every later milestone's acceptance runs on this. | All three artifacts exist; go/no-go on origin-refs transport and server-to-server auth recorded in this doc. |
 | **M1 — Blob store + mirror + registry** | D0–D4 + step 1: `roaming_blobs` migration, `RoamingBlobStore`, `PeerMirror` reactor, machine enrollment credential, registry blobs, roaming project list in shell/UI with staleness display. | Enroll a project on instance A; instance B shows it (title, repo, per-machine status) after a mirror pass; kill A; B still shows it from its local copy. |
-| **M2 — Vault + materialize** | Steps 2 + 3. | One action takes instance B from empty to a registered checkout with vault files applied while A is offline (using B's mirrored copy); a concurrent vault edit on both sides surfaces as a conflict, not a merge. |
+| **M2 — Vault + materialize + product-model UI** | Steps 2 + 3, plus the 2026-07-05 product model: pairing sync-options dialog (opt-in + secrets toggle), automatic registration of all projects on pairing/creation, and the merged single project list (local / live-remote / offline-available states) replacing M1's sidebar section. | One action takes instance B from empty to a registered checkout with vault files applied while A is offline (using B's mirrored copy); a concurrent vault edit on both sides surfaces as a conflict, not a merge; the desktop's projects appear in the laptop's single project list with no separate section, and materializing a project without synced secrets succeeds with an honest "no secret files synced" notice. |
 | **M3 — Bootstrap recipes** | Step 4. | First materialize triggers an agent setup thread that writes a recipe; second materialize replays it; a broken recipe escalates to an agent turn. |
-| **M4 — WIP snapshots** | Step 5 (capture + transport; restore already lands inside materialize). | Dirty tree on instance A appears on instance B via materialize with A's process killed (origin-refs path); push failures surfaced in UI; bundle fallback covered by a harness test. |
+| **M4 — WIP snapshots** | Step 5 (capture + transport; restore already lands inside materialize). Adds the "Work in progress" row to the sync-options dialog (default on, subject to the controlled-origin guard). | Dirty tree on instance A appears on instance B via materialize with A's process killed (origin-refs path); push failures surfaced in UI; bundle fallback covered by a harness test. |
 | **M5 — Takeover + divergence** | Step 6. | Takeover applies newest snapshot and moves the lease; two-sided dirty divergence shows the diff-and-choose screen; the losing side remains recoverable as a ref. |
-| **M6 — Briefs + transcripts** | Step 7. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. |
-| **M7 — Cloud store backend (gated)** | E2E encryption (key-management one-pager written and reviewed first — root key, recovery code, per-project data keys; this is the entry gate) + a cloud `RoamingBlobStore` implementation: private git store repo, or T3 relay if the waitlist has cleared by then. Extends D3 records with encryption fields. | Small state reaches a fresh machine with zero online overlap with any other machine; a test asserts the cloud side holds ciphertext only. |
+| **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options dialog. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. |
+| **M7 — Cloud store backend (gated)** | E2E encryption (key-management one-pager written and reviewed first — root key, recovery code, per-project data keys; this is the entry gate) + a cloud `RoamingBlobStore` implementation: private git store repo, or T3 relay if the waitlist has cleared by then. Extends D3 records with encryption fields. Must re-ask the secrets-sync consent before any cloud backend activates. | Small state reaches a fresh machine with zero online overlap with any other machine; a test asserts the cloud side holds ciphertext only. |
 
 ## M0 results (2026-07-04)
 
@@ -577,6 +604,12 @@ the plan says.
   contact, so A→B credentials give bidirectional data flow.
 
 ## M1 results (2026-07-04)
+
+> **Superseded in part (2026-07-05):** the sidebar "Roaming" section shipped
+> in PR #5 is a stopgap presentation; the locked product model replaces it
+> with the merged single project list in M2. All server-side M1 work
+> (contracts, blob store, mirror, enrollment plumbing, projection) stands
+> unchanged; the enroll RPC becomes plumbing driven by the pairing flow.
 
 Landed as four reviewed PRs into `feature/roaming`: contracts (#2), blob
 store (#3), enrollment + PeerMirror (#4), client shell/UI (#5). Exit
