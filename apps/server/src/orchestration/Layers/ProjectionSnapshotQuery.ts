@@ -1449,6 +1449,34 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
       const lastMirrorContactAt = contactRows[0]?.lastContactAt ?? null;
+      const conflictRows = yield* sql<{
+        readonly kind: string;
+        readonly workspaceProjectId: string;
+        readonly detectedAt: string;
+      }>`
+        SELECT
+          kind,
+          workspace_project_id AS "workspaceProjectId",
+          detected_at AS "detectedAt"
+        FROM roaming_blob_conflicts
+        ORDER BY detected_at
+      `.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingProjectShells:conflicts"),
+        ),
+      );
+      const conflictsByWorkspaceProjectId = new Map<
+        string,
+        Array<RoamingProjectShell["conflicts"][number]>
+      >();
+      for (const conflict of conflictRows) {
+        const conflicts = conflictsByWorkspaceProjectId.get(conflict.workspaceProjectId) ?? [];
+        conflicts.push({
+          kind: conflict.kind as RoamingProjectShell["conflicts"][number]["kind"],
+          detectedAt: conflict.detectedAt,
+        });
+        conflictsByWorkspaceProjectId.set(conflict.workspaceProjectId, conflicts);
+      }
 
       const shells: RoamingProjectShell[] = [];
       for (const row of rows) {
@@ -1476,8 +1504,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           perMachineRoots: payload.value.perMachineRoots,
           lastMirrorContactAt,
           updatedAt: row.updatedAt,
-          // Populated by the M2 vault/conflict PR; empty keeps M1 behavior.
-          conflicts: [],
+          conflicts: conflictsByWorkspaceProjectId.get(payload.value.workspaceProjectId) ?? [],
         });
       }
       return shells;
