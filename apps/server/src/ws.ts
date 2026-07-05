@@ -58,7 +58,12 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { clamp } from "effect/Number";
-import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
+import {
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerRespondable,
+  HttpServerResponse,
+} from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -1899,9 +1904,22 @@ export const websocketRpcRouteLayer = Layer.unwrap(
             ),
           ),
         );
+        // A revoked session must not keep driving this machine over an
+        // already-established socket: revocation is otherwise only enforced
+        // at (re)connect and HTTP request time, so a live connection would
+        // retain access until it happened to drop. Race the connection
+        // against its own revocation event and tear it down immediately.
+        const sessionRevoked = sessions.streamChanges.pipe(
+          Stream.filter(
+            (change) => change.type === "clientRemoved" && change.sessionId === session.sessionId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.as(HttpServerResponse.empty({ status: 401 })),
+        );
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
-          () => rpcWebSocketHttpEffect,
+          () => Effect.race(rpcWebSocketHttpEffect, sessionRevoked),
           () => sessions.markDisconnected(session.sessionId),
         );
       }).pipe(
