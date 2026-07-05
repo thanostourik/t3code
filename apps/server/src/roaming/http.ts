@@ -17,6 +17,7 @@ import {
   ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_ENROLL_PROJECT_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
+  ROAMING_MATERIALIZE_PATH,
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
   ROAMING_MIRROR_PUSH_PATH,
@@ -33,6 +34,8 @@ import {
   RoamingFetchBlobsResponse,
   RoamingMachineCredentialRequest,
   RoamingMachineCredentialResponse,
+  RoamingMaterializeRequest,
+  RoamingMaterializeResponse,
   RoamingPushBlobsRequest,
   RoamingPushBlobsResponse,
   RoamingSyncManifestRequest,
@@ -48,6 +51,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { Materializer } from "./Materializer.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingService } from "./RoamingService.ts";
 
@@ -246,6 +250,22 @@ const enrollProjectRoute = HttpRouter.add(
   ),
 );
 
+const materializeRoute = HttpRouter.add(
+  "POST",
+  ROAMING_MATERIALIZE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingMaterializeRequest);
+      const materializer = yield* Materializer;
+      const materialization = yield* materializer
+        .materialize(body)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      return yield* respondJson(RoamingMaterializeResponse, { materialization });
+    }),
+  ),
+);
+
 const conflictGetRoute = HttpRouter.add(
   "POST",
   ROAMING_CONFLICT_GET_PATH,
@@ -318,6 +338,7 @@ export const roamingRoutesLayer = Layer.mergeAll(
   machineCredentialRoute,
   addPeerRoute,
   enrollProjectRoute,
+  materializeRoute,
   conflictGetRoute,
   conflictResolveRoute,
 );

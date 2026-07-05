@@ -37,6 +37,7 @@ import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReape
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import { PeerMirror } from "./roaming/PeerMirror.ts";
+import { RoamingAutoEnroll } from "./roaming/RoamingAutoEnroll.ts";
 import { VaultSync } from "./roaming/VaultSync.ts";
 import {
   formatHeadlessServeOutput,
@@ -305,6 +306,7 @@ export const make = (options?: StartupOptions) =>
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
     const peerMirror = yield* PeerMirror;
+    const roamingAutoEnroll = yield* RoamingAutoEnroll;
     const vaultSync = yield* VaultSync;
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -356,6 +358,7 @@ export const make = (options?: StartupOptions) =>
           yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
           yield* peerMirror.start().pipe(Scope.provide(reactorScope));
+          yield* roamingAutoEnroll.start().pipe(Scope.provide(reactorScope));
           yield* vaultSync.start().pipe(Scope.provide(reactorScope));
         }),
       );
