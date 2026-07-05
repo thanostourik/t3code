@@ -22,7 +22,7 @@ import {
   WorkspaceProjectId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
-import { RoamingProjectShell } from "./roaming.ts";
+import { RoamingMaterializationRecord, RoamingProjectShell } from "./roaming.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -424,6 +424,13 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   roamingProjects: Schema.Array(RoamingProjectShell).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /**
+   * Materializations on this machine (running and finished), so a client
+   * connecting mid-run sees progress; empty while roaming is off.
+   */
+  roamingMaterializations: Schema.Array(RoamingMaterializationRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -458,6 +465,11 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("roaming-project-removed"),
     sequence: NonNegativeInt,
     workspaceProjectId: WorkspaceProjectId,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("roaming-materialization-updated"),
+    sequence: NonNegativeInt,
+    materialization: RoamingMaterializationRecord,
   }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
