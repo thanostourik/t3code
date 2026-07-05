@@ -73,6 +73,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
 import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import { Materializer } from "./roaming/Materializer.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -742,82 +743,91 @@ const buildAppUnderTest = (options?: {
     const appLayer = servedRoutesLayer
       .pipe(
         Layer.provide(Layer.mock(RoamingBlobStore)({})),
+        Layer.provide(
+          Layer.succeed(Materializer, {
+            materialize: () => Effect.die("unused"),
+            subscribeUpdates: Effect.gen(function* () {
+              const pubsub = yield* PubSub.unbounded<never>();
+              return yield* PubSub.subscribe(pubsub);
+            }),
+          } satisfies Materializer["Service"]),
+        ),
         Layer.provide(Layer.mock(RoamingService)({})),
       )
       .pipe(
-      Layer.provide(
-        Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
-          record: () => Effect.void,
-          ...options?.layers?.browserTraceCollector,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({
-          publish: (event) => Effect.succeed({ ...(event as any), sequence: 1 }),
-          snapshot: Effect.succeed({ sequence: 0, events: [] }),
-          stream: Stream.empty,
-          ...options?.layers?.serverLifecycleEvents,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
-          awaitCommandReady: Effect.void,
-          markHttpListening: Effect.void,
-          enqueueCommand: (effect) => effect,
-          ...options?.layers?.serverRuntimeStartup,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerEnvironment.ServerEnvironment)({
-          getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
-          getDescriptor: Effect.succeed(testEnvironmentDescriptor),
-          ...options?.layers?.serverEnvironment,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
-          resolve: () => Effect.succeed(null),
-          ...options?.layers?.repositoryIdentityResolver,
-        }),
-      ),
-      Layer.provide(
-        Layer.succeed(
-          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
-          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
-            applyConfig: () => Effect.succeed({ status: "disabled" }),
-            ...options?.layers?.cloudManagedEndpointRuntime,
+        Layer.provide(
+          Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
+            record: () => Effect.void,
+            ...options?.layers?.browserTraceCollector,
           }),
         ),
-      ),
-      Layer.provide(
-        Layer.succeed(
-          RelayClient.RelayClient,
-          RelayClient.RelayClient.of({
-            resolve: Effect.succeed({
-              status: "missing",
-              version: RelayClient.CLOUDFLARED_VERSION,
+        Layer.provide(
+          Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({
+            publish: (event) => Effect.succeed({ ...(event as any), sequence: 1 }),
+            snapshot: Effect.succeed({ sequence: 0, events: [] }),
+            stream: Stream.empty,
+            ...options?.layers?.serverLifecycleEvents,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+            awaitCommandReady: Effect.void,
+            markHttpListening: Effect.void,
+            enqueueCommand: (effect) => effect,
+            ...options?.layers?.serverRuntimeStartup,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
+            getDescriptor: Effect.succeed(testEnvironmentDescriptor),
+            ...options?.layers?.serverEnvironment,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+            resolve: () => Effect.succeed(null),
+            ...options?.layers?.repositoryIdentityResolver,
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
+            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
+              applyConfig: () => Effect.succeed({ status: "disabled" }),
+              ...options?.layers?.cloudManagedEndpointRuntime,
             }),
-            install: Effect.die("unused relay-client install"),
-            installWithProgress: () => Effect.die("unused relay-client install"),
-            ...options?.layers?.relayClient,
+          ),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            RelayClient.RelayClient,
+            RelayClient.RelayClient.of({
+              resolve: Effect.succeed({
+                status: "missing",
+                version: RelayClient.CLOUDFLARED_VERSION,
+              }),
+              install: Effect.die("unused relay-client install"),
+              installWithProgress: () => Effect.die("unused relay-client install"),
+              ...options?.layers?.relayClient,
+            }),
+          ),
+        ),
+        Layer.provide(
+          Layer.mock(CloudCliTokenManager.CloudCliTokenManager)({
+            get: Effect.die(new Error("Unexpected T3 Connect CLI authorization request.")),
+            getExisting: Effect.succeed(Option.none()),
+            hasCredential: Effect.succeed(false),
+            clear: Effect.void,
+            ...options?.layers?.cloudCliTokenManager,
           }),
         ),
-      ),
-      Layer.provide(
-        Layer.mock(CloudCliTokenManager.CloudCliTokenManager)({
-          get: Effect.die(new Error("Unexpected T3 Connect CLI authorization request.")),
-          getExisting: Effect.succeed(Option.none()),
-          hasCredential: Effect.succeed(false),
-          clear: Effect.void,
-          ...options?.layers?.cloudCliTokenManager,
-        }),
-      ),
-      Layer.provideMerge(makeAuthTestLayer()),
-      Layer.provideMerge(ServerSecretStore.layer),
-      Layer.provide(workspaceAndProjectServicesLayer),
-      Layer.provideMerge(FetchHttpClient.layer),
-      Layer.provide(layerConfig),
-    );
+        Layer.provideMerge(makeAuthTestLayer()),
+        Layer.provideMerge(ServerSecretStore.layer),
+        Layer.provide(workspaceAndProjectServicesLayer),
+        Layer.provideMerge(FetchHttpClient.layer),
+        Layer.provide(layerConfig),
+      );
 
     yield* Layer.build(appLayer);
     return config;

@@ -55,6 +55,8 @@ import { layer as RoamingPeersLayer } from "./roaming/RoamingPeers.ts";
 import { layer as PeerMirrorLayer } from "./roaming/PeerMirror.ts";
 import { layer as RoamingServiceLayer } from "./roaming/RoamingService.ts";
 import { layer as VaultSyncLayer } from "./roaming/VaultSync.ts";
+import { layer as MaterializerLayer } from "./roaming/Materializer.ts";
+import { layer as RoamingAutoEnrollLayer } from "./roaming/RoamingAutoEnroll.ts";
 import { roamingRoutesLayer } from "./roaming/http.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -163,11 +165,14 @@ const PlatformServicesLive = Layer.unwrap(
 );
 
 const RoamingLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(MaterializerLayer),
+  Layer.provideMerge(RoamingAutoEnrollLayer),
   Layer.provideMerge(RoamingServiceLayer),
   Layer.provideMerge(VaultSyncLayer),
   Layer.provideMerge(PeerMirrorLayer),
   Layer.provideMerge(RoamingPeersLayer),
   Layer.provideMerge(RoamingBlobStoreLayer),
+  Layer.provideMerge(GitVcsDriver.vcsLayer),
   Layer.provide(ServerSecretStore.layer),
 );
 
