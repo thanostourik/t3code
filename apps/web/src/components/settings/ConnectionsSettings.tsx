@@ -118,7 +118,11 @@ import { environmentCatalog } from "~/connection/catalog";
 import {
   connectPairing as connectPairingAtom,
   connectSshEnvironment as connectSshEnvironmentAtom,
+  registerBearerGrant as registerBearerGrantAtom,
 } from "~/connection/onboarding";
+import { addRoamingPeer } from "~/environments/primary/roaming";
+import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
+import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import { useEnvironmentQuery } from "~/state/query";
 import {
   desktopNetworkAccessStateAtom,
@@ -131,7 +135,6 @@ import {
   useEnvironments,
   usePrimaryEnvironment,
 } from "~/state/environments";
-import { MachineSyncSection } from "./MachineSyncSettings";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
@@ -1092,6 +1095,14 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                   >
                     Standard
                   </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={isCreatingPairingLink}
+                    onClick={() => setPairingScopes([...AuthAdministrativeScopes])}
+                  >
+                    Another machine of yours
+                  </Button>
                 </div>
               </div>
               <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
@@ -1730,9 +1741,13 @@ export function ConnectionsSettings() {
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
+  const registerBearerGrant = useAtomCommand(registerBearerGrantAtom, { reportFailure: false });
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
     reportFailure: false,
   });
+  const roamingEnabled = usePrimarySettings((settings) => settings.roaming);
+  const roamingSecretsSync = usePrimarySettings((settings) => settings.roamingSecretsSync);
+  const updatePrimarySettings = useUpdatePrimarySettings();
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
@@ -1805,6 +1820,12 @@ export function ConnectionsSettings() {
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
+  const [savedBackendSecretsSync, setSavedBackendSecretsSync] = useState(true);
+  // The unified machine handshake runs through this client's own server and
+  // needs an administrative session there; without one the dialog falls back
+  // to the plain client attach (no sync options shown).
+  const canPairMachine =
+    desktopBridge != null || (currentSessionScopes?.includes(AuthAccessWriteScope) ?? false);
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
@@ -2186,22 +2207,77 @@ export function ConnectionsSettings() {
       return;
     }
 
-    const result = await connectPairing(remotePairingInput);
-    if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        const message = error instanceof Error ? error.message : "Failed to add backend.";
-        setSavedBackendError(message);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not add backend",
-            description: message,
-          }),
-        );
-      }
+    const failAddBackend = (error: unknown) => {
+      const message = error instanceof Error ? error.message : "Failed to add backend.";
+      setSavedBackendError(message);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not add backend",
+          description: message,
+        }),
+      );
       setIsAddingSavedBackend(false);
-      return;
+    };
+
+    let successToast: { readonly title: string; readonly description: string } = {
+      title: "Backend added",
+      description: "The environment is saved and will reconnect on app startup.",
+    };
+
+    if (canPairMachine) {
+      // Unified pairing: one code establishes the live attach AND, when the
+      // code allows it, the machine-to-machine sync behind it. The local
+      // server runs the handshake; this client only registers the returned
+      // attach bearer.
+      try {
+        const target = resolveRemotePairingTarget(remotePairingInput);
+        const paired = await addRoamingPeer({
+          baseUrls: [target.httpBaseUrl],
+          pairingCredential: target.credential,
+          syncOptions: { secretsSync: savedBackendSecretsSync },
+        });
+        const registered = await registerBearerGrant(paired.attach);
+        if (registered._tag === "Failure") {
+          if (!isAtomCommandInterrupted(registered)) {
+            failAddBackend(squashAtomCommandFailure(registered));
+          } else {
+            setIsAddingSavedBackend(false);
+          }
+          return;
+        }
+        successToast =
+          paired.peer !== null
+            ? {
+                title: "Machine paired",
+                description: "Its projects are in your list and stay available offline.",
+              }
+            : paired.mirrorUnavailableReason === "credential-not-administrative"
+              ? {
+                  title: "Environment connected",
+                  description:
+                    "Offline availability is off: the pairing code wasn't created with" +
+                    " administrative access. To enable it, create a new code on the other" +
+                    " machine with the “Another machine of yours” preset and pair again.",
+                }
+              : {
+                  title: "Environment connected",
+                  description: "This environment doesn't support pairing between machines.",
+                };
+      } catch (error) {
+        failAddBackend(error);
+        return;
+      }
+    } else {
+      const result = await connectPairing(remotePairingInput);
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          failAddBackend(squashAtomCommandFailure(result));
+        } else {
+          setIsAddingSavedBackend(false);
+        }
+        return;
+      }
     }
 
     setSavedBackendHost("");
@@ -2210,18 +2286,17 @@ export function ConnectionsSettings() {
     setSavedBackendSshUsername("");
     setSavedBackendSshPort("");
     setAddBackendDialogOpen(false);
-    toastManager.add({
-      type: "success",
-      title: "Backend added",
-      description: "The environment is saved and will reconnect on app startup.",
-    });
+    toastManager.add({ type: "success", ...successToast });
     setIsAddingSavedBackend(false);
   }, [
+    canPairMachine,
     connectPairing,
     connectSshEnvironment,
+    registerBearerGrant,
     savedBackendHost,
     savedBackendMode,
     savedBackendPairingCode,
+    savedBackendSecretsSync,
     savedBackendSshHost,
     savedBackendSshPort,
     savedBackendSshUsername,
@@ -2434,6 +2509,34 @@ export function ConnectionsSettings() {
           Paste a full pairing URL here to fill both fields automatically.
         </span>
       </div>
+      {canPairMachine ? (
+        <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
+          <label className="flex cursor-default items-start gap-3 px-3 py-2.5 opacity-70">
+            <Checkbox className="mt-0.5" checked disabled />
+            <span className="min-w-0">
+              <span className="block text-xs font-medium text-foreground">Projects</span>
+              <span className="block text-xs leading-snug text-muted-foreground">
+                The other machine's projects appear in your project list and stay available when
+                it's offline.
+              </span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+            <Checkbox
+              className="mt-0.5"
+              checked={savedBackendSecretsSync}
+              disabled={isAddingSavedBackend}
+              onCheckedChange={(checked) => setSavedBackendSecretsSync(checked === true)}
+            />
+            <span className="min-w-0">
+              <span className="block text-xs font-medium text-foreground">Secret files</span>
+              <span className="block text-xs leading-snug text-muted-foreground">
+                .env and similar gitignored files travel only between your own machines.
+              </span>
+            </span>
+          </label>
+        </div>
+      ) : null}
     </div>
   );
   const renderRemoteModeBody = () => (
@@ -3353,8 +3456,6 @@ export function ConnectionsSettings() {
         </SettingsSection>
       )}
 
-      <MachineSyncSection />
-
       <SettingsSection
         title="Remote environments"
         headerAction={
@@ -3362,7 +3463,11 @@ export function ConnectionsSettings() {
             open={addBackendDialogOpen}
             onOpenChange={(open) => {
               setAddBackendDialogOpen(open);
-              if (!open) {
+              if (open) {
+                // Pre-checked on first pairing (the canonical default), but
+                // an explicit prior choice is never silently re-enabled.
+                setSavedBackendSecretsSync(roamingEnabled ? roamingSecretsSync : true);
+              } else {
                 setSavedBackendError(null);
               }
             }}
@@ -3432,6 +3537,17 @@ export function ConnectionsSettings() {
           primaryEnvironmentId={primaryEnvironmentId}
           savedEnvironments={savedEnvironments}
         />
+        {roamingEnabled ? (
+          <SettingsRow
+            title="Sync secret files"
+            description=".env and similar gitignored files travel only between your own machines. Chosen when pairing; change it here anytime."
+          >
+            <Switch
+              checked={roamingSecretsSync}
+              onCheckedChange={(checked) => updatePrimarySettings({ roamingSecretsSync: checked })}
+            />
+          </SettingsRow>
+        ) : null}
       </SettingsSection>
     </SettingsPageContainer>
   );

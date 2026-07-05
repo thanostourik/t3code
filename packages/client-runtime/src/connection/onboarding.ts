@@ -38,6 +38,29 @@ export interface PairingConnectionInput {
   readonly pairingCode?: string;
 }
 
+/**
+ * The peer-introduction seam (roaming M2.5): everything a machine-pairing
+ * producer must supply. The manual URL+code dialog is producer #1; T3
+ * Cloud/relay discovery later constructs the same value — everything
+ * downstream of the introduction is identical.
+ */
+export interface PeerIntroduction {
+  readonly baseUrls: readonly [string, ...string[]];
+  readonly pairingCredential: string;
+  readonly label?: string;
+}
+
+/**
+ * The attach half of the unified pairing handshake: a bearer already
+ * exchanged by the local server (RoamingAttachGrant), registered as an
+ * ordinary remote-environment connection.
+ */
+export interface BearerGrantInput {
+  readonly environmentId: EnvironmentId;
+  readonly baseUrl: string;
+  readonly token: string;
+}
+
 export interface SshConnectionInput {
   readonly target: DesktopSshEnvironmentTarget;
   readonly label?: string;
@@ -54,6 +77,12 @@ export class ConnectionOnboarding extends Context.Service<
   {
     readonly registerPairing: (
       input: PairingConnectionInput,
+    ) => Effect.Effect<
+      EnvironmentId,
+      ConnectionAttemptError | Persistence.ConnectionPersistenceError
+    >;
+    readonly registerBearerGrant: (
+      input: BearerGrantInput,
     ) => Effect.Effect<
       EnvironmentId,
       ConnectionAttemptError | Persistence.ConnectionPersistenceError
@@ -122,6 +151,57 @@ export const registerPairingConnection = Effect.fn(
   "clientRuntime.connection.onboarding.registerPairingConnection",
 )(function* (input: PairingConnectionInput) {
   const registration = yield* preparePairingRegistration(input);
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  yield* registry.register(registration);
+  return registration.target.environmentId;
+});
+
+export const prepareBearerGrantRegistration = Effect.fn(
+  "clientRuntime.connection.onboarding.prepareBearerGrantRegistration",
+)(function* (input: BearerGrantInput) {
+  const httpBaseUrl = yield* Effect.try({
+    try: () => normalizeHttpBaseUrl(input.baseUrl),
+    catch: (cause) =>
+      new ConnectionBlockedError({
+        reason: "configuration",
+        detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
+      }),
+  });
+  const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
+    Effect.mapError(mapRemoteEnvironmentError),
+  );
+  // The grant names the machine the handshake ran against; a descriptor
+  // answering as someone else must not be registered under its identity.
+  if (descriptor.environmentId !== input.environmentId) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "The environment at that URL does not match the paired machine.",
+    });
+  }
+  const connectionId = `bearer:${descriptor.environmentId}`;
+  return new BearerConnectionRegistration({
+    target: new BearerConnectionTarget({
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      connectionId,
+    }),
+    profile: new BearerConnectionProfile({
+      connectionId,
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      httpBaseUrl,
+      wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+    }),
+    credential: new BearerConnectionCredential({
+      token: input.token,
+    }),
+  });
+});
+
+export const registerBearerGrantConnection = Effect.fn(
+  "clientRuntime.connection.onboarding.registerBearerGrantConnection",
+)(function* (input: BearerGrantInput) {
+  const registration = yield* prepareBearerGrantRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
   yield* registry.register(registration);
   return registration.target.environmentId;
@@ -254,6 +334,11 @@ export const make = Effect.gen(function* () {
       registerPairingConnection(input).pipe(
         Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
         Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      ),
+    registerBearerGrant: (input) =>
+      registerBearerGrantConnection(input).pipe(
+        Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
         Effect.provideService(HttpClient.HttpClient, httpClient),
       ),
     registerSsh: (input) =>
