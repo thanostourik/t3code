@@ -81,6 +81,15 @@ machine's projects are visible but dead.
 > cloud/relay discovery later, everything downstream identical. Same
 > discipline as D0's `RoamingBlobStore` (M7 storage backend) — cloud
 > arrives as a new producer behind an existing seam, not a redesign.
+> 2026-07-05 — M2.5 analysis pass done (see [M2.5 analysis](#m25-analysis-2026-07-05)):
+> unified pairing is feasible with one structural correction — pairing codes are
+> single-use, so the laptop's server orchestrates the handshake from one
+> exchange (attach bearer + mirror credential both derive from it); the
+> machine-credential route becomes flag-independent and carries the sync-options
+> consent; the Add Environment dialog degrades to attach-only against servers
+> you don't administer; the live→offline row flip needs the sidebar merge to
+> consult connection liveness (cached snapshots of a dead peer currently
+> suppress the Materialize rows).
 > 2026-07-05 (evening) — **Canonical workflow section added; M2 deviation
 > recorded** (user decision, restated during first real two-machine use).
 > M2 shipped pairing as a standalone "Machine sync" flow establishing only
@@ -885,6 +894,99 @@ Decisions/deviations recorded during implementation and review:
   short-circuits even with a different `targetPath` (per contract note).
 - **VaultSync watcher scopes swap atomically** (reviewer-caught leak:
   close-then-set let concurrent rescans strand watch fibers).
+
+## M2.5 analysis (2026-07-05)
+
+Assumption check against current code before M2.5 implementation, run
+explicitly against the canonical workflow. Confirmed as planned: the existing
+pairing/thin-client flow is the Add Environment → "Remote link" dialog in
+`ConnectionsSettings.tsx` (host + pairing code, or a pasted pairing URL) →
+`connectPairing` (`packages/client-runtime/src/connection/onboarding.ts`) →
+`/.well-known/t3/environment` + `/oauth/token` exchange → persisted
+`BearerConnection{Target,Profile,Credential}` in the connection catalog
+(IndexedDB on web, encrypted `connection-catalog.json` via IPC on desktop);
+remote conversations already work over that attach (environment-scoped
+`thread.create`/`thread.turn.start` via WS or `/api/orchestration/dispatch`);
+the sidebar already renders ONE list merging local, attached-remote, and
+mirrored-offline rows, and `selectOfflineRoamingProjects` already suppresses a
+registry row whenever a live row covers the same repository (canonicalKey).
+M1/M2 server plumbing (add-peer, machine-credential mint, auto-enroll,
+materialize) is all reusable as-is; `RoamingAutoEnroll` already triggers on
+peer-added, settings changes, and project-created — no new hook needed on
+either side of the unified handshake.
+
+**Deviations recorded (design deltas applied to the M2.5 row):**
+
+- **One code, one exchange — the local server orchestrates the handshake.**
+  Pairing credentials are single-use at `/oauth/token`, so the M2.5 row's "one
+  pairing code establishes attach AND mirror" cannot mean two exchanges. The
+  client sends the introduction to its own server (`POST /api/roaming/peers`,
+  extended); that server exchanges the code once at the peer, and from the
+  resulting bearer (a) mints the 365-day `roaming:mirror` machine credential
+  (existing route) and (b) mints + immediately exchanges a fresh
+  standard-scoped pairing credential on the peer, returning the resulting
+  **standard** attach bearer in `RoamingAddPeerResponse`. The client registers
+  the attach from that bearer (the registration half of `connectPairing`,
+  factored out). The client's persistent session stays standard-scoped; the
+  admin bearer is used only inside the handshake and never stored.
+- **The code carries the capability; the preset carries the UX.** The
+  handshake's peer-side mints require `access:write`, so the pairing code for
+  your own machine must be admin-scoped. The existing create-pairing-URL
+  dialog already has scope presets (Read only / Standard) plus per-scope
+  checkboxes and an access:write warning; it gains one preset — "Another
+  machine of yours" (admin scopes). No new generation flow, no sync concept.
+- **Attach-only degradation is a first-class outcome, not an error.** The same
+  Add Environment dialog is how users attach to servers they *don't*
+  administer. If the exchanged bearer lacks `access:write`, the handshake
+  skips the mirror half and returns that bearer for attach registration, with
+  `mirror: null` + reason; the UI attaches normally and shows an honest
+  notice. Remote conversations (canonical step 3) work in both outcomes;
+  only offline availability needs the admin-capable code.
+- **The machine-credential route becomes flag-independent and carries
+  consent.** Today all roaming routes 404 while the peer's `roaming` setting
+  is off — the desktop would need a settings ritual before pairing could
+  succeed (chicken-and-egg). The mint route is un-gated from the flag (still
+  `access:write`); a successful mint flips the peer's `roaming` setting on and
+  applies a new `syncOptions: { secretsSync?: boolean }` request field to the
+  peer's `roamingSecretsSync`. Consent story: the desktop user consented by
+  generating the admin-scoped code; the laptop user picked the sync options in
+  the one dialog; both machines belong to the same owner. The sync-options
+  choice propagates to BOTH machines' settings (each machine's setting remains
+  the mechanism; ordinary settings rows remain for changing your mind later).
+- **Live→offline is a real UI gap (reviewer-grade catch).** A disconnected
+  bearer environment keeps its cached shell snapshot, so a dead peer's
+  projects stay in `projectsAtom` as live-looking rows AND suppress the
+  mirrored offline rows via the canonicalKey dedup — exactly the "visible but
+  dead" state the canonical workflow prohibits. Fix in the sidebar merge:
+  rows from a non-live remote environment stop counting as live; the mirrored
+  registry rows then surface as offline + Materialize. (The reverse dedup —
+  peer alive, registry row suppressed — already works.)
+- **Peer-introduction seam lands client-side.** `PeerIntroduction =
+  { baseUrls, pairingCredential, label? }` with a `pairMachine(introduction,
+  syncOptions)` operation in `packages/client-runtime` as the single consumer;
+  the manual dialog is producer #1, relay/cloud discovery later constructs the
+  same value (its hooks — `relay/discovery.ts`, `CloudLinkRow` — already
+  yield per-environment availability + connect scopes, so the shape fits).
+  Server-side, `RoamingAddPeerRequest` already IS the introduction; it gains
+  only `syncOptions`.
+- **Sync options render in the Remote-link dialog; the secrets toggle
+  survives as one settings row.** The JetBrains-style step (Projects
+  checked+disabled; Secret files pre-checked; WIP/Conversations arrive
+  M4/M6) renders inside the existing Add Environment → Remote link dialog.
+  `MachineSyncSettings.tsx` is deleted; `roamingSecretsSync` gets an ordinary
+  settings row (no section, no concept) for changing your mind later.
+- **Known scope-schema wart (no action):** `roaming:mirror` exists in the
+  auth contract but `/oauth/token`'s explicit-scope parser omits it. The
+  design never requests it over OAuth (the mint route issues it), so this
+  stays as-is; noted for M7.
+- **Harness acceptance scope:** the M0 harness proves the full transport
+  chain headlessly — one `POST /api/roaming/peers` call with a real pairing
+  code yields both credentials; the attach bearer opens the peer's WS
+  (`/api/auth/websocket-ticket` → `subscribeShell`) and streams its projects;
+  `thread.create` dispatched over that attach lands in the peer's shell
+  stream. A full LLM turn depends on provider keys being present and is run
+  when available; the canonical-workflow UI walk (one list, live rows,
+  offline flip) is demonstrated on the real desktop build.
 
 ## Execution process
 
