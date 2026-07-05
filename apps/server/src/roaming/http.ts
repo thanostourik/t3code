@@ -215,9 +215,20 @@ const addPeerRoute = HttpRouter.add(
         .addPeer(body)
         .pipe(
           Effect.mapError((error) =>
-            error.reason === "peer-unreachable"
-              ? reject(502, "Peer unreachable")
-              : reject(500, "Internal Server Error"),
+            error.reason === "credential-rejected"
+              ? reject(
+                  400,
+                  "The other machine did not accept this pairing code. Codes are one-time" +
+                    " (logging into the web UI with one also uses it up) — generate a fresh" +
+                    " code on that machine and try again.",
+                )
+              : error.reason === "peer-unreachable"
+                ? reject(
+                    502,
+                    "Could not reach the other machine at that URL. Check the address and" +
+                      " that both machines are on the same network or tailnet.",
+                  )
+                : reject(500, "Internal Server Error"),
           ),
         );
       return yield* respondJson(RoamingAddPeerResponse, { peer });
