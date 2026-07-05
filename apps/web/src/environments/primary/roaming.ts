@@ -23,6 +23,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { readDesktopPrimaryBearerToken } from "./desktopAuth";
+import { isSameOriginBrowserPrimary } from "./httpLayer";
 import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 
 export class PrimaryRoamingRequestError extends Error {
@@ -58,7 +59,10 @@ async function postRoaming<
         "content-type": "application/json",
         ...(bearerToken ? { authorization: `Bearer ${bearerToken}` } : {}),
       },
-      credentials: bearerToken ? "omit" : "include",
+      // Same three cases as httpLayer.ts: same-origin browser rides the
+      // session cookie; desktop rides the bearer; cross-origin without a
+      // bearer stays anonymous rather than forcing a credentialed preflight.
+      credentials: isSameOriginBrowserPrimary() ? "include" : "omit",
       body: JSON.stringify(encoded),
     });
   } catch (error) {
