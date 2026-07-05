@@ -22,6 +22,7 @@ import {
   RoamingRegistryPayload,
   WorkspaceProjectId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -54,6 +55,7 @@ export class RoamingEnrollError extends Schema.TaggedErrorClass<RoamingEnrollErr
       "project-not-found",
       "no-git-remote",
       "peer-unreachable",
+      "credential-rejected",
       "internal",
     ]),
     detail: Schema.optional(Schema.String),
@@ -99,6 +101,8 @@ const encodeRegistryPayloadJson = Schema.encodeUnknownEffect(
 
 const internalError = (detail: string) => (cause: unknown) =>
   new RoamingEnrollError({ reason: "internal", detail, cause });
+
+const isRoamingEnrollError = Schema.is(RoamingEnrollError);
 
 const make = Effect.gen(function* () {
   const blobStore = yield* RoamingBlobStore;
@@ -205,22 +209,31 @@ const make = Effect.gen(function* () {
 
   const exchangePairingCredential = (baseUrl: string, pairingCredential: string) =>
     Effect.gen(function* () {
-      const response = yield* httpClient
-        .post(`${baseUrl.replace(/\/$/, "")}/oauth/token`, {
-          body: HttpBody.text(
-            new URLSearchParams({
-              grant_type: AuthTokenExchangeGrantType,
-              subject_token: pairingCredential,
-              subject_token_type: AuthEnvironmentBootstrapTokenType,
-              requested_token_type: AuthAccessTokenType,
-              client_label: "roaming-enrollment",
-              client_device_type: "bot",
-            }).toString(),
-            "application/x-www-form-urlencoded",
-          ),
-        })
-        .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk));
-      const body = (yield* response.json) as { readonly access_token?: string };
+      const response = yield* httpClient.post(`${baseUrl.replace(/\/$/, "")}/oauth/token`, {
+        body: HttpBody.text(
+          new URLSearchParams({
+            grant_type: AuthTokenExchangeGrantType,
+            subject_token: pairingCredential,
+            subject_token_type: AuthEnvironmentBootstrapTokenType,
+            requested_token_type: AuthAccessTokenType,
+            client_label: "roaming-enrollment",
+            client_device_type: "bot",
+          }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      });
+      // The peer answering 4xx is not "unreachable" — it looked at the code
+      // and said no (already used, expired, or mistyped). Pairing codes are
+      // one-time, and a browser login consumes them too; the distinction is
+      // the difference between debugging the network and regenerating a code.
+      if (response.status === 400 || response.status === 401 || response.status === 403) {
+        return yield* new RoamingEnrollError({
+          reason: "credential-rejected",
+          detail: `the machine at ${baseUrl} rejected the pairing code (${response.status})`,
+        });
+      }
+      const okResponse = yield* HttpClientResponse.filterStatusOk(response);
+      const body = (yield* okResponse.json) as { readonly access_token?: string };
       if (typeof body.access_token !== "string") {
         return yield* new RoamingEnrollError({
           reason: "peer-unreachable",
@@ -279,6 +292,18 @@ const make = Effect.gen(function* () {
           yield* peers.upsert(peer).pipe(Effect.mapError(internalError("peer record failed")));
           yield* peerMirror.syncNow();
           return peer;
+        }
+        // A rejected code fails identically on every URL — surface it now
+        // instead of letting the retry loop relabel it "unreachable".
+        const rejected = attempt.cause.reasons
+          .filter(Cause.isFailReason)
+          .map((reason) => reason.error)
+          .find(
+            (error): error is RoamingEnrollError =>
+              isRoamingEnrollError(error) && error.reason === "credential-rejected",
+          );
+        if (rejected !== undefined) {
+          return yield* rejected;
         }
         lastCause = attempt.cause;
       }
