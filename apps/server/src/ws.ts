@@ -1089,11 +1089,12 @@ const makeWsRpcLayer = (
                 roamingBlobStore.subscribeChanges.pipe(
                   Effect.map((subscription) =>
                     Stream.fromSubscription(subscription).pipe(
-                      Stream.filter((record) => record.kind === "registry"),
                       Stream.mapEffect((record) =>
                         projectionSnapshotQuery.listRoamingProjectShells().pipe(
                           Effect.map((shells) =>
-                            shells.find((shell) => shell.workspaceProjectId === record.key),
+                            shells.find(
+                              (shell) => shell.workspaceProjectId === record.workspaceProjectId,
+                            ),
                           ),
                           Effect.orElseSucceed(() => undefined),
                         ),
