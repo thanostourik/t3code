@@ -132,6 +132,7 @@ import {
   useRoamingMaterializations,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
+import { environmentShellStatusesAtom } from "../state/shell";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
@@ -2213,7 +2214,6 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
 export default function Sidebar() {
   const projects = useProjects();
   const roamingProjects = useRoamingProjects();
-  const offlineRoamingProjects = useMemo(() => selectOfflineRoamingProjects({ roamingProjects, liveProjects: projects }), [roamingProjects, projects]);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
   const router = useRouter();
@@ -2354,10 +2354,29 @@ export default function Sidebar() {
       ),
     [environments],
   );
+  // A disconnected remote keeps its cached shell snapshot, so its projects
+  // would linger here as live-looking rows AND suppress the mirrored
+  // offline rows (the canonicalKey dedup) — the "visible but dead" state
+  // the pairing flow must never produce. Filter to live environments at
+  // this single point: everything downstream (rendered rows and the
+  // offline-row dedup) derives from it. Synchronizing counts as live so
+  // reconnects don't flap rows to offline; the primary and desktop-local
+  // sandboxes are never dead peers.
+  const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
+  const liveProjects = useMemo(
+    () =>
+      projects.filter((project) => {
+        if (project.environmentId === primaryEnvironmentId) return true;
+        const status = environmentShellStatuses.get(project.environmentId);
+        return status === "live" || status === "synchronizing";
+      }),
+    [projects, primaryEnvironmentId, environmentShellStatuses],
+  );
+  const offlineRoamingProjects = useMemo(() => selectOfflineRoamingProjects({ roamingProjects, liveProjects }), [roamingProjects, liveProjects]);
   const orderedProjects = useMemo(
     () =>
       orderItemsByPreferredIds({
-        items: projects,
+        items: liveProjects,
         preferredIds: projectOrder,
         getId: getProjectOrderKey,
         getPreferenceIds: (project) => [
@@ -2365,12 +2384,12 @@ export default function Sidebar() {
           legacyProjectCwdPreferenceKey(project.workspaceRoot),
         ],
       }),
-    [projectOrder, projects],
+    [projectOrder, liveProjects],
   );
   const unsortedProjectGroups = useMemo(
     () =>
       buildSidebarProjectSnapshots({
-        projects: sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
+        projects: sidebarProjectSortOrder === "manual" ? orderedProjects : liveProjects,
         settings: projectGroupingSettings,
         primaryEnvironmentId,
         resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,

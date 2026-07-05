@@ -3,7 +3,7 @@ import {
   createAtomCommandScheduler,
   createRuntimeCommand,
 } from "@t3tools/client-runtime/state/runtime";
-import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
+import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { connectionAtomRuntime } from "./runtime";
@@ -24,6 +24,24 @@ export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
     readonly pairingCode?: string;
   }) =>
     ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.registerPairing(input))),
+});
+
+export const registerBearerGrant = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:register-bearer-grant",
+  scheduler: onboardingScheduler,
+  concurrency: {
+    mode: "singleFlight",
+    key: (input: { readonly environmentId: EnvironmentId; readonly baseUrl: string }) =>
+      `${input.environmentId}:${input.baseUrl}`,
+  },
+  execute: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly baseUrl: string;
+    readonly token: string;
+  }) =>
+    ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerBearerGrant(input)),
+    ),
 });
 
 export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime, {

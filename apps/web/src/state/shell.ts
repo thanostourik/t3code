@@ -7,6 +7,7 @@ import {
   createEnvironmentSnapshotAtom,
   createShellEnvironmentAtoms,
   type EnvironmentShellState,
+  type EnvironmentShellStatus,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentCatalogState } from "@t3tools/client-runtime/state/connections";
 import type { EnvironmentId } from "@t3tools/contracts";
@@ -79,3 +80,16 @@ export const allEnvironmentProjectSnapshotsReadyAtom =
     shellStateValueAtom: environmentShell.stateValueAtom,
     requiresPrimaryEnvironment: !isHostedStaticApp(),
   });
+/**
+ * Shell status per catalog environment. Lets the sidebar treat a
+ * disconnected remote's cached snapshot as not-live, so its rows can flip
+ * to the mirrored offline presentation instead of lingering as dead
+ * live-looking entries.
+ */
+export const environmentShellStatusesAtom = Atom.make((get) => {
+  const statuses = new Map<EnvironmentId, EnvironmentShellStatus>();
+  for (const environmentId of get(environmentCatalog.catalogValueAtom).entries.keys()) {
+    statuses.set(environmentId, get(environmentShell.stateValueAtom(environmentId)).status);
+  }
+  return statuses;
+}).pipe(Atom.withLabel("environment-shell-statuses"));
