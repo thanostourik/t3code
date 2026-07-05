@@ -6,7 +6,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/
 import { readDesktopPrimaryBearerToken } from "./desktopAuth";
 import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 
-function isSameOriginBrowserPrimary(): boolean {
+export function isSameOriginBrowserPrimary(): boolean {
   if (
     typeof window === "undefined" ||
     window.desktopBridge !== undefined ||
