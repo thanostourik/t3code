@@ -36,10 +36,13 @@ machine's projects are visible but dead.
 > one pairing call from two fresh machines yields mirror + standard attach
 > bearer, a conversation is created on the peer over that attach,
 > registry+vault mirror silently, and materialize-with-secrets works with
-> the peer killed. **Pending before calling M2.5 done: the
-> canonical-workflow UI walk on the real desktop build** (one list, live
-> rows, kill peer → offline + Materialize) — the class of check that caught
-> M2's deviation; do not skip it. Then M3.
+> the peer killed. The **canonical-workflow UI walk also passes in a real
+> browser** against the harness (Chrome via Playwright, 2026-07-05 late):
+> empty laptop → sync options inside the ONE Add Environment dialog (no
+> "machine sync"/"roaming" anywhere) → "Machine paired" → the desktop's
+> project LIVE in the one list → peer killed → the SAME row greyed with
+> Materialize. Remaining nicety, not a gate: repeat the walk once on the
+> real two-machine desktop setup. **M3 is next.**
 > **Decisions log:** 2026-07-04 — v1 transport for small state = machine-to-machine
 > mirror (user decision); cloud store backend (private git repo or T3 relay)
 > deferred to explicit milestone M7 behind the same interface.
@@ -1072,12 +1075,18 @@ reason → a re-pair with different sync options does NOT override the peer's
 prior consent (first-pairing rule) while applying locally → peer killed →
 materialize completes from the mirrored copy with `.env` applied.
 
-**Not yet demonstrated: the canonical-workflow UI walk** (one list, live
-rows from the attach, kill peer → the same rows flip to offline +
-Materialize) — the harness script drives HTTP/WS, not the browser, and the
-in-session preview tooling was unavailable (MCP re-auth needed). Run it on
-the real desktop build before starting M3; M2 taught us exactly this check
-catches what code review does not.
+**Canonical-workflow UI walk: PASS in a real browser** (2026-07-05 late,
+headless Chrome via Playwright against the harness web UI — note the
+harness serves the PREBUILT `apps/web/dist` bundle; rebuild it after UI
+changes or the walk tests stale code, which is exactly what the first
+attempt caught). Verified: empty laptop before pairing → no "MACHINE SYNC"
+section anywhere in settings → sync-options step (Secret files) inside the
+one Add Environment dialog with no forbidden concepts → one action →
+"Machine paired" toast → the desktop's project renders LIVE in the single
+project list with no Materialize offered → opening it navigates (thin
+client) → peer killed → the SAME row flips to greyed + Materialize.
+Screenshot evidence archived from the run. Repeating the walk once on the
+real two-machine desktop setup is a recommended spot-check, not a gate.
 
 Decisions/deviations recorded during implementation and review:
 
