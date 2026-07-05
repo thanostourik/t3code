@@ -69,6 +69,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import { Materializer } from "./roaming/Materializer.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -399,6 +400,7 @@ const makeWsRpcLayer = (
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const roamingBlobStore = yield* RoamingBlobStore;
+      const materializer = yield* Materializer;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1113,8 +1115,22 @@ const makeWsRpcLayer = (
                 ),
               );
 
+              const materializationLive = Stream.unwrap(
+                materializer.subscribeUpdates.pipe(
+                  Effect.map((subscription) =>
+                    Stream.fromSubscription(subscription).pipe(
+                      Stream.map((materialization) => ({
+                        kind: "roaming-materialization-updated" as const,
+                        sequence: 0,
+                        materialization,
+                      })),
+                    ),
+                  ),
+                ),
+              );
+
               const liveStream = roamingEnabled
-                ? Stream.merge(domainLiveStream, roamingLive)
+                ? Stream.merge(domainLiveStream, Stream.merge(roamingLive, materializationLive))
                 : domainLiveStream;
 
               // When the client already holds a shell snapshot (cached, or loaded
@@ -1172,7 +1188,9 @@ const makeWsRpcLayer = (
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
-                  snapshot: roamingEnabled ? snapshot : { ...snapshot, roamingProjects: [] },
+                  snapshot: roamingEnabled
+                    ? snapshot
+                    : { ...snapshot, roamingProjects: [], roamingMaterializations: [] },
                 }),
                 liveStream,
               );
