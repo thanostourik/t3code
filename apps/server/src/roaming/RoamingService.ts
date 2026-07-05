@@ -373,9 +373,20 @@ const make = Effect.gen(function* () {
         lastCause = attempt.cause;
       }
       if (exchange === null || reachableBaseUrl === null) {
-        // Log the cause locally but do not attach it to the returned error:
-        // failed exchange attempts can embed the pairing credential.
-        yield* Effect.logDebug("roaming: peer enrollment failed", { cause: lastCause });
+        // Log only failure tags, never the raw cause: a transport-failure
+        // cause embeds the HTTP request whose form body carries the
+        // still-live pairing credential, and a structured logger would
+        // emit it.
+        yield* Effect.logDebug("roaming: peer enrollment failed", {
+          failureTags: Cause.isCause(lastCause)
+            ? lastCause.reasons.map((reason) =>
+                Cause.isFailReason(reason)
+                  ? ((reason.error as { readonly _tag?: string })._tag ?? "unknown-failure")
+                  : reason._tag,
+              )
+            : [],
+          baseUrlCount: input.baseUrls.length,
+        });
         return yield* new RoamingEnrollError({
           reason: "peer-unreachable",
           detail: `no base URL of ${input.baseUrls.join(", ")} completed enrollment`,
@@ -419,17 +430,40 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError(internalError("machine credential request failed")));
 
-      let peer: RoamingPeer | null = null;
+      let credential: RoamingMachineCredentialResponse | null = null;
       let mirrorUnavailableReason: RoamingPairMachineResponse["mirrorUnavailableReason"] = null;
       if (mintResponse.status === 404) {
         // An upstream T3 server without roaming routes: attach still works.
         mirrorUnavailableReason = "peer-does-not-support-machine-pairing";
       } else {
-        const credential = yield* HttpClientResponse.filterStatusOk(mintResponse).pipe(
+        credential = yield* HttpClientResponse.filterStatusOk(mintResponse).pipe(
           Effect.flatMap((response) => response.json),
           Effect.flatMap(decodeMachineCredentialResponse),
           Effect.mapError(internalError("machine credential mint failed")),
         );
+      }
+
+      // Attach half — always freshly derived; the privileged handshake
+      // bearer never leaves this process. Derived BEFORE anything persists
+      // locally, so a failure here leaves no half-paired state (the code is
+      // spent either way; the peer-side credential ages out).
+      const attach = yield* deriveAttachGrant({
+        baseUrl: reachableBaseUrl,
+        handshakeToken: exchange.token,
+        peerEnvironmentId:
+          credential !== null
+            ? credential.environmentId
+            : yield* fetchPeerEnvironmentId(reachableBaseUrl),
+      });
+
+      // The handshake session cannot be revoked: the peer's revoke route
+      // forbids revoking the calling session and no other credential we hold
+      // has access:write there. It ages out on its own TTL and stays visible
+      // (and revocable) in the peer's authorized-clients list under the
+      // "roaming-enrollment" label.
+
+      let peer: RoamingPeer | null = null;
+      if (credential !== null) {
         yield* secretStore
           .set(
             roamingPeerSecretName(credential.environmentId),
@@ -445,24 +479,6 @@ const make = Effect.gen(function* () {
           enrolledAt: yield* nowIso,
         };
         yield* peers.upsert(peer).pipe(Effect.mapError(internalError("peer record failed")));
-      }
-
-      // Attach half — always freshly derived; the privileged handshake
-      // bearer never leaves this process.
-      const attach = yield* deriveAttachGrant({
-        baseUrl: reachableBaseUrl,
-        handshakeToken: exchange.token,
-        peerEnvironmentId:
-          peer !== null ? peer.environmentId : yield* fetchPeerEnvironmentId(reachableBaseUrl),
-      });
-
-      // The handshake session cannot be revoked: the peer's revoke route
-      // forbids revoking the calling session and no other credential we hold
-      // has access:write there. It ages out on its own TTL and stays visible
-      // (and revocable) in the peer's authorized-clients list under the
-      // "roaming-enrollment" label.
-
-      if (peer !== null) {
         // Pairing IS how roaming turns on locally; the dialog's sync options
         // are the local user's explicit choice, so they apply unconditionally.
         yield* settingsService
