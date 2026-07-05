@@ -1310,6 +1310,17 @@ export function resolveDesktopUpdateChannel(version: string): "latest" | "nightl
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
 }
 
+/**
+ * Self-built fork test builds (`--build-version 0.0.28-fork.1`). Distinct
+ * product name and appId so the artifact installs side-by-side with a stable
+ * release instead of replacing it; the app itself keys separate user-data
+ * and server state dirs off the same version suffix (DesktopEnvironment),
+ * and never auto-updates.
+ */
+export function isForkDesktopBuildVersion(version: string): boolean {
+  return /-fork\./.test(version);
+}
+
 export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
   if (resolveDesktopUpdateChannel(version) === "nightly") {
     return {
@@ -1331,9 +1342,16 @@ export function resolveMockUpdateServerUrl(mockUpdateServerPort: number | undefi
 }
 
 export function resolveDesktopProductName(version: string): string {
+  if (isForkDesktopBuildVersion(version)) {
+    return "T3 Code (Fork)";
+  }
   return resolveDesktopUpdateChannel(version) === "nightly"
     ? "T3 Code (Nightly)"
     : (desktopPackageJson.productName ?? "T3 Code");
+}
+
+export function resolveDesktopAppId(version: string): string {
+  return isForkDesktopBuildVersion(version) ? `${DESKTOP_APP_ID}.fork` : DESKTOP_APP_ID;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1351,7 +1369,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
 ) {
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
+    // Fork builds get a distinct appId (side-by-side identity); the mac
+    // passkey signing config keeps the stable appId — fork builds are
+    // unsigned, so it never applies to them.
+    appId: resolveDesktopAppId(version),
     productName: resolveDesktopProductName(version),
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     directories: {
