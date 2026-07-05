@@ -1,7 +1,7 @@
 # Roaming workspace — local-first plan
 
-> **Status:** M1 complete 2026-07-04 — exit criteria pass on the harness
-> (`scripts/roaming/accept-m1.mjs`; see [M1 results](#m1-results-2026-07-04)); M2 next.
+> **Status:** M2 complete 2026-07-05 — exit criteria pass on the harness
+> (`scripts/roaming/accept-m2.mjs`; see [M2 results](#m2-results-2026-07-05)); M3 next.
 > **Decisions log:** 2026-07-04 — v1 transport for small state = machine-to-machine
 > mirror (user decision); cloud store backend (private git repo or T3 relay)
 > deferred to explicit milestone M7 behind the same interface.
@@ -748,6 +748,51 @@ model):**
   style — `wip` keys contain `/`). Resolution = pick a side, written as a
   new higher-version local blob (the store already clears the conflict row
   on supersede); never a merge.
+
+## M2 results (2026-07-05)
+
+Landed as six reviewed PRs into `feature/roaming`: analysis (#7), contracts
+(#8), UI — merged list + sync-options dialog (#9, fixes #10), VaultSync +
+conflict routes (#11), materialize + auto-enroll (#12). Exit criteria
+verified end-to-end by `scripts/roaming/accept-m2.mjs` on the M0 harness:
+auto-enroll on pairing AND on later project creation → registry + vault
+blobs on B → forged equal-version vault push surfaces as a conflict with
+the local copy untouched → A killed → materialize takes B from empty to a
+registered checkout with `.env` applied (P1) and an honest "no secret files
+synced" notice (P2) → conflict resolved by explicit pick, superseding
+version. Server seams were implemented by Codex (gpt-5.5) from specs
+derived from this doc; contracts, UI, and all review fixes by hand.
+
+Decisions/deviations recorded during implementation and review:
+
+- **Vault capture is fail-closed on the untracked invariant.** A genuine
+  `git ls-files` failure skips the capture; only "not a git repository"
+  treats candidates as untracked. The size cap is enforced from `stat`
+  before any read. Symlinks are never captured (stat follows them) and
+  apply refuses symlinked targets/parents outside the real workspace root;
+  new files are written with their mode up front.
+- **D1 fork guard:** RoamingAutoEnroll skips any project whose
+  workspaceRoot is a `roaming_materializations` target path (persisted
+  before `project.create`), closing the window where it could observe a
+  freshly-materialized project before the register step links the existing
+  workspaceProjectId — reviewer-caught race on the main flow.
+- **Registry updates merge on raw JSON.** `ensureRegistryRoot` writes
+  perMachineRoots without a schema decode/re-encode round-trip, so fields
+  written by newer-schema peers survive an older machine's version bump.
+- **Accepted per D3:** two machines materializing the same project from
+  the same registry version produce an equal-version conflict (disjoint
+  perMachineRoots keys are *not* auto-merged). Surfaced like any conflict;
+  revisit only if it annoys in practice.
+- **Conflict get/resolve routes require `access:write`** — they return and
+  rewrite secret payloads; consistent with M1's administrative posture for
+  enrollment. Client calls ride the same-origin cookie / desktop bearer,
+  matching `httpLayer` semantics exactly (UI review fix).
+- **Materialize is synchronous and honest:** a failed run returns the
+  failed record over HTTP 200 (the UI renders steps + error); resume
+  continues from the failed step (covered by tests); a completed record
+  short-circuits even with a different `targetPath` (per contract note).
+- **VaultSync watcher scopes swap atomically** (reviewer-caught leak:
+  close-then-set let concurrent rescans strand watch fibers).
 
 ## Execution process
 
