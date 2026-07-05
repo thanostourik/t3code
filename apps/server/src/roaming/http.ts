@@ -13,6 +13,8 @@ import {
   AuthAccessWriteScope,
   AuthRoamingMirrorScope,
   type AuthEnvironmentScope,
+  ROAMING_CONFLICT_GET_PATH,
+  ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_ENROLL_PROJECT_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
   ROAMING_MIRROR_FETCH_PATH,
@@ -21,6 +23,10 @@ import {
   ROAMING_PEERS_PATH,
   RoamingAddPeerRequest,
   RoamingAddPeerResponse,
+  RoamingConflictGetRequest,
+  RoamingConflictGetResponse,
+  RoamingConflictResolveRequest,
+  RoamingConflictResolveResponse,
   RoamingEnrollProjectRequest,
   RoamingEnrollProjectResponse,
   RoamingFetchBlobsRequest,
@@ -50,6 +56,7 @@ class RoamingRouteRejection extends Schema.TaggedErrorClass<RoamingRouteRejectio
   { status: Schema.Int, body: Schema.String },
 ) {}
 
+const isRoamingRouteRejection = Schema.is(RoamingRouteRejection);
 const reject = (status: number, body: string) => new RoamingRouteRejection({ status, body });
 
 /** 404 while the roaming setting is off; 401/403 on auth failures. */
@@ -69,7 +76,7 @@ const requireRoamingScope = (scope: AuthEnvironmentScope) =>
         reject(401, "Unauthorized"),
       ),
       Effect.mapError((error) =>
-        Schema.is(RoamingRouteRejection)(error) ? error : reject(500, "Internal Server Error"),
+        isRoamingRouteRejection(error) ? error : reject(500, "Internal Server Error"),
       ),
     );
     if (!session.scopes.includes(scope)) {
@@ -92,7 +99,7 @@ const respondJson = <S extends Schema.Top>(schema: S, value: S["Type"]) =>
     Effect.mapError(() => reject(500, "Internal Server Error")),
     Effect.flatMap((encoded) => HttpServerResponse.json(encoded)),
     Effect.mapError((error) =>
-      Schema.is(RoamingRouteRejection)(error) ? error : reject(500, "Internal Server Error"),
+      isRoamingRouteRejection(error) ? error : reject(500, "Internal Server Error"),
     ),
   );
 
@@ -101,9 +108,7 @@ const handleRejection = <A, R>(
 ): Effect.Effect<A | HttpServerResponse.HttpServerResponse, never, R> =>
   effect.pipe(
     Effect.catchTag("RoamingRouteRejection", (rejection) =>
-      Effect.succeed(
-        HttpServerResponse.text(rejection.body, { status: rejection.status }),
-      ),
+      Effect.succeed(HttpServerResponse.text(rejection.body, { status: rejection.status })),
     ),
   );
 
@@ -159,13 +164,15 @@ const pushRoute = HttpRouter.add(
       for (const blob of body.blobs) {
         // A record failing the integrity gate is reported as stale (not
         // applied) rather than failing the whole batch for honest records.
-        const outcome = yield* blobStore.applyRemote(blob).pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("roaming: rejected pushed blob", { cause }).pipe(
-              Effect.as("stale" as const),
+        const outcome = yield* blobStore
+          .applyRemote(blob)
+          .pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("roaming: rejected pushed blob", { cause }).pipe(
+                Effect.as("stale" as const),
+              ),
             ),
-          ),
-        );
+          );
         results.push({ kind: blob.kind, key: blob.key, outcome });
       }
       return yield* respondJson(RoamingPushBlobsResponse, { results });
@@ -200,13 +207,15 @@ const addPeerRoute = HttpRouter.add(
       yield* requireRoamingScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingAddPeerRequest);
       const roamingService = yield* RoamingService;
-      const peer = yield* roamingService.addPeer(body).pipe(
-        Effect.mapError((error) =>
-          error.reason === "peer-unreachable"
-            ? reject(502, "Peer unreachable")
-            : reject(500, "Internal Server Error"),
-        ),
-      );
+      const peer = yield* roamingService
+        .addPeer(body)
+        .pipe(
+          Effect.mapError((error) =>
+            error.reason === "peer-unreachable"
+              ? reject(502, "Peer unreachable")
+              : reject(500, "Internal Server Error"),
+          ),
+        );
       return yield* respondJson(RoamingAddPeerResponse, { peer });
     }),
   ),
@@ -237,6 +246,71 @@ const enrollProjectRoute = HttpRouter.add(
   ),
 );
 
+const conflictGetRoute = HttpRouter.add(
+  "POST",
+  ROAMING_CONFLICT_GET_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingConflictGetRequest);
+      const blobStore = yield* RoamingBlobStore;
+      const conflicts = yield* blobStore
+        .listConflicts()
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      const conflict = conflicts.find(
+        (candidate) => candidate.kind === body.ref.kind && candidate.key === body.ref.key,
+      );
+      if (conflict === undefined) {
+        return yield* reject(404, "Conflict not found");
+      }
+      const local = yield* blobStore
+        .get(body.ref)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      if (local === null) {
+        return yield* reject(404, "Local record not found");
+      }
+      return yield* respondJson(RoamingConflictGetResponse, { conflict, local });
+    }),
+  ),
+);
+
+const conflictResolveRoute = HttpRouter.add(
+  "POST",
+  ROAMING_CONFLICT_RESOLVE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingConflictResolveRequest);
+      const blobStore = yield* RoamingBlobStore;
+      const conflicts = yield* blobStore
+        .listConflicts()
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      const conflict = conflicts.find(
+        (candidate) => candidate.kind === body.ref.kind && candidate.key === body.ref.key,
+      );
+      if (conflict === undefined) {
+        return yield* reject(404, "Conflict not found");
+      }
+      const local = yield* blobStore
+        .get(body.ref)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      if (local === null) {
+        return yield* reject(404, "Local record not found");
+      }
+      const picked = body.pick === "local" ? local : conflict.remote;
+      const record = yield* blobStore
+        .writeLocal({
+          kind: picked.kind,
+          key: picked.key,
+          workspaceProjectId: conflict.workspaceProjectId,
+          payload: picked.payload,
+        })
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      return yield* respondJson(RoamingConflictResolveResponse, { record });
+    }),
+  ),
+);
+
 export const roamingRoutesLayer = Layer.mergeAll(
   manifestRoute,
   fetchRoute,
@@ -244,4 +318,6 @@ export const roamingRoutesLayer = Layer.mergeAll(
   machineCredentialRoute,
   addPeerRoute,
   enrollProjectRoute,
+  conflictGetRoute,
+  conflictResolveRoute,
 );
