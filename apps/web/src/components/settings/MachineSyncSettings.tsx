@@ -3,13 +3,17 @@
  * project sync, with the JetBrains-style sync-options step (2026-07-05
  * product model). Projects always sync once paired; secret files are an
  * explicit, pre-checked consent. There is no user-visible "roaming"
- * concept — confirming the first machine turns the subsystem on.
+ * concept, no settings-file editing, and no CLI: the switch turns the
+ * subsystem on, "Generate pairing code" mints the admin credential the
+ * other machine pastes into its own "Pair machine" dialog.
  */
 import { useState } from "react";
-import { LaptopIcon, Loader2Icon } from "lucide-react";
+import { AuthAdministrativeScopes } from "@t3tools/contracts";
+import { CopyIcon, LaptopIcon, Loader2Icon } from "lucide-react";
 
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { addRoamingPeer } from "../../environments/primary/roaming";
+import { createServerPairingCredential } from "~/environments/primary";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import {
@@ -30,27 +34,49 @@ export function MachineSyncSection() {
   const secretsSyncEnabled = usePrimarySettings((settings) => settings.roamingSecretsSync);
   const updateSettings = useUpdatePrimarySettings();
   const [isPairDialogOpen, setIsPairDialogOpen] = useState(false);
+  const [generatedCode, setGeneratedCode] = useState<string | null>(null);
+  const [isGeneratingCode, setIsGeneratingCode] = useState(false);
+
+  const handleGenerateCode = () => {
+    if (isGeneratingCode) return;
+    setIsGeneratingCode(true);
+    void (async () => {
+      try {
+        const { credential } = await createServerPairingCredential({
+          label: "Machine sync",
+          scopes: AuthAdministrativeScopes,
+        });
+        setGeneratedCode(credential);
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not generate a pairing code",
+          description: error instanceof Error ? error.message : "Request failed.",
+        });
+      } finally {
+        setIsGeneratingCode(false);
+      }
+    })();
+  };
 
   return (
-    <SettingsSection
-      title="Machine sync"
-      headerAction={
-        <Button variant="outline" size="sm" onClick={() => setIsPairDialogOpen(true)}>
-          <LaptopIcon className="size-3.5" />
-          Pair machine
-        </Button>
-      }
-    >
+    <SettingsSection title="Machine sync">
+      <SettingsRow
+        title="Sync between your machines"
+        description="Your project list appears on every machine you pair, ready to open or materialize. Data travels directly between your machines — no cloud service."
+        control={
+          <Switch
+            aria-label="Machine sync"
+            checked={roamingEnabled}
+            onCheckedChange={(checked) => updateSettings({ roaming: checked })}
+          />
+        }
+      />
       {roamingEnabled ? (
         <>
           <SettingsRow
-            title="Project sync"
-            description="Your project list syncs between paired machines whenever both are online. Projects from other machines appear in the sidebar, ready to materialize."
-            control={<Switch aria-label="Project sync" checked disabled />}
-          />
-          <SettingsRow
             title="Secret files"
-            description="Sync gitignored secret files (.env, local certs) from this machine to your other machines. They travel only over the direct connection between your machines."
+            description="Sync gitignored secret files (.env, local certs) from this machine to your other machines."
             control={
               <Switch
                 aria-label="Sync secret files"
@@ -59,19 +85,76 @@ export function MachineSyncSection() {
               />
             }
           />
+          <SettingsRow
+            title="Pair a machine"
+            description="Generate a code here and paste it on the other machine — or paste a code from the other machine here."
+            control={
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={handleGenerateCode}>
+                  {isGeneratingCode ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                  Generate pairing code
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setIsPairDialogOpen(true)}>
+                  <LaptopIcon className="size-3.5" />
+                  Pair machine
+                </Button>
+              </div>
+            }
+          />
         </>
-      ) : (
-        <SettingsRow
-          title="Not set up"
-          description="Pair another of your machines to sync your project list — and optionally secret files — directly between them. No cloud service involved."
-        />
-      )}
+      ) : null}
       <PairMachineDialog
         open={isPairDialogOpen}
         onOpenChange={setIsPairDialogOpen}
         initialSecretsChecked={roamingEnabled ? secretsSyncEnabled : true}
       />
+      <GeneratedCodeDialog code={generatedCode} onClose={() => setGeneratedCode(null)} />
     </SettingsSection>
+  );
+}
+
+function GeneratedCodeDialog(props: { code: string | null; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (props.code === null) return;
+    void navigator.clipboard.writeText(props.code).then(
+      () => setCopied(true),
+      () => setCopied(false),
+    );
+  };
+
+  return (
+    <Dialog
+      open={props.code !== null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setCopied(false);
+          props.onClose();
+        }
+      }}
+    >
+      <DialogPopup className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Pairing code</DialogTitle>
+          <DialogDescription>
+            On your other machine, open Settings → Connections → Machine sync, choose{" "}
+            <span className="font-medium">Pair machine</span>, and paste this code along with a URL
+            that machine can reach this one at (shown under Network access above).
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center gap-2 px-6 py-4">
+          <Input readOnly value={props.code ?? ""} className="font-mono text-xs" />
+          <Button variant="outline" size="sm" onClick={handleCopy}>
+            <CopyIcon className="size-3.5" />
+            {copied ? "Copied" : "Copy"}
+          </Button>
+        </div>
+        <DialogFooter>
+          <Button onClick={() => props.onClose()}>Done</Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
   );
 }
 
@@ -132,11 +215,9 @@ function PairMachineDialog(props: {
         <DialogHeader>
           <DialogTitle>Pair a machine for sync</DialogTitle>
           <DialogDescription>
-            On the other machine, run{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">
-              t3 auth pairing create --admin
-            </code>{" "}
-            and paste the credential here along with a URL this machine can reach it at.
+            On the other machine, turn on Machine sync and choose{" "}
+            <span className="font-medium">Generate pairing code</span>. Paste the code here along
+            with a URL this machine can reach it at.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4 px-6 py-4">
@@ -150,11 +231,11 @@ function PairMachineDialog(props: {
             />
           </label>
           <label className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">Pairing credential</span>
+            <span className="text-xs font-medium text-muted-foreground">Pairing code</span>
             <Input
               value={pairingCredential}
               onChange={(event) => setPairingCredential(event.target.value)}
-              placeholder="Paste the credential from the other machine"
+              placeholder="Paste the code from the other machine"
             />
           </label>
           <div className="flex flex-col gap-2 rounded-md border border-border/70 p-3">
