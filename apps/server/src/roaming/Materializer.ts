@@ -11,6 +11,7 @@ import {
   RoamingVaultBundle,
   WorkspaceProjectId,
 } from "@t3tools/contracts";
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
@@ -75,7 +76,8 @@ export class Materializer extends Context.Service<
 const decodeRegistryPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RoamingRegistryPayload),
 );
-const encodeRegistryPayload = Schema.encodeEffect(Schema.fromJsonString(RoamingRegistryPayload));
+const decodeRawJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeRawJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeVaultBundle = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
 const decodeMaterializationRecord = Schema.decodeUnknownEffect(RoamingMaterializationRecord);
 const RoamingMaterializeStepsJson = Schema.fromJsonString(
@@ -301,9 +303,16 @@ const make = Effect.gen(function* () {
       return path.join(normalizePath(baseDirectory), name);
     });
 
+  // Compare canonical forms: an existing SSH clone of an HTTPS registry URL
+  // (or .git/trailing-slash variants) is the same repository, not a foreign
+  // directory to refuse.
   const pathHasMatchingRemote = (targetPath: string, remoteUrl: string) =>
     git.listRemotes(targetPath).pipe(
-      Effect.map((result) => result.remotes.some((remote) => remote.url === remoteUrl)),
+      Effect.map((result) =>
+        result.remotes.some(
+          (remote) => normalizeGitRemoteUrl(remote.url) === normalizeGitRemoteUrl(remoteUrl),
+        ),
+      ),
       Effect.orElseSucceed(() => false),
     );
 
@@ -424,13 +433,31 @@ const make = Effect.gen(function* () {
       if (registry.perMachineRoots[environmentId] === targetPath) {
         return;
       }
-      const payload = yield* encodeRegistryPayload({
-        ...registry,
+      // Merge on the raw JSON, not the decoded schema: a decode/re-encode
+      // round-trip strips fields a newer-schema peer wrote, and this
+      // machine's version bump would mirror the stripped payload out as
+      // authoritative. Only perMachineRoots is touched.
+      const current = yield* blobStore
+        .get({ kind: "registry", key: workspaceProjectId })
+        .pipe(Effect.mapError(internalError("registry blob read failed")));
+      if (current === null) {
+        return yield* internalError("registry blob missing during root update")(undefined);
+      }
+      const decoded = yield* decodeRawJson(current.payload).pipe(
+        Effect.mapError(internalError("registry payload parse failed")),
+      );
+      const raw = typeof decoded === "object" && decoded !== null ? decoded : {};
+      const existingRoots = (raw as Record<string, unknown>).perMachineRoots;
+      const merged: Record<string, unknown> = {
+        ...raw,
         perMachineRoots: {
-          ...registry.perMachineRoots,
+          ...(typeof existingRoots === "object" && existingRoots !== null ? existingRoots : {}),
           [environmentId]: targetPath,
         },
-      }).pipe(Effect.mapError(internalError("registry payload encode failed")));
+      };
+      const payload = yield* encodeRawJson(merged).pipe(
+        Effect.mapError(internalError("registry payload encode failed")),
+      );
       yield* blobStore
         .writeLocal({
           kind: "registry",
