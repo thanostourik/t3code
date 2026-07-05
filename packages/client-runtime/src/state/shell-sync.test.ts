@@ -46,6 +46,7 @@ const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   projects: [],
   threads: [],
   roamingProjects: [],
+  roamingMaterializations: [],
   updatedAt: "2026-06-06T00:00:00.000Z",
 };
 

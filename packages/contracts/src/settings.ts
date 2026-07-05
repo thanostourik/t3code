@@ -1092,6 +1092,12 @@ export const ServerSettings = Schema.Struct({
    * this is off.
    */
   roaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Consent to capture and mirror this machine's secret files (vault).
+   * Per-machine and never mirrored: each machine consents to shipping its
+   * own files. Set by the pairing sync-options dialog.
+   */
+  roamingSecretsSync: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -1300,6 +1306,7 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   roaming: Schema.optionalKey(Schema.Boolean),
+  roamingSecretsSync: Schema.optionalKey(Schema.Boolean),
   providers: Schema.optionalKey(
     Schema.Struct({
       codex: Schema.optionalKey(CodexSettingsPatch),

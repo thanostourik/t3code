@@ -524,6 +524,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
               projects: [],
               threads: [],
               roamingProjects: [],
+              roamingMaterializations: [],
               updatedAt: now,
             } satisfies OrchestrationShellSnapshot),
           getThreadShellById: (requestedThreadId: ThreadId) =>
@@ -750,6 +751,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
                 projects: [project],
                 threads: [thread],
                 roamingProjects: [],
+                roamingMaterializations: [],
                 updatedAt: now,
               } satisfies OrchestrationShellSnapshot),
             getThreadShellById: () => Effect.succeed(Option.some(thread)),
