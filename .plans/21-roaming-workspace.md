@@ -29,11 +29,17 @@ the one pairing flow (plus ordinary settings rows for changing your mind
 later); pairing must never leave the user in a state where the other
 machine's projects are visible but dead.
 
-> **Status:** M2 complete 2026-07-05 — exit criteria pass on the harness
-> (`scripts/roaming/accept-m2.mjs`; see [M2 results](#m2-results-2026-07-05));
-> **M2.5 (unified pairing — corrective) is next**, then M3. M2's separate
-> "Machine sync" pairing violates the canonical workflow; see the decisions
-> log entry below and the M2.5 milestone row.
+> **Status:** M2.5 code-complete 2026-07-05 — all PRs merged (#19 analysis,
+> #20 contracts, #21 server, #22 client, #23 acceptance) and the full
+> transport chain passes end-to-end on the harness
+> (`scripts/roaming/accept-m2.5.mjs`; see [M2.5 results](#m25-results-2026-07-05)):
+> one pairing call from two fresh machines yields mirror + standard attach
+> bearer, a conversation is created on the peer over that attach,
+> registry+vault mirror silently, and materialize-with-secrets works with
+> the peer killed. **Pending before calling M2.5 done: the
+> canonical-workflow UI walk on the real desktop build** (one list, live
+> rows, kill peer → offline + Materialize) — the class of check that caught
+> M2's deviation; do not skip it. Then M3.
 > **Decisions log:** 2026-07-04 — v1 transport for small state = machine-to-machine
 > mirror (user decision); cloud store backend (private git repo or T3 relay)
 > deferred to explicit milestone M7 behind the same interface.
@@ -90,6 +96,14 @@ machine's projects are visible but dead.
 > you don't administer; the live→offline row flip needs the sidebar merge to
 > consult connection liveness (cached snapshots of a dead peer currently
 > suppress the Materialize rows).
+> 2026-07-05 (late) — M2.5 implemented and harness-accepted; two deviations
+> from the reviewed design recorded (see [M2.5 results](#m25-results-2026-07-05)):
+> the handshake exchange cannot scope-narrow (the peer consumes the code
+> BEFORE its scope check, so requesting scopes a weaker code lacks would
+> burn it — exchange sends no scope param and branches on the response),
+> and the handshake session cannot be revoked (the peer forbids revoking
+> the calling session; it ages out on TTL, labeled and visible in
+> authorized clients).
 > 2026-07-05 (evening) — **Canonical workflow section added; M2 deviation
 > recorded** (user decision, restated during first real two-machine use).
 > M2 shipped pairing as a standalone "Machine sync" flow establishing only
@@ -1037,6 +1051,80 @@ alternative two-exchange design (mint the code with `remainingUses: 2`)
 against: the uses counter exists only for the in-memory desktop-bootstrap
 grant, not DB-backed pairing links, and a 2-use admin code is strictly weaker
 under interception.
+
+## M2.5 results (2026-07-05)
+
+Landed as five reviewed PRs into `feature/roaming`: analysis (#19, reviewed
+pre-implementation by an independent opus-4.8 pass — verdict "ship with
+changes", changes folded in), contracts (#20), server handshake (#21,
+independent opus-4.8 security review "merge with fixes" + codex review),
+client/UI (#22, codex review), acceptance (#23). Exit criteria verified
+end-to-end by `scripts/roaming/accept-m2.5.mjs` on the M0 harness, starting
+from two FRESH machines with `roaming` off on both: mirror routes 404 while
+pairing routes answer → one `POST /api/roaming/peers` with an admin-scoped
+code returns mirror peer + attach grant with `no-store` headers → the
+`roaming` flag and secrets consent flip on BOTH machines from that one call
+→ the attach bearer is standard-scoped (negative-checked for
+`access:write`), opens the peer's WS, and creates a thread ON the peer over
+the same dispatch path the UI uses → registry + vault mirror to the laptop
+silently → a standard-scoped code degrades to attach-only with the typed
+reason → a re-pair with different sync options does NOT override the peer's
+prior consent (first-pairing rule) while applying locally → peer killed →
+materialize completes from the mirrored copy with `.env` applied.
+
+**Not yet demonstrated: the canonical-workflow UI walk** (one list, live
+rows from the attach, kill peer → the same rows flip to offline +
+Materialize) — the harness script drives HTTP/WS, not the browser, and the
+in-session preview tooling was unavailable (MCP re-auth needed). Run it on
+the real desktop build before starting M3; M2 taught us exactly this check
+catches what code review does not.
+
+Decisions/deviations recorded during implementation and review:
+
+- **The exchange consumes before the scope check** (`EnvironmentAuth`
+  verified): the design review's "narrow the exchange request" is unsafe —
+  requesting scopes a weaker code lacks errors AFTER consumption, burning
+  the code with nothing to show. The handshake therefore exchanges with no
+  scope parameter and branches on the response's granted `scope` field.
+- **No handshake-session revoke exists**: the peer's revoke route forbids
+  revoking the calling session and no other credential we hold has
+  `access:write` there. Accepted: the session ages out on its TTL, labeled
+  `roaming-enrollment`, visible and revocable in the peer's
+  authorized-clients list. (Both this and the point above amend the design
+  review's hygiene asks; the review's other asks — no-store headers, no
+  token logging, reachable base URL in the attach grant — shipped.)
+- **All network steps complete before anything persists locally** (review
+  fix): a failure while deriving the attach bearer leaves no half-paired
+  state. A retry after such a failure needs a fresh code and re-mints a
+  365-day credential on the peer, orphaning the first — accepted,
+  convergent, visible in the peer's client list.
+- **Initiator-side environmentId clobber accepted** (review finding): a
+  malicious "peer" claiming another peer's environmentId could overwrite
+  that peer's stored credential/URLs — but the mirror already pushes all
+  blobs to every paired peer, so pairing with a malicious server grants it
+  everything regardless; rejecting collisions would break legitimate
+  re-pairing after an address change. The callee-side tamper resistance
+  (M1) is unchanged.
+- **First-pairing settings TOCTOU accepted**: two concurrent first mints
+  could both apply sync options; both set `roaming: true` and the window is
+  a fresh machine's first seconds.
+- **Seam placement**: `PeerIntroduction` + `registerBearerGrant` (the
+  registration half of `connectPairing`, factored out with an
+  environmentId-match guard on the descriptor) live in
+  `packages/client-runtime`; the pairing orchestration itself lives in the
+  Add Environment dialog because the local-server roaming HTTP helper is
+  web-side. Relay/cloud discovery later constructs a `PeerIntroduction`
+  and drives the same `POST /api/roaming/peers` + `registerBearerGrant`
+  pair.
+- **Secrets checkbox seeds from the existing choice** (codex review): once
+  roaming is on, the dialog initializes "Secret files" from the current
+  setting instead of pre-checked — pairing another machine never silently
+  re-enables a consent the user explicitly withdrew.
+- **The settings file stores non-defaults only**: `roamingSecretsSync:
+  false` reads back as absence; acceptance asserts accordingly.
+- **Delegation note**: the server seam was specced for Codex (gpt-5.5) but
+  the run hung silently (again) and was taken back and written by hand;
+  both Codex *reviews* worked fine and each caught a real issue.
 
 ## Execution process
 
