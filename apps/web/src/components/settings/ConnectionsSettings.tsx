@@ -3717,7 +3717,11 @@ export function ConnectionsSettings() {
             open={addBackendDialogOpen}
             onOpenChange={(open) => {
               setAddBackendDialogOpen(open);
-              if (!open) {
+              if (open) {
+                // Pre-checked on first pairing (the canonical default), but
+                // an explicit prior choice is never silently re-enabled.
+                setSavedBackendSecretsSync(roamingEnabled ? roamingSecretsSync : true);
+              } else {
                 setSavedBackendError(null);
               }
             }}
