@@ -11,6 +11,7 @@ import { useState } from "react";
 import { AuthAdministrativeScopes } from "@t3tools/contracts";
 import { CopyIcon, LaptopIcon, Loader2Icon } from "lucide-react";
 
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { addRoamingPeer } from "../../environments/primary/roaming";
 import { createServerPairingCredential } from "~/environments/primary";
@@ -114,14 +115,22 @@ export function MachineSyncSection() {
 }
 
 function GeneratedCodeDialog(props: { code: string | null; onClose: () => void }) {
-  const [copied, setCopied] = useState(false);
+  // The hook guards navigator.clipboard availability — absent on plain-HTTP
+  // origins, which is a normal way to reach this dialog. On failure the code
+  // stays selectable in the input; the toast says to copy manually.
+  const { copyToClipboard, isCopied } = useCopyToClipboard({
+    onError: () => {
+      toastManager.add({
+        type: "error",
+        title: "Couldn't access the clipboard",
+        description: "Select the code and copy it manually.",
+      });
+    },
+  });
 
   const handleCopy = () => {
     if (props.code === null) return;
-    void navigator.clipboard.writeText(props.code).then(
-      () => setCopied(true),
-      () => setCopied(false),
-    );
+    copyToClipboard(props.code, undefined);
   };
 
   return (
@@ -129,7 +138,6 @@ function GeneratedCodeDialog(props: { code: string | null; onClose: () => void }
       open={props.code !== null}
       onOpenChange={(open) => {
         if (!open) {
-          setCopied(false);
           props.onClose();
         }
       }}
@@ -147,7 +155,7 @@ function GeneratedCodeDialog(props: { code: string | null; onClose: () => void }
           <Input readOnly value={props.code ?? ""} className="font-mono text-xs" />
           <Button variant="outline" size="sm" onClick={handleCopy}>
             <CopyIcon className="size-3.5" />
-            {copied ? "Copied" : "Copy"}
+            {isCopied ? "Copied" : "Copy"}
           </Button>
         </div>
         <DialogFooter>
