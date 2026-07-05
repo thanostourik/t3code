@@ -14,7 +14,10 @@ import { Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
-import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
+import type {
+  EnvironmentRoamingMaterialization,
+  EnvironmentRoamingProject,
+} from "@t3tools/client-runtime/state/projects";
 import { environmentServerConfigsAtom } from "./server";
 import {
   allEnvironmentProjectSnapshotsReadyAtom,
@@ -73,6 +76,10 @@ export function useProjects(): ReadonlyArray<EnvironmentProject> {
 
 export function useRoamingProjects(): ReadonlyArray<EnvironmentRoamingProject> {
   return useAtomValue(environmentProjects.roamingProjectsAtom);
+}
+
+export function useRoamingMaterializations(): ReadonlyArray<EnvironmentRoamingMaterialization> {
+  return useAtomValue(environmentProjects.roamingMaterializationsAtom);
 }
 
 export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {

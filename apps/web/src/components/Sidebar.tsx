@@ -1,5 +1,8 @@
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
+import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
+import { materializeRoamingProject } from "../environments/primary/roaming";
+import { selectOfflineRoamingProjects } from "../sidebarProjectGrouping";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
@@ -126,6 +129,7 @@ import {
   useProjects,
   useThreadShells,
   useRoamingProjects,
+  useRoamingMaterializations,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
@@ -2107,62 +2111,109 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 });
 
 /**
- * Registry entries mirrored from other machines that are not materialized
- * here. Read-only in M1 (materialize arrives with M2); rendered greyed with
- * an honest staleness label — the data is only as fresh as the last mirror
- * contact.
+ * "Offline — available" rows of the single project list: registry entries
+ * mirrored from other machines whose repository has no live row here. Same
+ * list as local/attached projects (no separate section — 2026-07-05 product
+ * model), greyed, with an honest staleness label and a Materialize action.
  */
-function SidebarRoamingProjects() {
-  const roamingProjects = useRoamingProjects();
-  const remoteOnly = roamingProjects.filter(
-    (entry) => entry.roamingProject.localProjectId === null,
-  );
-  if (remoteOnly.length === 0) {
-    return null;
-  }
+function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
+  const { environmentId, roamingProject } = props.entry;
+  const materializations = useRoamingMaterializations();
+  const materialization =
+    materializations.find(
+      (candidate) =>
+        candidate.materialization.workspaceProjectId === roamingProject.workspaceProjectId,
+    )?.materialization ?? null;
+  const isMaterializing = materialization?.status === "running";
+  const [requestInFlight, setRequestInFlight] = useState(false);
+
+  const runningStep = isMaterializing
+    ? (materialization.steps.find((step) => step.status === "running")?.step ?? "starting")
+    : null;
+  const repository =
+    roamingProject.repository.displayName ??
+    roamingProject.repository.name ??
+    roamingProject.repository.locator.remoteUrl;
+  const staleness =
+    roamingProject.lastMirrorContactAt === null
+      ? "never synced"
+      : `synced ${formatRelativeTimeLabel(roamingProject.lastMirrorContactAt)}`;
+  const hasConflicts = roamingProject.conflicts.length > 0;
+
+  const handleMaterialize = useCallback(() => {
+    setRequestInFlight(true);
+    void (async () => {
+      try {
+        const { materialization: result } = await materializeRoamingProject({
+          workspaceProjectId: roamingProject.workspaceProjectId,
+        });
+        if (result.status === "failed") {
+          toastManager.add({
+            type: "error",
+            title: `Materialize failed: ${roamingProject.title}`,
+            description: result.error ?? "See the server log for details.",
+          });
+          return;
+        }
+        toastManager.add({
+          type: "success",
+          title: `${roamingProject.title} is ready`,
+          description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
+        });
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: `Materialize failed: ${roamingProject.title}`,
+          description: error instanceof Error ? error.message : "Request failed.",
+        });
+      } finally {
+        setRequestInFlight(false);
+      }
+    })();
+  }, [roamingProject.title, roamingProject.workspaceProjectId]);
+
   return (
-    <SidebarGroup className="px-2 pb-2">
-      <div className="mb-1 pl-2">
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
-          Roaming
-        </span>
+    <SidebarMenuItem key={`${environmentId}:${roamingProject.workspaceProjectId}`}>
+      <div
+        className="group/offline flex items-center gap-2 rounded-md px-2 py-1.5"
+        title={`${roamingProject.title} — offline, available from its mirror copy (${staleness})`}
+      >
+        <CloudIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+        <div className="min-w-0 flex-1 opacity-60">
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-sm text-muted-foreground">{roamingProject.title}</span>
+            {hasConflicts ? (
+              <span title="Sync conflict — both machines changed this project's synced files while apart. Resolve from the project's sync details.">
+                <TriangleAlertIcon className="size-3 shrink-0 text-warning" />
+              </span>
+            ) : null}
+          </div>
+          <div className="truncate text-[10px] text-muted-foreground/60">
+            {isMaterializing ? `materializing: ${runningStep}…` : `${repository} · ${staleness}`}
+          </div>
+        </div>
+        {isMaterializing || requestInFlight ? (
+          <LoaderIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground/60" />
+        ) : (
+          <button
+            type="button"
+            className="hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground group-hover/offline:flex"
+            onClick={handleMaterialize}
+            title="Clone this project here, apply synced secret files, and open it"
+          >
+            <FolderPlusIcon className="size-3" />
+            Materialize
+          </button>
+        )}
       </div>
-      <SidebarMenu>
-        {remoteOnly.map(({ environmentId, roamingProject }) => {
-          const repository =
-            roamingProject.repository.displayName ??
-            roamingProject.repository.name ??
-            roamingProject.repository.locator.remoteUrl;
-          const staleness =
-            roamingProject.lastMirrorContactAt === null
-              ? "never synced"
-              : `synced ${formatRelativeTimeLabel(roamingProject.lastMirrorContactAt)}`;
-          return (
-            <SidebarMenuItem key={`${environmentId}:${roamingProject.workspaceProjectId}`}>
-              <div
-                className="flex items-center gap-2 rounded-md px-2 py-1.5 opacity-60"
-                title={`${roamingProject.title} — on another machine (${staleness})`}
-              >
-                <CloudIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm text-muted-foreground">
-                    {roamingProject.title}
-                  </div>
-                  <div className="truncate text-[10px] text-muted-foreground/60">
-                    {repository} · {staleness}
-                  </div>
-                </div>
-              </div>
-            </SidebarMenuItem>
-          );
-        })}
-      </SidebarMenu>
-    </SidebarGroup>
+    </SidebarMenuItem>
   );
 }
 
 export default function Sidebar() {
   const projects = useProjects();
+  const roamingProjects = useRoamingProjects();
+  const offlineRoamingProjects = useMemo(() => selectOfflineRoamingProjects({ roamingProjects, liveProjects: projects }), [roamingProjects, projects]);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
   const router = useRouter();
@@ -4980,7 +5031,7 @@ export default function Sidebar() {
             </div>
           ) : null}
         </SidebarGroup>
-        <SidebarRoamingProjects />
+        <SidebarMenu>{offlineRoamingProjects.map((entry) => <SidebarOfflineProjectRow key={`${entry.environmentId}:${entry.roamingProject.workspaceProjectId}`} entry={entry} />)}</SidebarMenu>
       </SidebarContent>
       <SidebarChromeFooter />
     </>
