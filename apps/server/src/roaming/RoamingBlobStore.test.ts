@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import { EnvironmentId, RoamingBlobRecord, WorkspaceProjectId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
@@ -26,19 +26,20 @@ const layer = it.layer(
     Layer.provideMerge(serverEnvironmentStub),
   ),
 );
+const decodeRoamingBlobRecord = Schema.decodeUnknownSync(RoamingBlobRecord);
 
 const remoteRecord = (input: {
   readonly key: string;
   readonly version: number;
   readonly payload: string;
 }): RoamingBlobRecord =>
-  Schema.decodeUnknownSync(RoamingBlobRecord)({
+  decodeRoamingBlobRecord({
     schemaVersion: 1,
     kind: "registry",
     key: input.key,
     workspaceProjectId: WORKSPACE_PROJECT_ID,
     version: input.version,
-    contentHash: createHash("sha256").update(input.payload, "utf8").digest("hex"),
+    contentHash: NodeCrypto.createHash("sha256").update(input.payload, "utf8").digest("hex"),
     authorEnvironmentId: REMOTE_ENVIRONMENT_ID,
     updatedAt: "2026-07-04T00:00:00.000Z",
     payload: input.payload,
@@ -58,7 +59,7 @@ layer("RoamingBlobStore", (it) => {
       assert.equal(first.version, 1);
       assert.equal(
         first.contentHash,
-        createHash("sha256").update('{"title":"one"}', "utf8").digest("hex"),
+        NodeCrypto.createHash("sha256").update('{"title":"one"}', "utf8").digest("hex"),
       );
       assert.equal(first.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
 
@@ -147,7 +148,7 @@ layer("RoamingBlobStore", (it) => {
     }),
   );
 
-  it.effect("subscribeChanges emits for accepted writes only", () =>
+  it.effect("subscribeChanges emits for accepted writes and recorded conflicts", () =>
     Effect.gen(function* () {
       const store = yield* RoamingBlobStore;
       // Subscription is established when subscribeChanges returns — no race.
@@ -163,7 +164,8 @@ layer("RoamingBlobStore", (it) => {
         remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":5}' }),
       );
       assert.equal(applied, "applied");
-      // Stale, conflict, and idempotent equal-version applies must all be silent…
+      // Stale and idempotent equal-version applies are silent; conflicts emit
+      // the current local record so shell subscribers refresh conflict state.
       const staleOutcome = yield* store.applyRemote(
         remoteRecord({ key: "wp-changes", version: 2, payload: '{"c":2}' }),
       );
@@ -176,7 +178,7 @@ layer("RoamingBlobStore", (it) => {
         remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":5}' }),
       );
       assert.equal(idempotentOutcome, "applied");
-      // …so the third emission must be this trailing local write.
+      // The fourth emission must be this trailing local write.
       yield* store.writeLocal({
         kind: "registry",
         key: "wp-changes",
@@ -188,13 +190,16 @@ layer("RoamingBlobStore", (it) => {
         yield* PubSub.take(changes),
         yield* PubSub.take(changes),
         yield* PubSub.take(changes),
+        yield* PubSub.take(changes),
       ];
       assert.equal(emissions[0]?.version, 1);
       assert.equal(emissions[0]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
       assert.equal(emissions[1]?.version, 5);
       assert.equal(emissions[1]?.authorEnvironmentId, REMOTE_ENVIRONMENT_ID);
-      assert.equal(emissions[2]?.version, 6);
-      assert.equal(emissions[2]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
+      assert.equal(emissions[2]?.version, 5);
+      assert.equal(emissions[2]?.authorEnvironmentId, REMOTE_ENVIRONMENT_ID);
+      assert.equal(emissions[3]?.version, 6);
+      assert.equal(emissions[3]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
       assert.deepEqual(Array.from(yield* PubSub.takeUpTo(changes, 10)), []);
     }),
   );
