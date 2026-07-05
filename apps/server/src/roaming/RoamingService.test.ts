@@ -380,7 +380,16 @@ const runAddPeerAttachOnly = (options?: {
   readonly existingPeers?: ReadonlyArray<{ environmentId: string }>;
 }) =>
   Effect.gen(function* () {
-    const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
+    // An existing peer only counts as a mirror when its credential is
+    // stored too — seed both, matching what a completed addPeer leaves.
+    const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(
+      new Map(
+        (options?.existingPeers ?? []).map((peer) => [
+          roamingPeerSecretName(EnvironmentId.make(peer.environmentId)),
+          new TextEncoder().encode(MACHINE_TOKEN),
+        ]),
+      ),
+    );
     const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>(
       options?.existingPeers ?? [],
     );
