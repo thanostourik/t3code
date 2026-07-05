@@ -5,9 +5,10 @@
  * `roaming:mirror` scope carried by the D4 machine credential. Enrollment
  * RPCs mint credentials and register peers — device management — so they
  * require the administrative `access:write` scope, which standard client
- * sessions do not hold. Every
- * route 404s while the `roaming` server setting is off, so a disabled
- * server does not advertise the feature at all.
+ * sessions do not hold. Routes 404 while the `roaming` server setting is
+ * off, so a disabled server does not advertise the feature — EXCEPT the two
+ * unified-pairing routes (peers, machine-credential): pairing is what turns
+ * the setting on (M2.5), so a fresh machine must be able to answer them.
  */
 import {
   AuthAccessWriteScope,
@@ -23,7 +24,6 @@ import {
   ROAMING_MIRROR_PUSH_PATH,
   ROAMING_PEERS_PATH,
   RoamingAddPeerRequest,
-  RoamingAddPeerResponse,
   RoamingConflictGetRequest,
   RoamingConflictGetResponse,
   RoamingConflictResolveRequest,
@@ -36,6 +36,7 @@ import {
   RoamingMachineCredentialResponse,
   RoamingMaterializeRequest,
   RoamingMaterializeResponse,
+  RoamingPairMachineResponse,
   RoamingPushBlobsRequest,
   RoamingPushBlobsResponse,
   RoamingSyncManifestRequest,
@@ -63,16 +64,15 @@ class RoamingRouteRejection extends Schema.TaggedErrorClass<RoamingRouteRejectio
 const isRoamingRouteRejection = Schema.is(RoamingRouteRejection);
 const reject = (status: number, body: string) => new RoamingRouteRejection({ status, body });
 
-/** 404 while the roaming setting is off; 401/403 on auth failures. */
-const requireRoamingScope = (scope: AuthEnvironmentScope) =>
+/** Same treatment as the auth routes give every credential response. */
+const CREDENTIAL_RESPONSE_HEADERS = {
+  "cache-control": "no-store",
+  pragma: "no-cache",
+} as const;
+
+/** 401/403 on auth failures; no roaming-setting gate (pairing routes). */
+const requireScope = (scope: AuthEnvironmentScope) =>
   Effect.gen(function* () {
-    const settings = yield* ServerSettingsService.pipe(
-      Effect.flatMap((service) => service.getSettings),
-      Effect.mapError(() => reject(500, "Internal Server Error")),
-    );
-    if (!settings.roaming) {
-      return yield* reject(404, "Not Found");
-    }
     const request = yield* HttpServerRequest.HttpServerRequest;
     const auth = yield* EnvironmentAuth.EnvironmentAuth;
     const session = yield* auth.authenticateHttpRequest(request).pipe(
@@ -87,6 +87,19 @@ const requireRoamingScope = (scope: AuthEnvironmentScope) =>
       return yield* reject(403, "Forbidden");
     }
     return session;
+  });
+
+/** 404 while the roaming setting is off; 401/403 on auth failures. */
+const requireRoamingScope = (scope: AuthEnvironmentScope) =>
+  Effect.gen(function* () {
+    const settings = yield* ServerSettingsService.pipe(
+      Effect.flatMap((service) => service.getSettings),
+      Effect.mapError(() => reject(500, "Internal Server Error")),
+    );
+    if (!settings.roaming) {
+      return yield* reject(404, "Not Found");
+    }
+    return yield* requireScope(scope);
   });
 
 const decodeBody = <S extends Schema.Top>(schema: S) =>
@@ -189,16 +202,23 @@ const machineCredentialRoute = HttpRouter.add(
   ROAMING_MACHINE_CREDENTIAL_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthAccessWriteScope);
+      // Deliberately not gated on the roaming setting: a successful mint is
+      // what turns the setting on (pairing is the consent).
+      yield* requireScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingMachineCredentialRequest);
       const roamingService = yield* RoamingService;
       const response = yield* roamingService
         .mintMachineCredential({
           callerEnvironmentId: body.environmentId,
           callerBaseUrls: body.baseUrls,
+          ...(body.syncOptions !== undefined ? { syncOptions: body.syncOptions } : {}),
         })
         .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      return yield* respondJson(RoamingMachineCredentialResponse, response);
+      return yield* respondJson(RoamingMachineCredentialResponse, response).pipe(
+        Effect.map((httpResponse) =>
+          HttpServerResponse.setHeaders(httpResponse, CREDENTIAL_RESPONSE_HEADERS),
+        ),
+      );
     }),
   ),
 );
@@ -208,10 +228,12 @@ const addPeerRoute = HttpRouter.add(
   ROAMING_PEERS_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthAccessWriteScope);
+      // Not gated on the roaming setting: a fresh machine pairs before the
+      // setting exists; a successful handshake flips it on.
+      yield* requireScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingAddPeerRequest);
       const roamingService = yield* RoamingService;
-      const peer = yield* roamingService
+      const result = yield* roamingService
         .addPeer(body)
         .pipe(
           Effect.mapError((error) =>
@@ -231,7 +253,13 @@ const addPeerRoute = HttpRouter.add(
                 : reject(500, "Internal Server Error"),
           ),
         );
-      return yield* respondJson(RoamingAddPeerResponse, { peer });
+      // The response carries a bearer token; same no-store treatment as
+      // every auth credential response.
+      return yield* respondJson(RoamingPairMachineResponse, result).pipe(
+        Effect.map((httpResponse) =>
+          HttpServerResponse.setHeaders(httpResponse, CREDENTIAL_RESPONSE_HEADERS),
+        ),
+      );
     }),
   ),
 );
