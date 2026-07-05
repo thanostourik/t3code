@@ -1476,6 +1476,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           perMachineRoots: payload.value.perMachineRoots,
           lastMirrorContactAt,
           updatedAt: row.updatedAt,
+          // Populated by the M2 vault/conflict PR; empty keeps M1 behavior.
+          conflicts: [],
         });
       }
       return shells;

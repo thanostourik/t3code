@@ -39,6 +39,21 @@ export function applyShellStreamEvent(
       ),
     };
   }
+  if (event.kind === "roaming-materialization-updated") {
+    const exists = snapshot.roamingMaterializations.some(
+      (entry) => entry.workspaceProjectId === event.materialization.workspaceProjectId,
+    );
+    return {
+      ...snapshot,
+      roamingMaterializations: exists
+        ? Arr.map(snapshot.roamingMaterializations, (entry) =>
+            entry.workspaceProjectId === event.materialization.workspaceProjectId
+              ? event.materialization
+              : entry,
+          )
+        : Arr.append(snapshot.roamingMaterializations, event.materialization),
+    };
+  }
 
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 
