@@ -91,13 +91,23 @@ function PairMachineDialog(props: {
 
   const canSubmit = baseUrl.trim().length > 0 && pairingCredential.trim().length > 0;
 
+  const handleOpenChange = (open: boolean) => {
+    if (isSubmitting) return;
+    if (!open) {
+      setBaseUrl("");
+      setPairingCredential("");
+      setErrorMessage(null);
+    }
+    props.onOpenChange(open);
+  };
+
   const handleSubmit = () => {
     if (!canSubmit || isSubmitting) return;
     setIsSubmitting(true);
     setErrorMessage(null);
     void (async () => {
       try {
-        const { peer } = await addRoamingPeer({
+        await addRoamingPeer({
           baseUrls: [baseUrl.trim()],
           pairingCredential: pairingCredential.trim(),
         });
@@ -105,21 +115,19 @@ function PairMachineDialog(props: {
         toastManager.add({
           type: "success",
           title: "Machine paired",
-          description: `Now syncing projects with ${peer.environmentId}.`,
+          description: "Now syncing projects with your other machine.",
         });
-        props.onOpenChange(false);
-        setBaseUrl("");
-        setPairingCredential("");
+        setIsSubmitting(false);
+        handleOpenChange(false);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Pairing failed.");
-      } finally {
         setIsSubmitting(false);
       }
     })();
   };
 
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+    <Dialog open={props.open} onOpenChange={handleOpenChange}>
       <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Pair a machine for sync</DialogTitle>
@@ -177,7 +185,7 @@ function PairMachineDialog(props: {
           {errorMessage ? <p className="text-sm text-destructive">{errorMessage}</p> : null}
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => props.onOpenChange(false)} disabled={isSubmitting}>
+          <Button variant="ghost" onClick={() => handleOpenChange(false)} disabled={isSubmitting}>
             Cancel
           </Button>
           <Button onClick={handleSubmit} disabled={!canSubmit || isSubmitting}>
