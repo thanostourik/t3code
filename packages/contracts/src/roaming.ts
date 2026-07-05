@@ -138,13 +138,9 @@ export const ROAMING_VAULT_BUNDLE_MAX_BYTES = 2 * 1024 * 1024;
 
 export const RoamingVaultOverrides = Schema.Struct({
   /** Repo-relative paths (posix separators), added to the default matches. */
-  include: Schema.Array(TrimmedNonEmptyString).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-  ),
+  include: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   /** Repo-relative paths to drop from the default matches. */
-  exclude: Schema.Array(TrimmedNonEmptyString).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-  ),
+  exclude: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type RoamingVaultOverrides = typeof RoamingVaultOverrides.Type;
 
@@ -246,11 +242,7 @@ export const RoamingMaterializeStepStatus = Schema.Literals([
 ]);
 export type RoamingMaterializeStepStatus = typeof RoamingMaterializeStepStatus.Type;
 
-export const RoamingMaterializationStatus = Schema.Literals([
-  "running",
-  "completed",
-  "failed",
-]);
+export const RoamingMaterializationStatus = Schema.Literals(["running", "completed", "failed"]);
 export type RoamingMaterializationStatus = typeof RoamingMaterializationStatus.Type;
 
 export const RoamingMaterializationRecord = Schema.Struct({
@@ -268,9 +260,7 @@ export const RoamingMaterializationRecord = Schema.Struct({
    * Honest caveats that are not failures — e.g. "no secret files synced"
    * when materializing a project whose vault has no local blob.
    */
-  notices: Schema.Array(Schema.String).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-  ),
+  notices: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   targetPath: Schema.NullOr(TrimmedNonEmptyString),
   /** Set once register-project completes. */
   localProjectId: Schema.NullOr(ProjectId),
@@ -393,16 +383,33 @@ export type RoamingPushBlobsResponse = typeof RoamingPushBlobsResponse.Type;
 // ── Enrollment RPCs ──────────────────────────────────────────────────
 
 /**
+ * Sync choices made in the pairing dialog (M2.5). Travels with the unified
+ * handshake so one pairing action configures both machines. A peer applies
+ * received options only when the same request flips its `roaming` setting
+ * off→on (first pairing) — an explicit prior choice on a machine is never
+ * overridden remotely.
+ */
+export const RoamingPairSyncOptions = Schema.Struct({
+  /** Maps to the `roamingSecretsSync` setting (vault capture consent). */
+  secretsSync: Schema.optional(Schema.Boolean),
+});
+export type RoamingPairSyncOptions = typeof RoamingPairSyncOptions.Type;
+
+/**
  * Called on a peer with a short-lived bearer (obtained by exchanging a
  * pairing credential at /oauth/token) to mint the long-lived
  * machine-to-machine credential (decision D4). The peer records the caller
- * as a known peer.
+ * as a known peer. This route is deliberately NOT gated on the `roaming`
+ * setting: a successful mint is what turns the setting on (pairing is the
+ * consent — the peer's operator minted the administrative pairing code),
+ * and it applies `syncOptions` per the first-pairing-only rule above.
  */
 export const RoamingMachineCredentialRequest = Schema.Struct({
   environmentId: EnvironmentId,
   baseUrls: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  syncOptions: Schema.optional(RoamingPairSyncOptions),
 });
 export type RoamingMachineCredentialRequest = typeof RoamingMachineCredentialRequest.Type;
 
@@ -413,12 +420,70 @@ export const RoamingMachineCredentialResponse = Schema.Struct({
 });
 export type RoamingMachineCredentialResponse = typeof RoamingMachineCredentialResponse.Type;
 
-/** Local (user-session) RPC: enroll a peer machine given its pairing credential. */
+/**
+ * Local (user-session) RPC: the unified pairing handshake (M2.5). The
+ * caller's own server exchanges the single-use pairing credential at the
+ * peer's /oauth/token exactly once — requesting only the scopes the
+ * handshake needs (standard + access:write) — and from that bearer both
+ * establishes the mirror (machine credential + peer record) and derives a
+ * fresh standard-scoped attach bearer for the client, before revoking the
+ * handshake session best-effort. This route is NOT gated on the `roaming`
+ * setting (a fresh machine pairs before any setting exists); success flips
+ * the local setting on and applies `syncOptions` locally.
+ */
 export const RoamingAddPeerRequest = Schema.Struct({
   baseUrls: Schema.Array(TrimmedNonEmptyString).check(Schema.isNonEmpty()),
   pairingCredential: TrimmedNonEmptyString,
+  syncOptions: Schema.optional(RoamingPairSyncOptions),
 });
 export type RoamingAddPeerRequest = typeof RoamingAddPeerRequest.Type;
+
+/**
+ * The attach half of the handshake result: a standard-scoped bearer the
+ * client registers as an ordinary remote-environment connection (the same
+ * shape `connectPairing` would have produced). `baseUrl` is the peer base
+ * URL that actually answered — the client must register that one, not the
+ * first entry it submitted. Responses carrying this MUST be served with
+ * `cache-control: no-store` and the token must never be logged.
+ */
+export const RoamingAttachGrant = Schema.Struct({
+  environmentId: EnvironmentId,
+  baseUrl: TrimmedNonEmptyString,
+  token: TrimmedNonEmptyString,
+  expiresAt: Schema.NullOr(IsoDateTime),
+});
+export type RoamingAttachGrant = typeof RoamingAttachGrant.Type;
+
+/**
+ * Why the mirror half was skipped while the attach half still succeeded.
+ * Attach-only is a first-class outcome, not an error: the same dialog
+ * attaches to servers the user does not administer.
+ *
+ * - `credential-not-administrative`: the exchanged bearer lacks
+ *   `access:write`, so the peer-side mints are impossible. Fix: regenerate
+ *   the code with the administrative preset.
+ * - `peer-does-not-support-machine-pairing`: the peer has no roaming
+ *   machine-credential route (e.g. an upstream T3 server).
+ */
+export const RoamingMirrorUnavailableReason = Schema.Literals([
+  "credential-not-administrative",
+  "peer-does-not-support-machine-pairing",
+]);
+export type RoamingMirrorUnavailableReason = typeof RoamingMirrorUnavailableReason.Type;
+
+/**
+ * Unified handshake result. `attach` is always present — without it the
+ * pairing failed and the route errors instead. `peer` is set iff the mirror
+ * was established; otherwise `mirrorUnavailableReason` says why not.
+ * (Replaces the M2 `RoamingAddPeerResponse` `{ peer }` shape; the server
+ * switches over in the M2.5 server PR.)
+ */
+export const RoamingPairMachineResponse = Schema.Struct({
+  attach: RoamingAttachGrant,
+  peer: Schema.NullOr(RoamingPeer),
+  mirrorUnavailableReason: Schema.NullOr(RoamingMirrorUnavailableReason),
+});
+export type RoamingPairMachineResponse = typeof RoamingPairMachineResponse.Type;
 
 export const RoamingAddPeerResponse = Schema.Struct({
   peer: RoamingPeer,
