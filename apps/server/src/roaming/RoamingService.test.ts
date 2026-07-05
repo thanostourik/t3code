@@ -165,7 +165,7 @@ const makePeersLayer = (rows: Ref.Ref<ReadonlyArray<{ environmentId: string }>>)
     upsert: (peer: { environmentId: string }) => Ref.update(rows, (current) => [...current, peer]),
     ensurePeer: (environmentId: string) =>
       Ref.update(rows, (current) => [...current, { environmentId }]),
-    list: () => Effect.succeed([]),
+    list: () => Ref.get(rows),
     recordContact: () => Effect.die("unused"),
     subscribeChanges: Effect.die("unused") as never,
   } as unknown as RoamingPeers["Service"]);
@@ -291,6 +291,19 @@ describe("RoamingService unified pairing handshake", () => {
     }),
   );
 
+  it.effect("re-pairing an already-mirrored peer with a standard code reports the mirror", () =>
+    Effect.gen(function* () {
+      const { result } = yield* runAddPeerAttachOnly({
+        existingPeers: [{ environmentId: PEER_ENVIRONMENT_ID }],
+      });
+      // The existing credential keeps the mirror alive regardless of this
+      // handshake — claiming sync is unavailable would be a lie.
+      assert.isNotNull(result.peer);
+      assert.isNull(result.mirrorUnavailableReason);
+      assert.strictEqual(result.attach.token, HANDSHAKE_TOKEN);
+    }),
+  );
+
   it.effect("peer without roaming routes: attach still derived, mirror reported unavailable", () =>
     Effect.gen(function* () {
       const peer = yield* makePeerHttpLayer({
@@ -363,10 +376,14 @@ describe("RoamingService unified pairing handshake", () => {
   );
 });
 
-const runAddPeerAttachOnly = () =>
+const runAddPeerAttachOnly = (options?: {
+  readonly existingPeers?: ReadonlyArray<{ environmentId: string }>;
+}) =>
   Effect.gen(function* () {
     const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
-    const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>([]);
+    const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>(
+      options?.existingPeers ?? [],
+    );
     const issued = yield* Ref.make<ReadonlyArray<{ scopes: ReadonlyArray<string> }>>([]);
     const settingsLayer = ServerSettingsService.layerTest({ roaming: false });
     const testLayer = RoamingServiceLayer.pipe(
