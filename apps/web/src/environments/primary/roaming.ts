@@ -11,13 +11,13 @@ import {
   ROAMING_MATERIALIZE_PATH,
   ROAMING_PEERS_PATH,
   RoamingAddPeerRequest,
-  RoamingAddPeerResponse,
   RoamingConflictGetRequest,
   RoamingConflictGetResponse,
   RoamingConflictResolveRequest,
   RoamingConflictResolveResponse,
   RoamingMaterializeRequest,
   RoamingMaterializeResponse,
+  RoamingPairMachineResponse,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -84,12 +84,12 @@ async function postRoaming<
   return Effect.runPromise(Schema.decodeUnknownEffect(input.responseSchema)(json));
 }
 
-export function addRoamingPeer(body: RoamingAddPeerRequest): Promise<RoamingAddPeerResponse> {
+export function addRoamingPeer(body: RoamingAddPeerRequest): Promise<RoamingPairMachineResponse> {
   return postRoaming({
     operation: "roaming.add-peer",
     path: ROAMING_PEERS_PATH,
     requestSchema: RoamingAddPeerRequest,
-    responseSchema: RoamingAddPeerResponse,
+    responseSchema: RoamingPairMachineResponse,
     body,
   });
 }
