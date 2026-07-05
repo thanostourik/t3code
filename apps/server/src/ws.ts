@@ -1907,19 +1907,33 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         // A revoked session must not keep driving this machine over an
         // already-established socket: revocation is otherwise only enforced
         // at (re)connect and HTTP request time, so a live connection would
-        // retain access until it happened to drop. Race the connection
-        // against its own revocation event and tear it down immediately.
-        const sessionRevoked = sessions.streamChanges.pipe(
-          Stream.filter(
-            (change) => change.type === "clientRemoved" && change.sessionId === session.sessionId,
+        // retain access until it happened to drop. Fast path: race the
+        // connection against its own revocation event. Belt: the change
+        // pubsub does not replay, so a revocation landing between upgrade
+        // auth and the subscription would be missed — a periodic existence
+        // check (revoked or expired sessions leave listActive) bounds that
+        // window, and also retires sockets whose session has expired.
+        const sessionGone = Effect.race(
+          sessions.streamChanges.pipe(
+            Stream.filter(
+              (change) => change.type === "clientRemoved" && change.sessionId === session.sessionId,
+            ),
+            Stream.take(1),
+            Stream.runDrain,
           ),
-          Stream.take(1),
-          Stream.runDrain,
-          Effect.as(HttpServerResponse.empty({ status: 401 })),
-        );
+          Effect.gen(function* () {
+            while (true) {
+              yield* Effect.sleep(Duration.seconds(30));
+              const active = yield* sessions.listActive().pipe(Effect.orElseSucceed(() => null));
+              if (active !== null && !active.some((s) => s.sessionId === session.sessionId)) {
+                return;
+              }
+            }
+          }),
+        ).pipe(Effect.as(HttpServerResponse.empty({ status: 401 })));
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
-          () => Effect.race(rpcWebSocketHttpEffect, sessionRevoked),
+          () => Effect.race(rpcWebSocketHttpEffect, sessionGone),
           () => sessions.markDisconnected(session.sessionId),
         );
       }).pipe(
