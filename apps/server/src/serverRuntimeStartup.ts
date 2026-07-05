@@ -45,6 +45,7 @@ import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { PeerMirror } from "./roaming/PeerMirror.ts";
+import { VaultSync } from "./roaming/VaultSync.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -812,6 +813,7 @@ export const make = (options?: StartupOptions) =>
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
     const peerMirror = yield* PeerMirror;
+    const vaultSync = yield* VaultSync;
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -875,6 +877,7 @@ export const make = (options?: StartupOptions) =>
           yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
           yield* peerMirror.start().pipe(Scope.provide(reactorScope));
+          yield* vaultSync.start().pipe(Scope.provide(reactorScope));
         }),
       );
 
