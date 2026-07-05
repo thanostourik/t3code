@@ -690,15 +690,19 @@ model):**
   effective set = shared default pattern list (contract constant
   `DEFAULT_VAULT_PATTERNS`) + include − exclude. Only harness data exists, so
   no blob migration (old payloads decode via defaults).
-- **Vault capture scope: top-level + gitignored-only.** There is no
+- **Vault capture scope: top-level + untracked-only.** There is no
   per-project watcher infra and no recursive-glob machinery worth building:
   default patterns match files at the project root's top level only; nested
   secrets are added via explicit per-project include paths (relative paths,
-  not globs). A file is captured only if git actually ignores it — computed
-  as set difference against `GitVcsDriver.filterIgnoredPaths` (which returns
-  the *non*-ignored side), so committed lookalikes (`.env.example`) stay out
-  with no upstream-file change. Watch = `FileSystem.watch` on the project
-  root dir (+ parents of explicit includes), debounced, plus a startup rescan.
+  not globs). A file is captured only if it is pattern-matched **and
+  untracked** — committed lookalikes (`.env.example`) are excluded via
+  `git ls-files` on the candidates. (Reviewer catch: the plausible-looking
+  reuse of `GitVcsDriver.filterIgnoredPaths` is wrong — it runs
+  `check-ignore --no-index`, which reports committed files matching a
+  `.gitignore` pattern as ignored. Tracked-status, not ignore-status, is
+  the invariant: tracked files travel via git.) Watch = `FileSystem.watch`
+  on the project root dir (+ parents of explicit includes), debounced, plus
+  a startup rescan.
 - **Secrets consent is a per-machine setting.** `roamingSecretsSync` boolean
   (default `false`) in `ServerSettings`, set by the pairing sync-options
   dialog; VaultSync captures only while it (and `roaming`) are on. Not
@@ -708,19 +712,26 @@ model):**
 - **Materialize transport: synchronous HTTP + shell-stream progress.**
   `cloneRepository` has no progress callback, and step-level progress is all
   that's honest anyway. `POST /api/roaming/materialize` runs (or resumes) the
-  step machine and returns the final record; live progress rides the existing
-  shell-stream merge point (`ws.ts` `subscribeShell`, as M1's
-  `roaming-project-upserted` does) as `roaming-materialization-updated`
-  events. No new streaming RPC. Steps persisted per D3-style record in
+  step machine and returns the final record; live progress is a *new* event
+  source (the step machine's own PubSub, not the blob-change subscription)
+  merged at the same `subscribeShell` merge point M1 uses, as
+  `roaming-materialization-updated` events, with a
+  `roamingMaterializations` snapshot field so clients connecting mid-run
+  see state. No new streaming RPC. Steps persisted per D3-style record in
   `roaming_materializations` (035): resolve-path, clone, apply-vault,
   restore-wip (recorded-as-skipped until M4), register-project, bootstrap
-  (skipped until M3).
+  (skipped until M3). The prompt-before-overwrite guard rail cannot fire
+  inside a synchronous RPC: materialize's apply-vault step never overwrites
+  an existing differing file — it skips it and adds a notice; interactive
+  overwrite lives on the on-demand "pull vault files" path.
 - **Auto-enroll hook (no pairing-completed event exists).** A small
   `RoamingAutoEnroll` reactor enrolls every unenrolled local project when
   `roaming` is on and ≥1 peer exists — triggered on startup, on peer-added
   (both directions: local `addPeer` success and inbound
   `ensurePeer` insert from the machine-credential route — each machine
-  enrolls *its own* projects), and on `project.created` domain events via
+  enrolls *its own* projects; `ensurePeer` is a bare INSERT today, so the
+  peer-added signal is a new hook, not free), and on `project.created`
+  domain events via
   `OrchestrationEngine.streamDomainEvents`. Startup reconciliation makes it
   self-healing; `project.roaming.enroll` stays the idempotent unit.
 - **Pairing dialog placement.** Machine pairing UI = ConnectionsSettings
