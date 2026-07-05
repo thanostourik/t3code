@@ -11,7 +11,9 @@ import { EnvironmentId, RoamingPeer } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { PersistenceDecodeError, PersistenceSqlError } from "../persistence/Errors.ts";
@@ -35,6 +37,7 @@ export class RoamingPeers extends Context.Service<
       environmentId: EnvironmentId,
       contactAt: string,
     ) => Effect.Effect<void, RoamingPeersError>;
+    readonly subscribeChanges: Effect.Effect<PubSub.Subscription<void>, never, Scope.Scope>;
   }
 >()("t3/roaming/RoamingPeers") {}
 
@@ -48,23 +51,25 @@ const sqlError = (operation: string) => (cause: unknown) =>
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const changes = yield* PubSub.unbounded<void>();
 
-  const upsert: RoamingPeers["Service"]["upsert"] = Effect.fn("RoamingPeers.upsert")(function* (
-    peer,
-  ) {
-    const baseUrlsJson = yield* encodeBaseUrls(peer.baseUrls).pipe(
-      Effect.mapError((cause) =>
-        PersistenceDecodeError.fromSchemaError("roaming.peers.upsert", cause),
-      ),
-    );
-    yield* sql`
+  const upsert: RoamingPeers["Service"]["upsert"] = Effect.fn("RoamingPeers.upsert")(
+    function* (peer) {
+      const baseUrlsJson = yield* encodeBaseUrls(peer.baseUrls).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError("roaming.peers.upsert", cause),
+        ),
+      );
+      yield* sql`
       INSERT INTO roaming_peers (environment_id, base_urls, last_contact_at, enrolled_at)
       VALUES (${peer.environmentId}, ${baseUrlsJson}, ${peer.lastContactAt}, ${peer.enrolledAt})
       ON CONFLICT (environment_id) DO UPDATE SET
         base_urls = excluded.base_urls,
         last_contact_at = COALESCE(excluded.last_contact_at, roaming_peers.last_contact_at)
     `.pipe(Effect.mapError(sqlError("roaming.peers.upsert")));
-  });
+      yield* PubSub.publish(changes, undefined);
+    },
+  );
 
   const ensurePeer: RoamingPeers["Service"]["ensurePeer"] = Effect.fn("RoamingPeers.ensurePeer")(
     function* (environmentId, enrolledAt) {
@@ -76,6 +81,7 @@ const make = Effect.gen(function* () {
         VALUES (${environmentId}, ${"[]"}, ${null}, ${enrolledAt})
         ON CONFLICT (environment_id) DO NOTHING
       `.pipe(Effect.mapError(sqlError("roaming.peers.ensure")));
+      yield* PubSub.publish(changes, undefined);
     },
   );
 
@@ -125,7 +131,13 @@ const make = Effect.gen(function* () {
     `.pipe(Effect.mapError(sqlError("roaming.peers.record-contact")));
   });
 
-  return { upsert, ensurePeer, list, recordContact } satisfies RoamingPeers["Service"];
+  return {
+    upsert,
+    ensurePeer,
+    list,
+    recordContact,
+    subscribeChanges: PubSub.subscribe(changes),
+  } satisfies RoamingPeers["Service"];
 });
 
 export const layer = Layer.effect(RoamingPeers, make);
