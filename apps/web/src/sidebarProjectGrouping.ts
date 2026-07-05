@@ -1,4 +1,5 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
 import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -92,6 +93,35 @@ function collectProjectWinnersByPhysicalKey(input: {
     }
   }
   return winnersByPhysicalKey;
+}
+
+/**
+ * Roaming registry entries that belong in the single project list as
+ * "offline — available" rows: not materialized here (no local project) and
+ * not covering a repository that already has a live row (local checkout or
+ * attached remote project). One row per workspaceProjectId, first-seen
+ * environment wins, sorted by title for a stable spot below the live rows.
+ */
+export function selectOfflineRoamingProjects(input: {
+  roamingProjects: ReadonlyArray<EnvironmentRoamingProject>;
+  liveProjects: ReadonlyArray<Project>;
+}): EnvironmentRoamingProject[] {
+  const liveRepositoryKeys = new Set(
+    input.liveProjects.flatMap((project) =>
+      project.repositoryIdentity ? [project.repositoryIdentity.canonicalKey] : [],
+    ),
+  );
+  const seen = new Set<string>();
+  const offline: EnvironmentRoamingProject[] = [];
+  for (const entry of input.roamingProjects) {
+    const { roamingProject } = entry;
+    if (roamingProject.localProjectId !== null) continue;
+    if (liveRepositoryKeys.has(roamingProject.repository.canonicalKey)) continue;
+    if (seen.has(roamingProject.workspaceProjectId)) continue;
+    seen.add(roamingProject.workspaceProjectId);
+    offline.push(entry);
+  }
+  return offline.sort((a, b) => a.roamingProject.title.localeCompare(b.roamingProject.title));
 }
 
 export function buildPhysicalToLogicalProjectKeyMap(input: {
