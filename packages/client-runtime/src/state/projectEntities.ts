@@ -3,6 +3,7 @@ import type {
   OrchestrationProjectShell,
   OrchestrationShellSnapshot,
   ProjectId,
+  RoamingMaterializationRecord,
   RoamingProjectShell,
   ScopedProjectRef,
 } from "@t3tools/contracts";
@@ -15,6 +16,9 @@ import { arrayElementsEqual, parseProjectKey, projectKey, projectRefsEqual } fro
 
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = Object.freeze([]);
 const EMPTY_ROAMING_PROJECTS: ReadonlyArray<RoamingProjectShell> = Object.freeze([]);
+const EMPTY_ROAMING_MATERIALIZATIONS: ReadonlyArray<RoamingMaterializationRecord> = Object.freeze(
+  [],
+);
 const EMPTY_PROJECT_INDEX: ReadonlyMap<ProjectId, OrchestrationProjectShell> = new Map();
 
 export function createEnvironmentProjectAtoms(input: {
@@ -125,6 +129,36 @@ export function createEnvironmentProjectAtoms(input: {
     return previousRoamingProjects;
   }).pipe(Atom.withLabel("environment-roaming-project-list"));
 
+  const environmentRoamingMaterializationsAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make(
+      (get): ReadonlyArray<RoamingMaterializationRecord> =>
+        get(input.snapshotAtom(environmentId))?.roamingMaterializations ??
+        EMPTY_ROAMING_MATERIALIZATIONS,
+    ).pipe(Atom.withLabel(`environment-roaming-materializations:${environmentId}`)),
+  );
+
+  let previousRoamingMaterializations: ReadonlyArray<EnvironmentRoamingMaterialization> = [];
+  const roamingMaterializationsAtom = Atom.make((get) => {
+    const next: EnvironmentRoamingMaterialization[] = [];
+    for (const environmentId of get(input.catalogValueAtom).entries.keys()) {
+      for (const materialization of get(environmentRoamingMaterializationsAtom(environmentId))) {
+        next.push({ environmentId, materialization });
+      }
+    }
+    const unchanged =
+      previousRoamingMaterializations.length === next.length &&
+      next.every(
+        (entry, index) =>
+          previousRoamingMaterializations[index]?.environmentId === entry.environmentId &&
+          previousRoamingMaterializations[index]?.materialization === entry.materialization,
+      );
+    if (unchanged) {
+      return previousRoamingMaterializations;
+    }
+    previousRoamingMaterializations = next;
+    return previousRoamingMaterializations;
+  }).pipe(Atom.withLabel("environment-roaming-materialization-list"));
+
   return {
     environmentProjectsAtom,
     environmentProjectIndexAtom,
@@ -134,10 +168,17 @@ export function createEnvironmentProjectAtoms(input: {
     projectAtom: (ref: ScopedProjectRef) => projectAtomFamily(projectKey(ref)),
     environmentRoamingProjectsAtom,
     roamingProjectsAtom,
+    environmentRoamingMaterializationsAtom,
+    roamingMaterializationsAtom,
   };
 }
 
 export interface EnvironmentRoamingProject {
   readonly environmentId: EnvironmentId;
   readonly roamingProject: RoamingProjectShell;
+}
+
+export interface EnvironmentRoamingMaterialization {
+  readonly environmentId: EnvironmentId;
+  readonly materialization: RoamingMaterializationRecord;
 }
