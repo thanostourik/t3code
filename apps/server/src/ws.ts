@@ -94,6 +94,7 @@ import {
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import { Materializer } from "./roaming/Materializer.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
@@ -527,6 +528,7 @@ const makeWsRpcLayer = (
         }
       };
       const roamingBlobStore = yield* RoamingBlobStore;
+      const materializer = yield* Materializer;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
@@ -1554,8 +1556,22 @@ const makeWsRpcLayer = (
                 ),
               );
 
+              const materializationLive = Stream.unwrap(
+                materializer.subscribeUpdates.pipe(
+                  Effect.map((subscription) =>
+                    Stream.fromSubscription(subscription).pipe(
+                      Stream.map((materialization) => ({
+                        kind: "roaming-materialization-updated" as const,
+                        sequence: 0,
+                        materialization,
+                      })),
+                    ),
+                  ),
+                ),
+              );
+
               const liveTail = roamingEnabled
-                ? Stream.merge(bufferedLiveStream, roamingLive)
+                ? Stream.merge(bufferedLiveStream, Stream.merge(roamingLive, materializationLive))
                 : bufferedLiveStream;
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
@@ -1572,7 +1588,9 @@ const makeWsRpcLayer = (
                 // Roaming projects are hidden while the flag is off; every
                 // snapshot-emitting path below masks through this one helper.
                 Effect.map((snapshot) =>
-                  roamingEnabled ? snapshot : { ...snapshot, roamingProjects: [] },
+                  roamingEnabled
+                    ? snapshot
+                    : { ...snapshot, roamingProjects: [], roamingMaterializations: [] },
                 ),
               );
 

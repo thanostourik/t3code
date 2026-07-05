@@ -64,6 +64,7 @@ import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0036Roaming from "./Migrations/036_RoamingBlobs.ts";
 import Migration0037Roaming from "./Migrations/037_RoamingPeersAndProjectionWorkspaceId.ts";
+import Migration0038Roaming from "./Migrations/038_RoamingMaterializations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -128,6 +129,7 @@ const migrationEntries = [
   [50, "ProjectionThreadPullRequests", Migration0050],
   [51, "RoamingBlobs", Migration0036Roaming],
   [52, "RoamingPeersAndProjectionWorkspaceId", Migration0037Roaming],
+  [53, "RoamingMaterializations", Migration0038Roaming],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

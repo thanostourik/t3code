@@ -107,6 +107,7 @@ import {
 } from "./ws.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
+import { Materializer } from "./roaming/Materializer.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
@@ -1038,12 +1039,18 @@ const buildAppUnderTest = (options?: {
       ),
     );
 
-    const appLayer = servedRoutesLayer
-      .pipe(
-        Layer.provide(Layer.mock(RoamingBlobStore)({})),
-        Layer.provide(Layer.mock(RoamingService)({})),
-      )
-      .pipe(
+    const appLayer = servedRoutesLayer.pipe(
+      Layer.provide(Layer.mock(RoamingBlobStore)({})),
+      Layer.provide(
+        Layer.succeed(Materializer, {
+          materialize: () => Effect.die("unused"),
+          subscribeUpdates: Effect.gen(function* () {
+            const pubsub = yield* PubSub.unbounded<never>();
+            return yield* PubSub.subscribe(pubsub);
+          }),
+        } satisfies Materializer["Service"]),
+      ),
+      Layer.provide(Layer.mock(RoamingService)({})),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(

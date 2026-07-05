@@ -28,6 +28,9 @@ import {
   ModelSelection,
   ProjectId,
   ThreadLinkedPullRequest,
+  RoamingMaterializationRecord,
+  RoamingMaterializeStepName,
+  RoamingMaterializeStepStatus,
   RoamingProjectShell,
   RoamingRegistryPayload,
   ThreadId,
@@ -101,6 +104,21 @@ const THREAD_DETAIL_ACTIVITY_PAYLOAD_BATCH_SIZE = 25;
 // SQLite trim defaults to spaces. Match the whitespace removed by String.trim.
 const MESSAGE_TRIM_WHITESPACE =
   "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+const decodeRoamingMaterializationRecord = Schema.decodeUnknownEffect(RoamingMaterializationRecord);
+const RoamingMaterializeStepsJson = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      step: RoamingMaterializeStepName,
+      status: RoamingMaterializeStepStatus,
+      detail: Schema.optional(Schema.String),
+    }),
+  ),
+);
+const RoamingMaterializeNoticesJson = Schema.fromJsonString(Schema.Array(Schema.String));
+const decodeRoamingMaterializeStepsJson = Schema.decodeUnknownEffect(RoamingMaterializeStepsJson);
+const decodeRoamingMaterializeNoticesJson = Schema.decodeUnknownEffect(
+  RoamingMaterializeNoticesJson,
+);
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
@@ -2614,6 +2632,74 @@ pending_approval_requests AS (
       return shells;
     });
 
+  const listRoamingMaterializations = () =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{
+        readonly workspaceProjectId: string;
+        readonly status: string;
+        readonly stepsJson: string;
+        readonly noticesJson: string;
+        readonly targetPath: string | null;
+        readonly localProjectId: string | null;
+        readonly error: string | null;
+        readonly startedAt: string;
+        readonly updatedAt: string;
+      }>`
+          SELECT
+            workspace_project_id AS "workspaceProjectId",
+            status,
+            steps_json AS "stepsJson",
+            notices_json AS "noticesJson",
+            target_path AS "targetPath",
+            local_project_id AS "localProjectId",
+            error,
+            started_at AS "startedAt",
+            updated_at AS "updatedAt"
+          FROM roaming_materializations
+          ORDER BY updated_at DESC, workspace_project_id
+        `.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingMaterializations:query"),
+        ),
+      );
+
+      const materializations = [];
+      for (const row of rows) {
+        materializations.push(
+          yield* decodeRoamingMaterializationRecord({
+            workspaceProjectId: row.workspaceProjectId,
+            status: row.status,
+            steps: yield* decodeRoamingMaterializeStepsJson(row.stepsJson).pipe(
+              Effect.mapError(
+                toPersistenceDecodeError(
+                  "ProjectionSnapshotQuery.listRoamingMaterializations:decodeSteps",
+                ),
+              ),
+            ),
+            notices: yield* decodeRoamingMaterializeNoticesJson(row.noticesJson).pipe(
+              Effect.mapError(
+                toPersistenceDecodeError(
+                  "ProjectionSnapshotQuery.listRoamingMaterializations:decodeNotices",
+                ),
+              ),
+            ),
+            targetPath: row.targetPath,
+            localProjectId: row.localProjectId,
+            error: row.error,
+            startedAt: row.startedAt,
+            updatedAt: row.updatedAt,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceDecodeError(
+                "ProjectionSnapshotQuery.listRoamingMaterializations:decodeRecord",
+              ),
+            ),
+          ),
+        );
+      }
+      return materializations;
+    });
+
   const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
     sql
       .withTransaction(
@@ -2757,6 +2843,7 @@ pending_approval_requests AS (
                     : Result.failVoid,
                 ),
                 roamingProjects: yield* listRoamingProjectShells(),
+                roamingMaterializations: yield* listRoamingMaterializations(),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               };
 
@@ -2917,6 +3004,8 @@ pending_approval_requests AS (
                   ),
                   planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
                 })),
+                roamingProjects: [],
+                roamingMaterializations: [],
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               };
 
