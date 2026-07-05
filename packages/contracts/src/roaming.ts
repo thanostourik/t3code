@@ -423,11 +423,15 @@ export type RoamingMachineCredentialResponse = typeof RoamingMachineCredentialRe
 /**
  * Local (user-session) RPC: the unified pairing handshake (M2.5). The
  * caller's own server exchanges the single-use pairing credential at the
- * peer's /oauth/token exactly once — requesting only the scopes the
- * handshake needs (standard + access:write) — and from that bearer both
- * establishes the mirror (machine credential + peer record) and derives a
- * fresh standard-scoped attach bearer for the client, before revoking the
- * handshake session best-effort. This route is NOT gated on the `roaming`
+ * peer's /oauth/token exactly once — with NO scope parameter, because the
+ * credential is consumed before the peer's scope check, so requesting
+ * scopes a weaker code lacks would burn it — and branches on the granted
+ * scopes from the response: with access:write it establishes the mirror
+ * (machine credential + peer record) and derives a fresh standard-scoped
+ * attach bearer for the client; without it, attach-only. The handshake
+ * session cannot be revoked (the peer forbids revoking the calling
+ * session); it ages out on its TTL and stays visible in the peer's
+ * authorized-clients list. This route is NOT gated on the `roaming`
  * setting (a fresh machine pairs before any setting exists); success flips
  * the local setting on and applies `syncOptions` locally.
  */
