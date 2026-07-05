@@ -39,6 +39,7 @@ function shellState(input: {
             projects: [],
             threads: [],
             roamingProjects: [],
+            roamingMaterializations: [],
           }),
     status: input.status,
     error: input.error === undefined ? Option.none() : Option.some(input.error),

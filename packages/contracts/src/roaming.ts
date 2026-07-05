@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
   IsoDateTime,
+  NonNegativeInt,
   PositiveInt,
   ProjectId,
   TrimmedNonEmptyString,
@@ -103,6 +104,69 @@ export const RoamingBlobConflict = Schema.Struct({
 });
 export type RoamingBlobConflict = typeof RoamingBlobConflict.Type;
 
+// ── Vault (step 2) ───────────────────────────────────────────────────
+//
+// Secret-file capture is a global category: `DEFAULT_VAULT_PATTERNS` applies
+// to every enrolled project's root-level files, filtered to those git
+// actually ignores. Per-project overrides are the rare exception: `include`
+// adds explicit repo-relative paths (may be nested; not globs), `exclude`
+// drops files the defaults matched. Effective set = defaults + include −
+// exclude.
+
+/**
+ * Matching alone never captures: the server additionally requires the file
+ * to be untracked (committed lookalikes like `.env.example` match `.env.*`
+ * but travel via git and stay out).
+ */
+export const DEFAULT_VAULT_PATTERNS = [
+  ".env",
+  ".env.*",
+  "*.local.*",
+  "*.pem",
+  "*.key",
+  "*.crt",
+  "*.p12",
+  "*.pfx",
+] as const;
+
+/**
+ * Total decoded-bytes cap per vault bundle. A pattern accidentally matching
+ * something huge must not silently ship it: an oversize capture is skipped
+ * and surfaced as a warning, never truncated or partially written.
+ */
+export const ROAMING_VAULT_BUNDLE_MAX_BYTES = 2 * 1024 * 1024;
+
+export const RoamingVaultOverrides = Schema.Struct({
+  /** Repo-relative paths (posix separators), added to the default matches. */
+  include: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Repo-relative paths to drop from the default matches. */
+  exclude: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+});
+export type RoamingVaultOverrides = typeof RoamingVaultOverrides.Type;
+
+export const RoamingVaultFileEntry = Schema.Struct({
+  /** Repo-relative, posix separators. */
+  path: TrimmedNonEmptyString,
+  /** Unix permission bits, when capture knows them (0o600 certs stay 0o600). */
+  mode: Schema.optional(NonNegativeInt),
+  /** Hex sha-256 of the decoded file bytes — the per-file conflict signal. */
+  sha256: TrimmedNonEmptyString,
+  contentBase64: Schema.String,
+});
+export type RoamingVaultFileEntry = typeof RoamingVaultFileEntry.Type;
+
+/** Payload of blob kind=vault (key=workspaceProjectId), JSON-encoded. */
+export const RoamingVaultBundle = Schema.Struct({
+  schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  capturedAt: IsoDateTime,
+  files: Schema.Array(RoamingVaultFileEntry),
+});
+export type RoamingVaultBundle = typeof RoamingVaultBundle.Type;
+
 // ── Registry entry payload (kind=registry, key=workspaceProjectId) ──
 
 export const RoamingRegistryPayload = Schema.Struct({
@@ -110,9 +174,9 @@ export const RoamingRegistryPayload = Schema.Struct({
   title: TrimmedNonEmptyString,
   repository: RepositoryIdentity,
   defaultBranch: Schema.optional(TrimmedNonEmptyString),
-  /** Repo-relative globs of vault-tracked files (step 2; empty until then). */
-  vaultManifest: Schema.Array(TrimmedNonEmptyString).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
+  /** Per-project exceptions to the global vault defaults (rarely used). */
+  vaultOverrides: RoamingVaultOverrides.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ include: [], exclude: [] })),
   ),
   /** Blob key of the bootstrap recipe (step 4), when one exists. */
   recipeRef: Schema.optional(TrimmedNonEmptyString),
@@ -143,8 +207,125 @@ export const RoamingProjectShell = Schema.Struct({
   lastMirrorContactAt: Schema.NullOr(IsoDateTime),
   /** From the registry blob — when the entry itself last changed. */
   updatedAt: IsoDateTime,
+  /** Unresolved blob conflicts for this project (equal version, different hash). */
+  conflicts: Schema.Array(
+    Schema.Struct({
+      kind: RoamingBlobKind,
+      detectedAt: IsoDateTime,
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type RoamingProjectShell = typeof RoamingProjectShell.Type;
+
+// ── Materialize (step 3) ─────────────────────────────────────────────
+//
+// One resumable materialization per (workspaceProjectId) per machine,
+// checkpointed in `roaming_materializations`. The RPC is synchronous — it
+// runs (or resumes) the step machine and returns the final record; live
+// step transitions ride the shell stream as `roaming-materialization-updated`
+// events. Re-running a failed materialization continues, never restarts.
+
+export const RoamingMaterializeStepName = Schema.Literals([
+  "resolve-path",
+  "clone",
+  "apply-vault",
+  /** Recorded as skipped until M4 lands WIP snapshots. */
+  "restore-wip",
+  "register-project",
+  /** Recorded as skipped until M3 lands bootstrap recipes. */
+  "bootstrap",
+]);
+export type RoamingMaterializeStepName = typeof RoamingMaterializeStepName.Type;
+
+export const RoamingMaterializeStepStatus = Schema.Literals([
+  "pending",
+  "running",
+  "completed",
+  "skipped",
+  "failed",
+]);
+export type RoamingMaterializeStepStatus = typeof RoamingMaterializeStepStatus.Type;
+
+export const RoamingMaterializationStatus = Schema.Literals([
+  "running",
+  "completed",
+  "failed",
+]);
+export type RoamingMaterializationStatus = typeof RoamingMaterializationStatus.Type;
+
+export const RoamingMaterializationRecord = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+  status: RoamingMaterializationStatus,
+  steps: Schema.Array(
+    Schema.Struct({
+      step: RoamingMaterializeStepName,
+      status: RoamingMaterializeStepStatus,
+      /** Human-readable outcome ("cloned to ~/src/app", failure text). */
+      detail: Schema.optional(Schema.String),
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /**
+   * Honest caveats that are not failures — e.g. "no secret files synced"
+   * when materializing a project whose vault has no local blob.
+   */
+  notices: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  targetPath: Schema.NullOr(TrimmedNonEmptyString),
+  /** Set once register-project completes. */
+  localProjectId: Schema.NullOr(ProjectId),
+  error: Schema.NullOr(Schema.String),
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type RoamingMaterializationRecord = typeof RoamingMaterializationRecord.Type;
+
+export const RoamingMaterializeRequest = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+  /**
+   * Overrides perMachineRoots / default-root resolution when set. Ignored
+   * when a completed materialization already exists for the project — the
+   * RPC then returns that record unchanged (re-materialize to a new path is
+   * not an M2 flow).
+   */
+  targetPath: Schema.optional(TrimmedNonEmptyString),
+});
+export type RoamingMaterializeRequest = typeof RoamingMaterializeRequest.Type;
+
+export const RoamingMaterializeResponse = Schema.Struct({
+  materialization: RoamingMaterializationRecord,
+});
+export type RoamingMaterializeResponse = typeof RoamingMaterializeResponse.Type;
+
+// ── Conflict surfacing / resolution ─────────────────────────────────
+//
+// POST bodies rather than path params — `wip` keys contain `/`. Resolution
+// is always an explicit pick; the chosen side is written as a new
+// higher-version local blob (which supersedes and clears the conflict) and
+// mirrors out like any write.
+
+export const RoamingConflictGetRequest = Schema.Struct({
+  ref: RoamingBlobRef,
+});
+export type RoamingConflictGetRequest = typeof RoamingConflictGetRequest.Type;
+
+export const RoamingConflictGetResponse = Schema.Struct({
+  conflict: RoamingBlobConflict,
+  /** The local record the remote one collided with. */
+  local: RoamingBlobRecord,
+});
+export type RoamingConflictGetResponse = typeof RoamingConflictGetResponse.Type;
+
+export const RoamingConflictResolveRequest = Schema.Struct({
+  ref: RoamingBlobRef,
+  pick: Schema.Literals(["local", "remote"]),
+});
+export type RoamingConflictResolveRequest = typeof RoamingConflictResolveRequest.Type;
+
+export const RoamingConflictResolveResponse = Schema.Struct({
+  record: RoamingBlobRecord,
+});
+export type RoamingConflictResolveResponse = typeof RoamingConflictResolveResponse.Type;
 
 // ── Peers ────────────────────────────────────────────────────────────
 
@@ -263,3 +444,6 @@ export const ROAMING_MIRROR_PUSH_PATH = "/api/roaming/mirror/push";
 export const ROAMING_MACHINE_CREDENTIAL_PATH = "/api/roaming/machine-credential";
 export const ROAMING_PEERS_PATH = "/api/roaming/peers";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
+export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
+export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";
+export const ROAMING_CONFLICT_RESOLVE_PATH = "/api/roaming/conflicts/resolve";
