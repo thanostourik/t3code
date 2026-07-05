@@ -1587,27 +1587,21 @@ function SavedBackendListRow({
                 <Button
                   size="xs"
                   variant="outline"
-                  disabled={removingEnvironmentId === environmentId}
-                  onClick={() => void onRemove(environmentId)}
+                  disabled={isConnecting || removingEnvironmentId === environmentId}
+                  onClick={() => void onConnect(environmentId)}
                 >
-                  {removingEnvironmentId === environmentId ? "Removing…" : "Remove"}
+                  {isConnecting ? "Connecting…" : "Connect"}
                 </Button>
               ) : null}
+              {/* Removal must not depend on the environment being reachable —
+                  forgetting an offline machine is the common case. */}
               <Button
                 size="xs"
                 variant="outline"
                 disabled={isConnecting || removingEnvironmentId === environmentId}
-                onClick={() =>
-                  void (isConnected ? onRemove(environmentId) : onConnect(environmentId))
-                }
+                onClick={() => void onRemove(environmentId)}
               >
-                {isConnected
-                  ? removingEnvironmentId === environmentId
-                    ? "Disconnecting…"
-                    : "Disconnect"
-                  : isConnecting
-                    ? "Connecting…"
-                    : "Connect"}
+                {removingEnvironmentId === environmentId ? "Removing…" : "Remove"}
               </Button>
             </>
           )}
