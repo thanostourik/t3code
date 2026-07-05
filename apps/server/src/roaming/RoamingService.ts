@@ -34,6 +34,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as HttpBody from "effect/unstable/http/HttpBody";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -399,6 +400,23 @@ const make = Effect.gen(function* () {
       // no broader than what plain pairing would have produced.
       if (!exchange.scopes.includes(AuthAccessWriteScope)) {
         const peerEnvironmentId = yield* fetchPeerEnvironmentId(reachableBaseUrl);
+        // Re-pairing an ALREADY-mirrored machine with a standard code must
+        // not claim sync is unavailable — the existing credential keeps the
+        // mirror alive regardless of this handshake (field finding). A bare
+        // ensurePeer row is not enough: without the stored credential this
+        // machine cannot initiate mirror passes (PeerMirror skips it).
+        const peerRow =
+          (yield* peers.list().pipe(Effect.orElseSucceed(() => []))).find(
+            (candidate) => candidate.environmentId === peerEnvironmentId,
+          ) ?? null;
+        const hasCredential =
+          peerRow !== null &&
+          Option.isSome(
+            yield* secretStore
+              .get(roamingPeerSecretName(peerEnvironmentId))
+              .pipe(Effect.orElseSucceed(() => Option.none())),
+          );
+        const existingPeer = hasCredential ? peerRow : null;
         return {
           attach: {
             environmentId: peerEnvironmentId,
@@ -406,8 +424,8 @@ const make = Effect.gen(function* () {
             token: exchange.token,
             expiresAt: exchange.expiresAt,
           },
-          peer: null,
-          mirrorUnavailableReason: "credential-not-administrative",
+          peer: existingPeer,
+          mirrorUnavailableReason: existingPeer !== null ? null : "credential-not-administrative",
         } satisfies RoamingPairMachineResponse;
       }
 
