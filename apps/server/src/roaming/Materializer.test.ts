@@ -29,6 +29,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { Materializer, layer as MaterializerLayer } from "./Materializer.ts";
 import { PeerMirror } from "./PeerMirror.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as RoamingBlobStoreLayer } from "./RoamingBlobStore.ts";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("env-materializer");
@@ -231,6 +232,7 @@ const makeLayer = (input: {
       ),
       Layer.provideMerge(makeEngineLayer(input.dispatches, input.projectRows)),
       Layer.provideMerge(peerMirrorStub),
+      Layer.provideMerge(VcsProcess.layer),
     )
     .pipe(Layer.provideMerge(NodeServices.layer));
 

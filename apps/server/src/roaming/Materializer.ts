@@ -31,6 +31,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
@@ -179,10 +180,19 @@ const failureMessage = (cause: unknown): string => {
     if (message !== null) parts.push(message);
     current = record.cause;
   }
+  // Known say-nothing wrapper texts add noise once a real message exists.
+  const generic = new Set([
+    "The source control operation could not be completed.",
+    "Git command exited with a non-zero status.",
+    "Process exited with a non-zero status.",
+    "Authentication failed.",
+  ]);
   const unique = [...new Set(parts)];
-  if (unique.length === 0) return "Unknown materialize failure";
+  const informative = unique.filter((part) => !generic.has(part));
+  const chosen = informative.length > 0 ? informative : unique;
+  if (chosen.length === 0) return "Unknown materialize failure";
   // Outermost context first, root cause last — the root is what to fix.
-  return unique.join(" · ");
+  return chosen.join(" · ");
 };
 
 const make = Effect.gen(function* () {
@@ -194,6 +204,7 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettingsService;
   const blobStore = yield* RoamingBlobStore;
   const peerMirror = yield* PeerMirror;
+  const vcsProcess = yield* VcsProcess.VcsProcess;
   const sourceControl = yield* SourceControlRepositoryService;
   const git = yield* VcsDriver;
   const engine = yield* OrchestrationEngineService;
@@ -280,6 +291,32 @@ const make = Effect.gen(function* () {
       yield* PubSub.publish(updates, updated);
       return updated;
     });
+
+  const diagnoseRemote = (remoteUrl: string): Effect.Effect<string | null> =>
+    vcsProcess
+      .run({
+        operation: "Materializer.diagnoseRemote",
+        command: "git",
+        cwd: "/",
+        args: ["ls-remote", "--exit-code", remoteUrl, "HEAD"],
+        allowNonZeroExit: true,
+        timeoutMs: 20_000,
+        maxOutputBytes: 64 * 1024,
+        env: { GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -oBatchMode=yes" },
+      })
+      .pipe(
+        Effect.map((result) => {
+          if (result.exitCode === 0) return null;
+          const stderr = result.stderr
+            .trim()
+            // never echo embedded credentials (https://user:token@host/...)
+            .replace(/\/\/[^/@\s]+@/g, "//<redacted>@");
+          return stderr.length > 0
+            ? `Cannot reach ${remoteUrl.replace(/\/\/[^/@\s]+@/g, "//<redacted>@")} from this machine's background server: ${stderr}`
+            : null;
+        }),
+        Effect.orElseSucceed(() => null),
+      );
 
   const loadRegistry = (workspaceProjectId: WorkspaceProjectId) =>
     Effect.gen(function* () {
@@ -372,9 +409,19 @@ const make = Effect.gen(function* () {
           );
         }
       }
-      yield* sourceControl
-        .cloneRepository({ remoteUrl, destinationPath: targetPath })
-        .pipe(Effect.mapError((cause) => stepError("clone-failed", failureMessage(cause), cause)));
+      yield* sourceControl.cloneRepository({ remoteUrl, destinationPath: targetPath }).pipe(
+        Effect.catch((cause) =>
+          // The vcs layer deliberately drops git's stderr from errors
+          // (token safety), leaving "exited with a non-zero status" — not
+          // actionable. Diagnose with a harmless ls-remote whose stderr we
+          // CAN read, and report that (credentials redacted) instead.
+          diagnoseRemote(remoteUrl).pipe(
+            Effect.flatMap((diagnostic) =>
+              Effect.fail(stepError("clone-failed", diagnostic ?? failureMessage(cause), cause)),
+            ),
+          ),
+        ),
+      );
       return `cloned to ${targetPath}`;
     });
 
