@@ -65,6 +65,7 @@ import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0036Roaming from "./Migrations/036_RoamingBlobs.ts";
 import Migration0037Roaming from "./Migrations/037_RoamingPeersAndProjectionWorkspaceId.ts";
 import Migration0038Roaming from "./Migrations/038_RoamingMaterializations.ts";
+import Migration0039Roaming from "./Migrations/039_RoamingPeerSyncEnabled.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -130,6 +131,7 @@ const migrationEntries = [
   [51, "RoamingBlobs", Migration0036Roaming],
   [52, "RoamingPeersAndProjectionWorkspaceId", Migration0037Roaming],
   [53, "RoamingMaterializations", Migration0038Roaming],
+  [54, "RoamingPeerSyncEnabled", Migration0039Roaming],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
