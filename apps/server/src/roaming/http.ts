@@ -22,8 +22,11 @@ import {
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
   ROAMING_MIRROR_PUSH_PATH,
+  ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
+  ROAMING_PEERS_REMOVE_PATH,
   RoamingAddPeerRequest,
+  RoamingListPeersResponse,
   RoamingConflictGetRequest,
   RoamingConflictGetResponse,
   RoamingConflictResolveRequest,
@@ -38,6 +41,8 @@ import {
   RoamingMaterializeResponse,
   RoamingPairMachineResponse,
   RoamingPushBlobsRequest,
+  RoamingRemovePeerRequest,
+  RoamingRemovePeerResponse,
   RoamingPushBlobsResponse,
   RoamingSyncManifestRequest,
   RoamingSyncManifestResponse,
@@ -50,9 +55,11 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { Materializer } from "./Materializer.ts";
+import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingService } from "./RoamingService.ts";
 
@@ -264,6 +271,43 @@ const addPeerRoute = HttpRouter.add(
   ),
 );
 
+const listPeersRoute = HttpRouter.add(
+  "POST",
+  ROAMING_PEERS_LIST_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      // Un-gated like the other pairing routes: the per-environment sync
+      // controls must render truthfully even while roaming is off.
+      yield* requireScope(AuthAccessWriteScope);
+      const peers = yield* RoamingPeers.pipe(
+        Effect.flatMap((service) => service.list()),
+        Effect.mapError(() => reject(500, "Internal Server Error")),
+      );
+      return yield* respondJson(RoamingListPeersResponse, { peers });
+    }),
+  ),
+);
+
+const removePeerRoute = HttpRouter.add(
+  "POST",
+  ROAMING_PEERS_REMOVE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingRemovePeerRequest);
+      const peers = yield* RoamingPeers;
+      const secretStore = yield* ServerSecretStore;
+      const removed = yield* peers
+        .remove(body.environmentId)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      // Dropping the credential is what actually stops outbound mirror
+      // passes; the row alone is bookkeeping.
+      yield* secretStore.remove(roamingPeerSecretName(body.environmentId)).pipe(Effect.ignore);
+      return yield* respondJson(RoamingRemovePeerResponse, { removed });
+    }),
+  ),
+);
+
 const enrollProjectRoute = HttpRouter.add(
   "POST",
   ROAMING_ENROLL_PROJECT_PATH,
@@ -376,6 +420,8 @@ export const roamingRoutesLayer = Layer.mergeAll(
   pushRoute,
   machineCredentialRoute,
   addPeerRoute,
+  listPeersRoute,
+  removePeerRoute,
   enrollProjectRoute,
   materializeRoute,
   conflictGetRoute,

@@ -487,6 +487,28 @@ export const RoamingPairMachineResponse = Schema.Struct({
 });
 export type RoamingPairMachineResponse = typeof RoamingPairMachineResponse.Type;
 
+/**
+ * Local (user-session) RPCs backing the per-environment sync controls
+ * (2026-07-06 product decision): each saved environment row shows whether a
+ * mirror to that machine exists and lets the user turn it off. Turning it
+ * ON again needs a fresh one-time code (the unified handshake), so that
+ * path goes through RoamingAddPeerRequest instead.
+ */
+export const RoamingListPeersResponse = Schema.Struct({
+  peers: Schema.Array(RoamingPeer),
+});
+export type RoamingListPeersResponse = typeof RoamingListPeersResponse.Type;
+
+export const RoamingRemovePeerRequest = Schema.Struct({
+  environmentId: EnvironmentId,
+});
+export type RoamingRemovePeerRequest = typeof RoamingRemovePeerRequest.Type;
+
+export const RoamingRemovePeerResponse = Schema.Struct({
+  removed: Schema.Boolean,
+});
+export type RoamingRemovePeerResponse = typeof RoamingRemovePeerResponse.Type;
+
 /** Local (user-session) RPC: enroll a local project into roaming. */
 export const RoamingEnrollProjectRequest = Schema.Struct({
   projectId: ProjectId,
@@ -505,6 +527,8 @@ export const ROAMING_MIRROR_FETCH_PATH = "/api/roaming/mirror/fetch";
 export const ROAMING_MIRROR_PUSH_PATH = "/api/roaming/mirror/push";
 export const ROAMING_MACHINE_CREDENTIAL_PATH = "/api/roaming/machine-credential";
 export const ROAMING_PEERS_PATH = "/api/roaming/peers";
+export const ROAMING_PEERS_LIST_PATH = "/api/roaming/peers/list";
+export const ROAMING_PEERS_REMOVE_PATH = "/api/roaming/peers/remove";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";

@@ -32,6 +32,8 @@ export class RoamingPeers extends Context.Service<
       environmentId: EnvironmentId,
       enrolledAt: string,
     ) => Effect.Effect<void, RoamingPeersError>;
+    /** Unpair: drop the row; returns whether one existed. */
+    readonly remove: (environmentId: EnvironmentId) => Effect.Effect<boolean, RoamingPeersError>;
     readonly list: () => Effect.Effect<ReadonlyArray<RoamingPeer>, RoamingPeersError>;
     readonly recordContact: (
       environmentId: EnvironmentId,
@@ -85,6 +87,18 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const remove: RoamingPeers["Service"]["remove"] = Effect.fn("RoamingPeers.remove")(
+    function* (environmentId) {
+      const rows = yield* sql<{ readonly environmentId: string }>`
+        DELETE FROM roaming_peers
+        WHERE environment_id = ${environmentId}
+        RETURNING environment_id AS "environmentId"
+      `.pipe(Effect.mapError(sqlError("roaming.peers.remove")));
+      yield* PubSub.publish(changes, undefined);
+      return rows.length > 0;
+    },
+  );
+
   const list: RoamingPeers["Service"]["list"] = Effect.fn("RoamingPeers.list")(function* () {
     const rows = yield* sql<{
       readonly environmentId: string;
@@ -134,6 +148,7 @@ const make = Effect.gen(function* () {
   return {
     upsert,
     ensurePeer,
+    remove,
     list,
     recordContact,
     subscribeChanges: PubSub.subscribe(changes),

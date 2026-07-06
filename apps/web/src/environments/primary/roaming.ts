@@ -9,8 +9,11 @@ import {
   ROAMING_CONFLICT_GET_PATH,
   ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_MATERIALIZE_PATH,
+  ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
+  ROAMING_PEERS_REMOVE_PATH,
   RoamingAddPeerRequest,
+  RoamingListPeersResponse,
   RoamingConflictGetRequest,
   RoamingConflictGetResponse,
   RoamingConflictResolveRequest,
@@ -18,6 +21,8 @@ import {
   RoamingMaterializeRequest,
   RoamingMaterializeResponse,
   RoamingPairMachineResponse,
+  RoamingRemovePeerRequest,
+  RoamingRemovePeerResponse,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -90,6 +95,30 @@ export function addRoamingPeer(body: RoamingAddPeerRequest): Promise<RoamingPair
     path: ROAMING_PEERS_PATH,
     requestSchema: RoamingAddPeerRequest,
     responseSchema: RoamingPairMachineResponse,
+    body,
+  });
+}
+
+const EmptyRequest = Schema.Struct({});
+
+export function listRoamingPeers(): Promise<RoamingListPeersResponse> {
+  return postRoaming({
+    operation: "roaming.list-peers",
+    path: ROAMING_PEERS_LIST_PATH,
+    requestSchema: EmptyRequest,
+    responseSchema: RoamingListPeersResponse,
+    body: {},
+  });
+}
+
+export function removeRoamingPeer(
+  body: RoamingRemovePeerRequest,
+): Promise<RoamingRemovePeerResponse> {
+  return postRoaming({
+    operation: "roaming.remove-peer",
+    path: ROAMING_PEERS_REMOVE_PATH,
+    requestSchema: RoamingRemovePeerRequest,
+    responseSchema: RoamingRemovePeerResponse,
     body,
   });
 }
