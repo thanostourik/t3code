@@ -163,6 +163,17 @@ export const RoamingVaultBundle = Schema.Struct({
 });
 export type RoamingVaultBundle = typeof RoamingVaultBundle.Type;
 
+// Origin-refs mode ships no blob at all; this exists only for the bundle fallback.
+export const RoamingWipPayload = Schema.Struct({
+  schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  capturedAt: IsoDateTime,
+  refName: Schema.String,
+  commitOid: Schema.String,
+  treeOid: Schema.String,
+  bundleBase64: Schema.String,
+});
+export type RoamingWipPayload = typeof RoamingWipPayload.Type;
+
 // ── Registry entry payload (kind=registry, key=workspaceProjectId) ──
 
 export const RoamingRegistryPayload = Schema.Struct({
@@ -224,11 +235,10 @@ export type RoamingProjectShell = typeof RoamingProjectShell.Type;
 export const RoamingMaterializeStepName = Schema.Literals([
   "resolve-path",
   "clone",
-  "apply-vault",
-  /** Recorded as skipped until M4 lands WIP snapshots. */
   "restore-wip",
+  "apply-vault",
   "register-project",
-  /** Recorded as skipped until M3 lands bootstrap recipes. */
+  /** Recorded as skipped until M4 lands bootstrap recipes. */
   "bootstrap",
 ]);
 export type RoamingMaterializeStepName = typeof RoamingMaterializeStepName.Type;
@@ -279,6 +289,8 @@ export const RoamingMaterializeRequest = Schema.Struct({
    * not an M2 flow).
    */
   targetPath: Schema.optional(TrimmedNonEmptyString),
+  /** Default ON; skipped when the snapshot tree equals the clone HEAD tree or the target tree is dirty. */
+  restoreWip: Schema.optional(Schema.Boolean),
 });
 export type RoamingMaterializeRequest = typeof RoamingMaterializeRequest.Type;
 
@@ -316,6 +328,15 @@ export const RoamingConflictResolveResponse = Schema.Struct({
   record: RoamingBlobRecord,
 });
 export type RoamingConflictResolveResponse = typeof RoamingConflictResolveResponse.Type;
+
+export const RoamingWipStatusEntry = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+  mode: Schema.Literals(["origin-refs", "bundle"]),
+  lastCapturedAt: Schema.optional(IsoDateTime),
+  lastPushedAt: Schema.optional(IsoDateTime),
+  lastError: Schema.optional(Schema.String),
+});
+export type RoamingWipStatusEntry = typeof RoamingWipStatusEntry.Type;
 
 // ── Peers ────────────────────────────────────────────────────────────
 
@@ -399,6 +420,8 @@ export type RoamingPushBlobsResponse = typeof RoamingPushBlobsResponse.Type;
 export const RoamingPairSyncOptions = Schema.Struct({
   /** Maps to the `roamingSecretsSync` setting (vault capture consent). */
   secretsSync: Schema.optional(Schema.Boolean),
+  /** Maps to the `roamingWipSync` setting (WIP snapshot consent). */
+  wipSync: Schema.optional(Schema.Boolean),
 });
 export type RoamingPairSyncOptions = typeof RoamingPairSyncOptions.Type;
 
