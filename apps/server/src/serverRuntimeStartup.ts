@@ -37,6 +37,7 @@ import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReape
 import { PeerMirror } from "./roaming/PeerMirror.ts";
 import { RoamingAutoEnroll } from "./roaming/RoamingAutoEnroll.ts";
 import { VaultSync } from "./roaming/VaultSync.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -299,6 +300,7 @@ export const make = Effect.gen(function* () {
   const peerMirror = yield* PeerMirror;
   const roamingAutoEnroll = yield* RoamingAutoEnroll;
   const vaultSync = yield* VaultSync;
+  const wipSnapshotReactor = yield* WipSnapshotReactor;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -352,6 +354,7 @@ export const make = Effect.gen(function* () {
         yield* peerMirror.start().pipe(Scope.provide(reactorScope));
         yield* roamingAutoEnroll.start().pipe(Scope.provide(reactorScope));
         yield* vaultSync.start().pipe(Scope.provide(reactorScope));
+        yield* wipSnapshotReactor.start().pipe(Scope.provide(reactorScope));
       }),
     );
 

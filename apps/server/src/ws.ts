@@ -75,6 +75,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { Materializer } from "./roaming/Materializer.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -406,6 +407,7 @@ const makeWsRpcLayer = (
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const roamingBlobStore = yield* RoamingBlobStore;
       const materializer = yield* Materializer;
+      const wipSnapshotReactor = yield* WipSnapshotReactor;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1134,8 +1136,25 @@ const makeWsRpcLayer = (
                 ),
               );
 
+              const wipStatusLive = Stream.unwrap(
+                wipSnapshotReactor.subscribeUpdates.pipe(
+                  Effect.map((subscription) =>
+                    Stream.fromSubscription(subscription).pipe(
+                      Stream.map((wipStatus) => ({
+                        kind: "roaming-wip-status-updated" as const,
+                        sequence: 0,
+                        wipStatus,
+                      })),
+                    ),
+                  ),
+                ),
+              );
+
               const liveStream = roamingEnabled
-                ? Stream.merge(domainLiveStream, Stream.merge(roamingLive, materializationLive))
+                ? Stream.merge(
+                    domainLiveStream,
+                    Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
+                  )
                 : domainLiveStream;
 
               // When the client already holds a shell snapshot (cached, or loaded
@@ -1194,8 +1213,13 @@ const makeWsRpcLayer = (
                 Stream.make({
                   kind: "snapshot" as const,
                   snapshot: roamingEnabled
-                    ? snapshot
-                    : { ...snapshot, roamingProjects: [], roamingMaterializations: [] },
+                    ? { ...snapshot, roamingWipStatus: yield* wipSnapshotReactor.listStatuses() }
+                    : {
+                        ...snapshot,
+                        roamingProjects: [],
+                        roamingMaterializations: [],
+                        roamingWipStatus: [],
+                      },
                 }),
                 liveStream,
               );
