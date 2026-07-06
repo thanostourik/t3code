@@ -39,6 +39,7 @@ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import { PeerMirror } from "./roaming/PeerMirror.ts";
 import { RoamingAutoEnroll } from "./roaming/RoamingAutoEnroll.ts";
 import { VaultSync } from "./roaming/VaultSync.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -306,6 +307,7 @@ export const make = (options?: StartupOptions) =>
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
     const peerMirror = yield* PeerMirror;
+    const wipSnapshotReactor = yield* WipSnapshotReactor;
     const roamingAutoEnroll = yield* RoamingAutoEnroll;
     const vaultSync = yield* VaultSync;
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
@@ -358,6 +360,7 @@ export const make = (options?: StartupOptions) =>
           yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
           yield* peerMirror.start().pipe(Scope.provide(reactorScope));
+          yield* wipSnapshotReactor.start().pipe(Scope.provide(reactorScope));
           yield* roamingAutoEnroll.start().pipe(Scope.provide(reactorScope));
           yield* vaultSync.start().pipe(Scope.provide(reactorScope));
         }),

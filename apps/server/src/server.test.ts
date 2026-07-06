@@ -79,6 +79,7 @@ import { resolveAvailableEditorsForConfig } from "./ws.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { Materializer } from "./roaming/Materializer.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -790,6 +791,18 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(Layer.mock(RoamingService)({})),
       Layer.provide(Layer.mock(RoamingPeers)({})),
+      Layer.provide(
+        Layer.succeed(WipSnapshotReactor, {
+          start: () => Effect.void,
+          snapshotProject: () => Effect.void,
+          snapshotAll: () => Effect.void,
+          listStatuses: () => Effect.succeed([]),
+          subscribeUpdates: Effect.gen(function* () {
+            const pubsub = yield* PubSub.unbounded<never>();
+            return yield* PubSub.subscribe(pubsub);
+          }),
+        } satisfies WipSnapshotReactor["Service"]),
+      ),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(
         Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
