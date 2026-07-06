@@ -321,7 +321,7 @@ describe("RoamingService unified pairing handshake", () => {
     }),
   );
 
-  it.effect("mintMachineCredential applies sync options only on the off→on flip", () =>
+  it.effect("mintMachineCredential always applies the pairing's sync options", () =>
     Effect.gen(function* () {
       const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
       const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>([]);
@@ -343,7 +343,6 @@ describe("RoamingService unified pairing handshake", () => {
         ),
         Layer.provideMerge(settingsLayer),
         Layer.provideMerge(NodeServices.layer),
-        Layer.provideMerge(NodeServices.layer),
       );
       yield* Effect.gen(function* () {
         const service = yield* RoamingService;
@@ -359,8 +358,8 @@ describe("RoamingService unified pairing handshake", () => {
         assert.isTrue(first.roaming);
         assert.isTrue(first.roamingSecretsSync);
 
-        // Second pairing: roaming already on — the explicit prior choice is
-        // never overridden remotely.
+        // Later pairing: ONE secrets decision per pairing (2026-07-06) —
+        // the dialog's choice always applies, replacing any prior value.
         yield* service.mintMachineCredential({
           callerEnvironmentId: EnvironmentId.make("env-other"),
           callerBaseUrls: [],
@@ -368,7 +367,7 @@ describe("RoamingService unified pairing handshake", () => {
         });
         const second = yield* settingsService.getSettings;
         assert.isTrue(second.roaming);
-        assert.isTrue(second.roamingSecretsSync);
+        assert.isFalse(second.roamingSecretsSync);
 
         // The mirror credential is least-privilege.
         const issuedCalls = yield* Ref.get(issued);
