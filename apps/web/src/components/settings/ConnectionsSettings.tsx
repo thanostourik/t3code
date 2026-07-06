@@ -1309,9 +1309,9 @@ const PairingClientsList = memo(function PairingClientsList({
         />
       ))}
 
-      {groupSessionsByDevice(clientSessions).map((group) =>
-        group.deviceName === null ? (
-          group.sessions.map((clientSession) => (
+      {groupSessionsByDevice(clientSessions).map((group) => {
+        if (group.deviceName === null) {
+          return group.sessions.map((clientSession) => (
             <ConnectedClientListRow
               key={clientSession.sessionId}
               clientSession={clientSession}
@@ -1319,28 +1319,33 @@ const PairingClientsList = memo(function PairingClientsList({
               revokingClientSessionId={revokingClientSessionId}
               onRevokeSession={onRevokeClientSession}
             />
-          ))
-        ) : (
-          <div key={`device:${group.deviceName}`}>
-            <div className={accessRowClassName(presentation)}>
-              <p className="text-xs font-semibold tracking-[-0.01em] text-foreground">
-                {group.deviceName}
-              </p>
-            </div>
-            <div className="ml-3 border-l border-border/60">
-              {group.sessions.map((clientSession) => (
-                <ConnectedClientListRow
-                  key={clientSession.sessionId}
-                  clientSession={clientSession}
-                  presentation={presentation}
-                  revokingClientSessionId={revokingClientSessionId}
-                  onRevokeSession={onRevokeClientSession}
-                />
-              ))}
-            </div>
-          </div>
-        ),
-      )}
+          ));
+        }
+        // ONE device, ONE row (2026-07-06): however many credentials sit
+        // behind a paired machine, it renders as a single entry whose
+        // Revoke tears all of them down.
+        const display =
+          group.sessions.find((session) => !session.subject.startsWith("roaming-peer:")) ??
+          group.sessions[0]!;
+        const merged = {
+          ...display,
+          client: { ...display.client, label: group.deviceName },
+          connected: group.sessions.some((session) => session.connected || session.current),
+        };
+        return (
+          <ConnectedClientListRow
+            key={`device:${group.deviceName}`}
+            clientSession={merged}
+            presentation={presentation}
+            revokingClientSessionId={revokingClientSessionId}
+            onRevokeSession={() => {
+              for (const session of group.sessions) {
+                onRevokeClientSession(session.sessionId);
+              }
+            }}
+          />
+        );
+      })}
 
       {pairingLinks.length === 0 && clientSessions.length === 0 && !isLoading ? (
         <div className={accessRowClassName(presentation)}>
