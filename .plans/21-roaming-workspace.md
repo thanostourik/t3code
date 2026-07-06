@@ -11,7 +11,7 @@ with it, this section wins and the document must be corrected before coding.
 2. **Pair the desktop — once.** This is the *existing* pairing/thin-client
    flow (one code, one dialog), which gains a JetBrains-style **what to
    sync** step: Projects (always on), Secret files (pre-checked, default
-   patterns), Work in progress (arrives M4), Conversations (arrives M6).
+   patterns), Work in progress (arrives M3), Conversations (arrives M6).
 3. **Remote conversations work immediately.** The desktop's projects appear
    live in the ONE project list; opening one runs on the desktop (thin
    client). If pairing succeeded but a remote conversation doesn't work,
@@ -37,8 +37,8 @@ machine's projects are visible but dead.
 > revoke→dead-row flip, handshake self-revoke, user-label inheritance. All
 > verified on the real desktop by the user and on the M0 harness
 > (`accept-m2.5.mjs` + browser walks). Materialize today = clone + secret
-> files; uncommitted-work sync is **M4**, not built. **M4 (WIP snapshots)
-> is next, then M3** — order swapped 2026-07-06 (user decision, below).
+> files; uncommitted-work sync is **M3 (WIP snapshots)** — not built and
+> NEXT UP. Then M4 (bootstrap recipes). Renumbered 2026-07-06 (below).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -48,7 +48,7 @@ machine's projects are visible but dead.
 > user-visible "roaming"/"machine sync"/enrollment concept, and "pairing"
 > means the EXISTING pairing/thin-client flow** — that one flow carries the
 > JetBrains-style sync-options step (Projects always on; Secret files
-> pre-checked; WIP and Conversations rows arrive with M4/M6). Registry
+> pre-checked; WIP and Conversations rows arrive with M3/M6). Registry
 > metadata syncs automatically for ALL projects once machines are paired;
 > per-project configuration survives only as the vault include/exclude
 > override. Guard rails: vault bundle size cap; never overwrite local files
@@ -75,17 +75,20 @@ machine's projects are visible but dead.
 > trusts well-known SSH host keys, and prompts once for a projects folder;
 > (5) revoked/auth-failed remotes go dead and flip to offline+Materialize.
 > Full field-findings narrative in the history file. Materialize today =
-> clone + secrets; uncommitted-work sync remains M4.
-> 2026-07-06 — **Milestone order swapped: M4 (WIP snapshots) runs before M3
-> (bootstrap recipes)** (user decision). Rationale: uncommitted work is in
-> the thesis's first sentence and kept surfacing as the missing piece in
-> real use; recipes are the comfort feature. No technical dependency either
-> way — materialize's restore-wip step already has its slot, and M3's
-> bootstrap step is independent. Milestone NAMES keep their numbers; only
-> execution order changes: M2.5 → M4 → M3 → M5 → M6 → M7.
+> clone + secrets; uncommitted-work sync remains M3.
+> 2026-07-06 — **Milestones RENUMBERED to execution order (user decision):
+> M3 = WIP snapshots (was M4), M4 = bootstrap recipes (was M3).** WIP-first
+> rationale: uncommitted work is in the thesis's first sentence and kept
+> surfacing as the missing piece in real use; recipes are the comfort
+> feature — and recipes are open-ended risk (an agent setting up an
+> arbitrary unknown project — unscripted services, databases, system deps —
+> is a black box; the milestone's "small" size is plumbing only). The
+> recipes milestone's analysis pass must scope honest limits (v1 targets
+> scriptable setups; capture-what-happened over guaranteed-boot). Documents
+> written before 2026-07-06 (the history file) use the OLD numbering.
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
-> section at the end. Milestones run strictly in order (M0 → M2, M2.5, then M4 → M3 → M5 → M6 → M7 — see the 2026-07-06 order swap).
+> section at the end. Milestones run strictly in order (M0 → M2, M2.5, M3 → M7; renumbered 2026-07-06 so execution order and numbers agree).
 > Every milestone begins by re-reading the Canonical workflow section and ends
 > by demonstrating it end to end.
 
@@ -346,7 +349,7 @@ with states *local* / *live on <machine>* / *offline — available*
 (Materialize action). The sync opt-in lives **inside the existing
 pairing/thin-client flow** (Add environment → Remote link) as a
 JetBrains-style options step: Projects (always on), Secret files
-(pre-checked, default patterns), later WIP (M4) and Conversations (M6)
+(pre-checked, default patterns), later WIP (M3) and Conversations (M6)
 rows. There is no separate sync pairing: one code, one dialog, one
 handshake establishing BOTH the client attach and the machine-to-machine
 mirror credential (mechanics under Landed constraints → M2.5).
@@ -536,8 +539,8 @@ load-bearing assumptions are cheap to verify before building on them.
 | **M1 — Blob store + mirror + registry** | D0–D4 + step 1: `roaming_blobs` migration, `RoamingBlobStore`, `PeerMirror` reactor, machine enrollment credential, registry blobs, roaming project list in shell/UI with staleness display. | Enroll a project on instance A; instance B shows it (title, repo, per-machine status) after a mirror pass; kill A; B still shows it from its local copy. |
 | **M2 — Vault + materialize + product-model UI** *(shipped with a deviation: pairing was built as a standalone "Machine sync" flow, so the live-remote state never became reachable — see the history file; corrected in M2.5)* | Steps 2 + 3, plus the 2026-07-05 product model: pairing sync-options dialog (opt-in + secrets toggle), automatic registration of all projects on pairing/creation, and the merged single project list (local / live-remote / offline-available states) replacing M1's sidebar section. | One action takes instance B from empty to a registered checkout with vault files applied while A is offline (using B's mirrored copy); a concurrent vault edit on both sides surfaces as a conflict, not a merge; the desktop's projects appear in the laptop's single project list with no separate section, and materializing a project without synced secrets succeeds with an honest "no secret files synced" notice. |
 | **M2.5 — Unified pairing (corrective)** | Fold M2's standalone "Machine sync" pairing into the existing pairing/thin-client flow, per the canonical workflow: one pairing code establishes the live remote attach (client session + saved remote environment) AND the machine-to-machine mirror credential in the same handshake; the sync-options step renders inside that flow; delete the separate Machine sync section and pair dialog (the secrets toggle survives as an ordinary settings row). The handshake sits behind one peer-introduction seam (manual URL+code today; T3 Cloud/relay discovery later — see decisions log) so cloud pairing lands as a new producer, not a redesign. | A single pairing action on real or harness instances makes the peer's projects appear **live** in the one list — opening one runs a conversation on the peer — with registry and vault mirrored silently behind it; killing the peer flips the same rows to offline + Materialize; at no point does the UI show a second pairing flow or any "sync"/"roaming" concept. The canonical workflow (steps 1–4) demonstrated end to end. |
-| **M3 — Bootstrap recipes** | Step 4. | First materialize triggers an agent setup thread that writes a recipe; second materialize replays it; a broken recipe escalates to an agent turn. Canonical workflow re-run. |
-| **M4 — WIP snapshots** | Step 5 (capture + transport; restore already lands inside materialize). Adds the "Work in progress" row to the sync-options step of the one pairing flow (default on, subject to the controlled-origin guard). | Dirty tree on instance A appears on instance B via materialize with A's process killed (origin-refs path); push failures surfaced in UI; bundle fallback covered by a harness test. Canonical workflow re-run. |
+| **M3 — WIP snapshots** | Step 5 (capture + transport; restore already lands inside materialize). Adds the "Work in progress" row to the sync-options step of the one pairing flow (default on, subject to the controlled-origin guard). | Dirty tree on instance A appears on instance B via materialize with A's process killed (origin-refs path); push failures surfaced in UI; bundle fallback covered by a harness test. Canonical workflow re-run. |
+| **M4 — Bootstrap recipes** | Step 4. | First materialize triggers an agent setup thread that writes a recipe; second materialize replays it; a broken recipe escalates to an agent turn. Canonical workflow re-run. |
 | **M5 — Takeover + divergence** | Step 6. | Takeover applies newest snapshot and moves the lease; two-sided dirty divergence shows the diff-and-choose screen; the losing side remains recoverable as a ref. Canonical workflow re-run. |
 | **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options step of the one pairing flow. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. Canonical workflow re-run. |
 | **M7 — Cloud store backend (gated)** | E2E encryption (key-management one-pager written and reviewed first — root key, recovery code, per-project data keys; this is the entry gate) + a cloud `RoamingBlobStore` implementation: private git store repo, or T3 relay if the waitlist has cleared by then. Extends D3 records with encryption fields. Must re-ask the secrets-sync consent before any cloud backend activates. | Small state reaches a fresh machine with zero online overlap with any other machine; a test asserts the cloud side holds ciphertext only. |
@@ -576,7 +579,7 @@ narrative moves to the history file — this document stays current-state.
 - `roaming` flag = `ServerSettings` boolean (default false); reactors
   always start and internally no-op while it is off.
 - No server-side peer endpoint discovery exists: peer base URLs are
-  recorded at pairing and tried in order (revisit at M4/M5 when real
+  recorded at pairing and tried in order (revisit at M3/M5 when real
   two-box usage starts).
 - Mirror RPCs = raw authenticated HTTP routes, schemas in
   `packages/contracts/src/roaming.ts`; `roaming:mirror` is granted nowhere
@@ -598,7 +601,7 @@ narrative moves to the history file — this document stays current-state.
   decider gates double-enroll; no orphan blob can mirror out); re-enroll is
   idempotent and self-heals a missing blob.
 - `lastMirrorContactAt` = global max across peers, written only by a
-  completed mirror pass (revisit ~M4 for per-project staleness).
+  completed mirror pass (revisit ~M3 for per-project staleness).
 - Roaming shell stream events ride `sequence: 0`; the client reducer owns
   all sequencing rules.
 - Flag-off behavior: shell snapshots hide `roamingProjects`; roaming routes
@@ -622,8 +625,8 @@ narrative moves to the history file — this document stays current-state.
   propagation rule under M2.5 below).
 - Materialize = synchronous `POST /api/roaming/materialize` + resumable
   step machine in `roaming_materializations` (migration 035): resolve-path,
-  clone, apply-vault, restore-wip (recorded-as-skipped until M4),
-  register-project, bootstrap (skipped until M3). Failed runs return the
+  clone, apply-vault, restore-wip (recorded-as-skipped until M3),
+  register-project, bootstrap (skipped until M4). Failed runs return the
   failed record over HTTP 200; resume continues from the failed step; a
   completed record short-circuits even with a different targetPath.
   apply-vault never overwrites an existing differing file (notice instead);
@@ -696,7 +699,7 @@ sessions; these OVERRIDE earlier M2/M2.5 wording:
   liveness filter; primary and desktopLocal exempt).
 - **Scope shipped today:** materialize = clone + synced secret files +
   register. Syncing the uncommitted working tree (staged/unstaged/untracked)
-  is milestone **M4**, NOT built — materialize does not restore dirty work
+  is milestone **M3**, NOT built — materialize does not restore dirty work
   yet, by design.
 - `MachineSyncSettings` deleted; no user-visible "roaming"/"machine sync"
   concept anywhere.
@@ -783,5 +786,5 @@ document and the current code. Paste one of these:
 > implementation.)
 
 When a milestone completes, update the **Status** line at the top of this file
-(e.g. "M2 complete 2026-07-19; M3 next") so the next fresh thread orients
+(e.g. "M2 complete 2026-07-19; M4 next") so the next fresh thread orients
 instantly.
