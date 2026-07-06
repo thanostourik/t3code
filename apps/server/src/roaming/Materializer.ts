@@ -514,9 +514,17 @@ const make = Effect.gen(function* () {
         return yield* stepError("invalid-target", "Target path has not been resolved");
       }
       let next = yield* appendMirrorNotice(record);
-      const blob = yield* blobStore
+      const readVault = blobStore
         .get({ kind: "vault", key: record.workspaceProjectId })
         .pipe(Effect.mapError(internalError("vault blob lookup failed")));
+      let blob = yield* readVault;
+      if (blob === null) {
+        // Same on-demand pull as the registry: a freshly-enabled sync may
+        // have delivered the registry but not yet the vault. Try once before
+        // reporting "no secret files synced".
+        yield* peerMirror.syncNowAndWait();
+        blob = yield* readVault;
+      }
       if (blob === null) {
         return {
           record: addNotice(next, "no secret files synced"),
