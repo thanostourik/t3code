@@ -44,6 +44,7 @@ const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   threads: [],
   roamingProjects: [],
   roamingMaterializations: [],
+  roamingWipStatus: [],
   updatedAt: "2026-06-06T00:00:00.000Z",
 };
 
@@ -147,6 +148,7 @@ describe("environment shell synchronization", () => {
         threads: [],
         roamingProjects: [],
         roamingMaterializations: [],
+        roamingWipStatus: [],
         updatedAt: "2026-06-06T00:00:00.000Z",
       };
       const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
