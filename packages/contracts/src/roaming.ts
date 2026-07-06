@@ -329,6 +329,13 @@ export const RoamingPeer = Schema.Struct({
   baseUrls: Schema.Array(TrimmedNonEmptyString),
   lastContactAt: Schema.NullOr(IsoDateTime),
   enrolledAt: IsoDateTime,
+  /**
+   * Sync on/off is a pause on the standing pairing (2026-07-06 decision):
+   * off gates outbound passes and inbound mirror RPCs but keeps the peer
+   * and its credential, so re-enabling never needs a new pairing code.
+   * A code is only needed when no peer record exists at all.
+   */
+  syncEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type RoamingPeer = typeof RoamingPeer.Type;
 
@@ -410,6 +417,8 @@ export const RoamingMachineCredentialRequest = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   syncOptions: Schema.optional(RoamingPairSyncOptions),
+  /** Human name of the calling machine — used to label the minted sessions. */
+  callerLabel: Schema.optional(TrimmedNonEmptyString),
 });
 export type RoamingMachineCredentialRequest = typeof RoamingMachineCredentialRequest.Type;
 
@@ -417,6 +426,11 @@ export const RoamingMachineCredentialResponse = Schema.Struct({
   environmentId: EnvironmentId,
   token: TrimmedNonEmptyString,
   expiresAt: Schema.NullOr(IsoDateTime),
+  /**
+   * The label the peer's user gave the pairing link ("Laptop") — the name
+   * the user chose ALWAYS wins over machine-derived names downstream.
+   */
+  label: Schema.optional(TrimmedNonEmptyString),
 });
 export type RoamingMachineCredentialResponse = typeof RoamingMachineCredentialResponse.Type;
 
@@ -487,6 +501,39 @@ export const RoamingPairMachineResponse = Schema.Struct({
 });
 export type RoamingPairMachineResponse = typeof RoamingPairMachineResponse.Type;
 
+/**
+ * Local (user-session) RPCs backing the per-environment sync controls
+ * (2026-07-06 product decision): each saved environment row shows whether a
+ * mirror to that machine exists and lets the user turn it off. Turning it
+ * ON again needs a fresh one-time code (the unified handshake), so that
+ * path goes through RoamingAddPeerRequest instead.
+ */
+export const RoamingListPeersResponse = Schema.Struct({
+  peers: Schema.Array(RoamingPeer),
+});
+export type RoamingListPeersResponse = typeof RoamingListPeersResponse.Type;
+
+export const RoamingSetPeerSyncRequest = Schema.Struct({
+  environmentId: EnvironmentId,
+  syncEnabled: Schema.Boolean,
+});
+export type RoamingSetPeerSyncRequest = typeof RoamingSetPeerSyncRequest.Type;
+
+export const RoamingSetPeerSyncResponse = Schema.Struct({
+  peer: Schema.NullOr(RoamingPeer),
+});
+export type RoamingSetPeerSyncResponse = typeof RoamingSetPeerSyncResponse.Type;
+
+export const RoamingRemovePeerRequest = Schema.Struct({
+  environmentId: EnvironmentId,
+});
+export type RoamingRemovePeerRequest = typeof RoamingRemovePeerRequest.Type;
+
+export const RoamingRemovePeerResponse = Schema.Struct({
+  removed: Schema.Boolean,
+});
+export type RoamingRemovePeerResponse = typeof RoamingRemovePeerResponse.Type;
+
 /** Local (user-session) RPC: enroll a local project into roaming. */
 export const RoamingEnrollProjectRequest = Schema.Struct({
   projectId: ProjectId,
@@ -505,6 +552,10 @@ export const ROAMING_MIRROR_FETCH_PATH = "/api/roaming/mirror/fetch";
 export const ROAMING_MIRROR_PUSH_PATH = "/api/roaming/mirror/push";
 export const ROAMING_MACHINE_CREDENTIAL_PATH = "/api/roaming/machine-credential";
 export const ROAMING_PEERS_PATH = "/api/roaming/peers";
+export const ROAMING_PEERS_LIST_PATH = "/api/roaming/peers/list";
+export const ROAMING_PEERS_REMOVE_PATH = "/api/roaming/peers/remove";
+export const ROAMING_PEERS_SYNC_PATH = "/api/roaming/peers/sync";
+export const ROAMING_HANDSHAKE_COMPLETE_PATH = "/api/roaming/handshake-complete";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";
