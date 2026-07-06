@@ -556,23 +556,20 @@ const make = Effect.gen(function* () {
       .ensurePeer(input.callerEnvironmentId, yield* nowIso)
       .pipe(Effect.mapError(internalError("caller peer record failed")));
 
-    // First-pairing-only consent: a successful mint is what turns roaming on
-    // (the operator consented by generating the administrative code), and
-    // the pairing dialog's sync options apply only in that same off→on
-    // moment — an explicit prior choice is never overridden remotely.
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.mapError(internalError("settings read failed")),
-    );
-    if (!settings.roaming) {
-      yield* settingsService
-        .updateSettings({
-          roaming: true,
-          ...(input.syncOptions?.secretsSync !== undefined
-            ? { roamingSecretsSync: input.syncOptions.secretsSync }
-            : {}),
-        })
-        .pipe(Effect.mapError(internalError("settings update failed")));
-    }
+    // ONE secrets decision for the pairing (2026-07-06, user override of the
+    // M2 'each machine consents to its own files' rule): pairing turns
+    // roaming on, and the pairing dialog's Secret-files choice ALWAYS applies
+    // here — so the machine holding a project captures its secrets without a
+    // second toggle anywhere. There is deliberately no secrets control on
+    // this (the paired-into) machine; the choice rides the pairing.
+    yield* settingsService
+      .updateSettings({
+        roaming: true,
+        ...(input.syncOptions?.secretsSync !== undefined
+          ? { roamingSecretsSync: input.syncOptions.secretsSync }
+          : {}),
+      })
+      .pipe(Effect.mapError(internalError("settings update failed")));
 
     return {
       environmentId,
