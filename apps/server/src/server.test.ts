@@ -78,6 +78,7 @@ import { makeRoutesLayer } from "./server.ts";
 import { resolveAvailableEditorsForConfig } from "./ws.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
+import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { Materializer } from "./roaming/Materializer.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -782,6 +783,7 @@ const buildAppUnderTest = (options?: {
         } satisfies Materializer["Service"]),
       ),
       Layer.provide(Layer.mock(RoamingService)({})),
+      Layer.provide(Layer.mock(RoamingPeers)({})),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(
         Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({

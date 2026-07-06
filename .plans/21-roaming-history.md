@@ -637,3 +637,66 @@ Decisions/deviations recorded during implementation and review:
   the run hung silently (again) and was taken back and written by hand;
   both Codex *reviews* worked fine and each caught a real issue.
 
+
+## M2.5 field-hardening (2026-07-06)
+
+After the original M2.5 build (PRs #19–#24) the user ran the feature on a
+real desktop+laptop pair for the first time. A long session of findings
+reshaped the product model; each was fixed on `roaming/m25-pair-dialog`
+(PR #29) with the server/UI change verified on the M0 harness and confirmed
+by the user on real machines. Superseded design notes moved here so the main
+plan stays current-state.
+
+Findings and resolutions, in order:
+
+- **Revocation didn't bite live sockets (security).** A revoked client kept
+  driving the peer over its established WebSocket for ~5 min. Fix (#26):
+  the connection races its own `clientRemoved` event and closes in ~7ms; a
+  30s `listActive` existence check backstops the non-replaying pubsub and
+  also retires expired-session sockets.
+- **Materialize invisible on live rows, then always-visible, then finally
+  enabled-iff-workable.** Three iterations: (a) it was gated on the local
+  mirror copy, so it never appeared while the peer was live; (b) over-
+  corrected to always-visible (user: "why show a button that can't work");
+  (c) final: renders on every live remote-only row, ENABLED when it can
+  succeed (peer sync on or a retained local copy), DISABLED with a tooltip
+  reason otherwise. Plus on-demand registry+vault blob fetch so it never
+  depends on background-sync timing.
+- **"Sync" was two toggles and code-driven.** The original model kept a
+  per-machine `roamingSecretsSync` and a first-pairing-only propagation,
+  and toggling sync implied re-pairing. Replaced by: `sync_enabled` pause
+  flag on the peer row (migration 036, gates outbound + inbound), instant
+  toggle with no code (code only for a first enable), and ONE secrets
+  decision from the pairing dialog applied to both machines. This overrode
+  M2's "each machine consents to its own files" and M2.5's first-pairing-
+  only rule — both at the user's explicit, repeated direction.
+- **Authorized clients showed the plumbing.** One pairing left three
+  cryptically-named sessions ("Paired machine", "Roaming mirror credential
+  for <uuid>", and the handshake session). Fixes: the handshake session
+  self-revokes via a new `handshake-complete` route (the original build's
+  "cannot be revoked" was wrong — the endpoint forbids self-revoke, the
+  server internally does not); session labels inherit the name the user
+  typed on the pairing link; and the UI collapses every credential behind a
+  machine into ONE row with one Revoke.
+- **Revoke vanished the project instead of flipping it offline.** Stale
+  `localProjectId` links (from add/remove churn) made rows read as
+  materialized-so-hidden. Fix: a `localProjectId` pointing at a project
+  that no longer exists counts as unmaterialized; auth-failed remotes count
+  as dead so their rows flip to offline+Materialize.
+- **Clone failures said nothing.** The vcs layer scrubs git's stderr from
+  errors (token safety). Fix: on clone failure the Materializer runs a
+  BatchMode `ls-remote` diagnostic, redacts credentials, and reports the
+  real message; generic wrapper text is filtered out.
+- **First materialize clone hit "Host key verification failed."** The
+  background server never accepted the origin's SSH host key. Fix: for
+  well-known public hosts (github/gitlab/bitbucket/azure) the clone step
+  seeds the key via ssh-keyscan and retries once; unknown hosts surface the
+  failure with manual instructions.
+- **Materialize dead-ended when no projects folder was configured.** Fix
+  (polish): a shared `useMaterialize` hook prompts for a folder, saves it as
+  `addProjectBaseDirectory`, and retries — asked once, never again.
+
+Deliberately left for later, stated to the user: uncommitted/unstaged work
+does not sync — that is milestone M4 (WIP snapshots), not built; today's
+materialize is clone + secret files. The desktop's own duplicate
+authorized-client rows are upstream behavior, left alone by decision.
