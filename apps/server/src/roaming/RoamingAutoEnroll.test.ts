@@ -68,6 +68,7 @@ const seedProjectAndPeer = Effect.gen(function* () {
     baseUrls: ["http://peer.example.test"],
     lastContactAt: null,
     enrolledAt: now,
+    syncEnabled: true,
   });
 });
 

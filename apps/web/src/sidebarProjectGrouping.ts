@@ -111,11 +111,22 @@ export function selectOfflineRoamingProjects(input: {
       project.repositoryIdentity ? [project.repositoryIdentity.canonicalKey] : [],
     ),
   );
+  const liveProjectIds = new Set(
+    input.liveProjects.map((project) => `${project.environmentId}:${project.id}`),
+  );
   const seen = new Set<string>();
   const offline: EnvironmentRoamingProject[] = [];
   for (const entry of input.roamingProjects) {
     const { roamingProject } = entry;
-    if (roamingProject.localProjectId !== null) continue;
+    // A localProjectId pointing at a project that no longer exists (heavy
+    // add/remove churn) must not hide the row — treat dangling links as
+    // unmaterialized (2026-07-06 field finding: rows vanished entirely
+    // after revocation instead of flipping to offline+Materialize).
+    if (
+      roamingProject.localProjectId !== null &&
+      liveProjectIds.has(`${entry.environmentId}:${roamingProject.localProjectId}`)
+    )
+      continue;
     if (liveRepositoryKeys.has(roamingProject.repository.canonicalKey)) continue;
     if (seen.has(roamingProject.workspaceProjectId)) continue;
     seen.add(roamingProject.workspaceProjectId);
