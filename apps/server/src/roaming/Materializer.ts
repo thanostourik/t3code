@@ -116,6 +116,25 @@ const expandHomePath = (input: string, path: Path.Path): string => {
   return input;
 };
 
+// Trust-on-first-use is only auto-applied for these well-known public git
+// hosts (2026-07-06 decision); anything else surfaces host-key failures with
+// manual instructions rather than silently trusting an unknown server.
+const WELL_KNOWN_SSH_HOSTS = new Set([
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "ssh.dev.azure.com",
+]);
+
+/** SSH host from scp-style (`git@host:...`) or `ssh://` URLs; null for https/other. */
+const sshHostOf = (remoteUrl: string): string | null => {
+  const scp = /^[^/@]+@([^:/]+):/.exec(remoteUrl);
+  if (scp !== null) return scp[1]!.toLowerCase();
+  const ssh = /^ssh:\/\/(?:[^@/]+@)?([^:/]+)/.exec(remoteUrl);
+  if (ssh !== null) return ssh[1]!.toLowerCase();
+  return null;
+};
+
 const remoteRepoName = (remoteUrl: string): string => {
   const withoutTrailingSlash = remoteUrl.replace(/\/+$/, "");
   const segments = withoutTrailingSlash.split(/[/:]/);
@@ -292,6 +311,40 @@ const make = Effect.gen(function* () {
       return updated;
     });
 
+  // Seed a well-known host's key into the server's known_hosts so a
+  // background clone can verify it (the server has no terminal to answer the
+  // first-connect prompt). Returns whether it seeded. Never throws.
+  const seedKnownHostKey = (remoteUrl: string): Effect.Effect<boolean> =>
+    Effect.gen(function* () {
+      const host = sshHostOf(remoteUrl);
+      if (host === null || !WELL_KNOWN_SSH_HOSTS.has(host)) return false;
+      const scan = yield* vcsProcess
+        .run({
+          operation: "Materializer.sshKeyscan",
+          command: "ssh-keyscan",
+          cwd: "/",
+          args: ["-T", "10", host],
+          allowNonZeroExit: true,
+          timeoutMs: 15_000,
+          maxOutputBytes: 64 * 1024,
+        })
+        .pipe(Effect.orElseSucceed(() => null));
+      const keys = (scan?.stdout ?? "")
+        .split("\n")
+        .filter((line) => line.trim().length > 0 && !line.startsWith("#"));
+      if (scan === null || scan.exitCode !== 0 || keys.length === 0) return false;
+      const sshDir = path.join(NodeOS.homedir(), ".ssh");
+      const knownHosts = path.join(sshDir, "known_hosts");
+      yield* fs.makeDirectory(sshDir, { recursive: true }).pipe(Effect.ignore);
+      const existing = yield* fs.readFileString(knownHosts).pipe(Effect.orElseSucceed(() => ""));
+      const missing = keys.filter((line) => !existing.includes(line));
+      if (missing.length === 0) return true;
+      const prefix = existing.length > 0 && !existing.endsWith("\n") ? `${existing}\n` : existing;
+      yield* fs.writeFileString(knownHosts, `${prefix}${missing.join("\n")}\n`).pipe(Effect.ignore);
+      yield* Effect.logInfo("roaming: seeded known_hosts for materialize", { host });
+      return true;
+    });
+
   const diagnoseRemote = (remoteUrl: string): Effect.Effect<string | null> =>
     vcsProcess
       .run({
@@ -409,20 +462,35 @@ const make = Effect.gen(function* () {
           );
         }
       }
-      yield* sourceControl.cloneRepository({ remoteUrl, destinationPath: targetPath }).pipe(
-        Effect.catch((cause) =>
-          // The vcs layer deliberately drops git's stderr from errors
-          // (token safety), leaving "exited with a non-zero status" — not
-          // actionable. Diagnose with a harmless ls-remote whose stderr we
-          // CAN read, and report that (credentials redacted) instead.
-          diagnoseRemote(remoteUrl).pipe(
-            Effect.flatMap((diagnostic) =>
-              Effect.fail(stepError("clone-failed", diagnostic ?? failureMessage(cause), cause)),
-            ),
-          ),
-        ),
+      const clone = () => sourceControl.cloneRepository({ remoteUrl, destinationPath: targetPath });
+      const firstAttempt = yield* clone().pipe(Effect.exit);
+      if (firstAttempt._tag === "Success") return `cloned to ${targetPath}`;
+
+      // The vcs layer drops git's stderr from errors (token safety), leaving
+      // "exited with a non-zero status" — diagnose with a harmless ls-remote
+      // whose stderr we CAN read.
+      const diagnostic = yield* diagnoseRemote(remoteUrl);
+      // Host-key verification is the fresh-machine trap: the background server
+      // never accepted the host key. For well-known public hosts, seed it and
+      // retry once so materialize just works.
+      if (diagnostic !== null && /host key verification failed/i.test(diagnostic)) {
+        const seeded = yield* seedKnownHostKey(remoteUrl);
+        if (seeded) {
+          const retry = yield* clone().pipe(Effect.exit);
+          if (retry._tag === "Success") return `cloned to ${targetPath}`;
+          const retryDiagnostic = yield* diagnoseRemote(remoteUrl);
+          return yield* stepError(
+            "clone-failed",
+            retryDiagnostic ?? failureMessage(retry.cause),
+            retry.cause,
+          );
+        }
+      }
+      return yield* stepError(
+        "clone-failed",
+        diagnostic ?? failureMessage(firstAttempt.cause),
+        firstAttempt.cause,
       );
-      return `cloned to ${targetPath}`;
     });
 
   const appendMirrorNotice = (record: RoamingMaterializationRecord) =>
