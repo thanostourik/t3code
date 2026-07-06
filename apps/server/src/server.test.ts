@@ -73,6 +73,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
 import { Materializer } from "./roaming/Materializer.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
@@ -752,6 +753,18 @@ const buildAppUnderTest = (options?: {
               return yield* PubSub.subscribe(pubsub);
             }),
           } satisfies Materializer["Service"]),
+        ),
+        Layer.provide(
+          Layer.succeed(WipSnapshotReactor, {
+            start: () => Effect.void,
+            snapshotProject: () => Effect.void,
+            snapshotAll: () => Effect.void,
+            listStatuses: () => Effect.succeed([]),
+            subscribeUpdates: Effect.gen(function* () {
+              const pubsub = yield* PubSub.unbounded<never>();
+              return yield* PubSub.subscribe(pubsub);
+            }),
+          } satisfies WipSnapshotReactor["Service"]),
         ),
         Layer.provide(Layer.mock(RoamingService)({})),
         Layer.provide(Layer.mock(RoamingPeers)({})),
