@@ -300,9 +300,24 @@ const removePeerRoute = HttpRouter.add(
       const removed = yield* peers
         .remove(body.environmentId)
         .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      // Dropping the credential is what actually stops outbound mirror
-      // passes; the row alone is bookkeeping.
+      // Dropping the stored credential stops OUR outbound mirror passes...
       yield* secretStore.remove(roamingPeerSecretName(body.environmentId)).pipe(Effect.ignore);
+      // ...and revoking every mirror session minted FOR that peer stops its
+      // inbound ones — otherwise the other machine keeps syncing until the
+      // credential TTL (codex review P1). Subject match also sweeps
+      // credentials orphaned by re-pairing. Best-effort: a failure here
+      // must not strand the removal.
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      yield* auth.listSessions().pipe(
+        Effect.flatMap((sessions) =>
+          Effect.forEach(
+            sessions.filter((session) => session.subject === `roaming-peer:${body.environmentId}`),
+            (session) => auth.revokeSession(session.sessionId).pipe(Effect.ignore),
+            { discard: true },
+          ),
+        ),
+        Effect.ignore,
+      );
       return yield* respondJson(RoamingRemovePeerResponse, { removed });
     }),
   ),
