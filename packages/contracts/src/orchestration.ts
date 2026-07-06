@@ -31,7 +31,11 @@ import {
   PullRequestReviewDecision,
   PullRequestState,
 } from "./pullRequest.ts";
-import { RoamingMaterializationRecord, RoamingProjectShell } from "./roaming.ts";
+import {
+  RoamingMaterializationRecord,
+  RoamingProjectShell,
+  RoamingWipStatusEntry,
+} from "./roaming.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -860,6 +864,10 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   roamingMaterializations: Schema.Array(RoamingMaterializationRecord).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /** WIP snapshot capture/push status per roaming project; empty while roaming is off. */
+  roamingWipStatus: Schema.Array(RoamingWipStatusEntry).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -899,6 +907,11 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("roaming-materialization-updated"),
     sequence: NonNegativeInt,
     materialization: RoamingMaterializationRecord,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("roaming-wip-status-updated"),
+    sequence: NonNegativeInt,
+    wipStatus: RoamingWipStatusEntry,
   }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;

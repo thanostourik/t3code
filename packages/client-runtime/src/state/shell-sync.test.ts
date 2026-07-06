@@ -47,6 +47,7 @@ const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   threads: [],
   roamingProjects: [],
   roamingMaterializations: [],
+  roamingWipStatus: [],
   updatedAt: "2026-06-06T00:00:00.000Z",
 };
 
@@ -250,6 +251,7 @@ describe("environment shell synchronization", () => {
         threads: [{ id: "cached-thread" } as never],
         roamingProjects: [],
         roamingMaterializations: [],
+        roamingWipStatus: [],
         updatedAt: "2026-06-06T00:00:00.000Z",
       };
       const resetSnapshot: OrchestrationShellSnapshot = {

@@ -2844,6 +2844,7 @@ pending_approval_requests AS (
                 ),
                 roamingProjects: yield* listRoamingProjectShells(),
                 roamingMaterializations: yield* listRoamingMaterializations(),
+                roamingWipStatus: [],
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               };
 
@@ -3006,6 +3007,7 @@ pending_approval_requests AS (
                 })),
                 roamingProjects: [],
                 roamingMaterializations: [],
+                roamingWipStatus: [],
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               };
 

@@ -1098,6 +1098,12 @@ export const ServerSettings = Schema.Struct({
    * own files. Set by the pairing sync-options dialog.
    */
   roamingSecretsSync: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Consent to push WIP snapshots to each project's git origin as hidden
+   * refs. Set by the pairing dialog's "Work in progress" row, one decision
+   * applied to both machines.
+   */
+  roamingWipSync: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
