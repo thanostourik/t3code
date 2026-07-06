@@ -24,8 +24,16 @@ import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node
 import { join } from "node:path";
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const A = { name: "instance-a", url: "http://127.0.0.1:14801", base: join(HARNESS_DIR, "instance-a/basedir") };
-const B = { name: "instance-b", url: "http://127.0.0.1:14802", base: join(HARNESS_DIR, "instance-b/basedir") };
+const A = {
+  name: "instance-a",
+  url: "http://127.0.0.1:14801",
+  base: join(HARNESS_DIR, "instance-a/basedir"),
+};
+const B = {
+  name: "instance-b",
+  url: "http://127.0.0.1:14802",
+  base: join(HARNESS_DIR, "instance-b/basedir"),
+};
 const REPO_ROOT = new URL("../..", import.meta.url).pathname;
 
 const STANDARD_SCOPES = [
@@ -108,7 +116,10 @@ for (const [inst, path] of [
 ]) {
   const probe = await api(inst.url, path, { method: "POST", body: {} });
   if (probe.status === 404)
-    fail("flag gating", `${path} 404s while roaming is off — pairing cannot start on a fresh machine`);
+    fail(
+      "flag gating",
+      `${path} 404s while roaming is off — pairing cannot start on a fresh machine`,
+    );
 }
 pass("fresh machines: mirror routes gated, pairing routes answering");
 
@@ -181,7 +192,10 @@ if (paired.peer === null || paired.mirrorUnavailableReason !== null)
 if (paired.peer.environmentId !== environmentIdA)
   fail("pair", `peer environmentId mismatch: ${paired.peer.environmentId}`);
 if (paired.attach.environmentId !== environmentIdA || paired.attach.baseUrl !== A.url)
-  fail("pair", `attach grant mismatch: ${JSON.stringify({ ...paired.attach, token: "<redacted>" })}`);
+  fail(
+    "pair",
+    `attach grant mismatch: ${JSON.stringify({ ...paired.attach, token: "<redacted>" })}`,
+  );
 pass("one pairing call returned mirror peer + attach grant, no-store headers set");
 
 // machine credential stored on B for A
@@ -295,7 +309,10 @@ const vaultFiles = JSON.parse(vaultBlob.payload).files.map((file) => file.path);
 if (!vaultFiles.includes(".env")) fail("vault", `.env missing from mirrored vault: ${vaultFiles}`);
 pass("registry + vault mirrored to B with no user-visible sync step");
 
-// ── 6. attach-only degradation: a standard code still attaches ────────
+// ── 6. re-pairing with a standard code reports the standing mirror ────
+// (True attach-only degradation against an UNPAIRED machine is covered by
+// the RoamingService unit tests and the fresh-machine browser walks; here
+// the machines are already mirrored, so the honest answer is the peer.)
 const standardCode = await mintCode(STANDARD_SCOPES, "Standard client");
 const attachOnlyResponse = await api(B.url, "/api/roaming/peers", {
   method: "POST",
@@ -303,34 +320,48 @@ const attachOnlyResponse = await api(B.url, "/api/roaming/peers", {
   body: { baseUrls: [A.url], pairingCredential: standardCode },
 });
 if (!attachOnlyResponse.ok)
-  fail("attach-only", `${attachOnlyResponse.status} ${await attachOnlyResponse.text()}`);
+  fail("std-re-pair", `${attachOnlyResponse.status} ${await attachOnlyResponse.text()}`);
 const attachOnly = await attachOnlyResponse.json();
-if (attachOnly.peer !== null || attachOnly.mirrorUnavailableReason !== "credential-not-administrative")
-  fail("attach-only", JSON.stringify({ peer: attachOnly.peer, reason: attachOnly.mirrorUnavailableReason }));
+if (attachOnly.peer === null || attachOnly.mirrorUnavailableReason !== null)
+  fail(
+    "std-re-pair",
+    JSON.stringify({ peer: attachOnly.peer, reason: attachOnly.mirrorUnavailableReason }),
+  );
 const attachOnlySession = await api(A.url, "/api/auth/session", {
   token: attachOnly.attach.token,
 }).then((r) => r.json());
-if (attachOnlySession.authenticated !== true) fail("attach-only", "degraded attach bearer rejected");
-pass("standard code degrades to attach-only with a typed reason; attach still works");
+if (attachOnlySession.authenticated !== true) fail("std-re-pair", "attach bearer rejected");
+pass("standard-code re-pair reports the standing mirror; attach still works");
 
-// ── 7. re-pairing never overrides an explicit prior consent ───────────
+// ── 7. re-pairing applies the ONE secrets decision to BOTH machines ───
 const secondAdminCode = await mintCode(ADMIN_SCOPES, "Another machine of yours");
 const repair = await api(B.url, "/api/roaming/peers", {
   method: "POST",
   token: adminB,
-  body: { baseUrls: [A.url], pairingCredential: secondAdminCode, syncOptions: { secretsSync: false } },
+  body: {
+    baseUrls: [A.url],
+    pairingCredential: secondAdminCode,
+    syncOptions: { secretsSync: false },
+  },
 });
 if (!repair.ok) fail("re-pair", `${repair.status} ${await repair.text()}`);
-const settingsAAfter = readSettings(A);
-if (settingsAAfter.roamingSecretsSync !== true)
-  fail("re-pair", "a later pairing remotely overrode A's secrets consent (first-pairing rule broken)");
 // The settings file stores only non-default values, so false shows as absence.
+const settingsAAfter = readSettings(A);
+if ((settingsAAfter.roamingSecretsSync ?? false) !== false)
+  fail("re-pair", "the pairing's secrets decision was not applied on the peer");
 const settingsBAfter = readSettings(B);
 if ((settingsBAfter.roamingSecretsSync ?? false) !== false)
-  fail("re-pair", "B's own dialog choice was not applied locally");
-pass("first-pairing-only rule holds on the peer; local choice applies locally");
-// restore B's consent for symmetry with the doc narrative
-writeFileSync(join(B.base, "userdata", "settings.json"), JSON.stringify({ ...settingsBAfter, roamingSecretsSync: true }));
+  fail("re-pair", "the pairing's secrets decision was not applied locally");
+pass("one secrets decision per pairing, applied to both machines");
+// restore both machines' consent for the later secrets-materialize steps
+writeFileSync(
+  join(A.base, "userdata", "settings.json"),
+  JSON.stringify({ ...settingsAAfter, roamingSecretsSync: true }),
+);
+writeFileSync(
+  join(B.base, "userdata", "settings.json"),
+  JSON.stringify({ ...settingsBAfter, roamingSecretsSync: true }),
+);
 
 // ── 8. kill A: same rows serve offline — materialize from the mirror ──
 const pidA = Number(readFileSync(join(HARNESS_DIR, "instance-a/server.pid"), "utf8").trim());
