@@ -108,6 +108,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
   updatedAt: "2026-06-01T00:00:00.000Z",
   roamingProjects: [],
   roamingMaterializations: [],
+  roamingWipStatus: [],
   projects: [
     {
       id: PROJECT_ID,
