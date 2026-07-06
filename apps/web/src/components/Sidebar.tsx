@@ -212,8 +212,8 @@ import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import {
   useClientSettings,
+  usePrimarySettings,
   useUpdateClientSettings,
-  useUpdatePrimarySettings,
 } from "~/hooks/useSettings";
 import { primaryServerConfigAtom, primaryServerKeybindingsAtom } from "../state/server";
 import {
@@ -1922,7 +1922,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   // an invisible button). The click resolves what it can and otherwise
   // explains itself.
   const roamingEntries = useRoamingProjects();
-  const [materializeInFlight, setMaterializeInFlight] = useState(false);
   const { materialize, dialog: materializeDialog } = useMaterialize();
   const showMaterialize =
     project.environmentPresence === "remote-only" && !project.allRemoteMembersAreDesktopLocal;
@@ -1951,7 +1950,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      if (materializeInFlight) return;
       const memberWorkspaceId = project.memberProjects.find(
         (member) => member.workspaceProjectId != null,
       )?.workspaceProjectId;
@@ -1974,12 +1972,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         });
         return;
       }
-      setMaterializeInFlight(true);
-      void materialize({ workspaceProjectId, title: project.displayName }).finally(() =>
-        setMaterializeInFlight(false),
-      );
+      const dirName =
+        project.memberProjects.find((member) => member.repositoryIdentity)?.repositoryIdentity
+          ?.name ?? project.displayName;
+      materialize({ workspaceProjectId, title: project.displayName, dirName });
     },
-    [project, roamingEntries, materializeInFlight, materialize],
+    [project, roamingEntries, materialize],
   );
 
   const handleCreateThreadClick = useCallback(
@@ -2368,14 +2366,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                     type="button"
                     aria-label={`Materialize ${project.displayName} on this machine`}
                     className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                    disabled={materializeInFlight || materializeBlockedReason !== null}
+                    disabled={materializeBlockedReason !== null}
                     onClick={handleMaterializeClick}
                   >
-                    {materializeInFlight ? (
-                      <LoaderIcon className="size-3.5 animate-spin" />
-                    ) : (
-                      <FolderPlusIcon className="size-3.5" />
-                    )}
+                    <FolderPlusIcon className="size-3.5" />
                   </button>
                 </div>
               }
@@ -2975,39 +2969,47 @@ function useRoamingPeerSyncEnabled(environmentId: string | null): boolean | null
 
 type MaterializeTarget = {
   readonly title: string;
+  readonly dirName: string;
   readonly workspaceProjectId: EnvironmentRoamingProject["roamingProject"]["workspaceProjectId"];
 };
 
-const NO_BASE_DIR_HINT = "base directory";
+const joinTargetPath = (baseDirectory: string, dirName: string): string => {
+  const base = baseDirectory.trim().replace(/[/\\]+$/, "");
+  return base.length === 0 ? dirName : `${base}/${dirName}`;
+};
 
 /**
- * Materialize with a fallback: if the server has no folder configured to
- * clone into, prompt for one, save it as the default, and retry — so the
- * user is asked once, never again (2026-07-06 polish).
+ * Materialize always asks where to clone: a dialog prefilled with
+ * <default folder>/<project> when a default exists (2026-07-06). The chosen
+ * path is a one-off `targetPath` for THIS materialize — the default folder
+ * setting is never modified from here.
  */
 function useMaterialize() {
-  const updatePrimarySettings = useUpdatePrimarySettings();
+  const defaultBaseDirectory = usePrimarySettings((settings) => settings.addProjectBaseDirectory);
   const [pending, setPending] = useState<MaterializeTarget | null>(null);
-  const [folder, setFolder] = useState("");
+  const [targetPath, setTargetPath] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const run = useCallback(
-    async (target: MaterializeTarget, baseDirectory?: string) => {
-      if (baseDirectory !== undefined) {
-        // Same process serves this settings write and the retry, so the
-        // server sees the new base directory immediately — no reload race.
-        await updatePrimarySettings({ addProjectBaseDirectory: baseDirectory });
-      }
+  const materialize = useCallback(
+    (target: MaterializeTarget) => {
+      setTargetPath(joinTargetPath(defaultBaseDirectory, target.dirName));
+      setPending(target);
+    },
+    [defaultBaseDirectory],
+  );
+
+  const submit = useCallback(() => {
+    const target = pending;
+    const chosen = targetPath.trim();
+    if (target === null || chosen === "") return;
+    setBusy(true);
+    void (async () => {
       try {
         const { materialization: result } = await materializeRoamingProject({
           workspaceProjectId: target.workspaceProjectId,
+          targetPath: chosen,
         });
         if (result.status === "failed") {
-          if (baseDirectory === undefined && (result.error ?? "").includes(NO_BASE_DIR_HINT)) {
-            setFolder("");
-            setPending(target);
-            return;
-          }
           toastManager.add({
             type: "error",
             title: `Materialize failed: ${target.title}`,
@@ -3020,18 +3022,18 @@ function useMaterialize() {
           title: `${target.title} is ready`,
           description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
         });
+        setPending(null);
       } catch (error) {
         toastManager.add({
           type: "error",
           title: `Materialize failed: ${target.title}`,
           description: error instanceof Error ? error.message : "Request failed.",
         });
+      } finally {
+        setBusy(false);
       }
-    },
-    [updatePrimarySettings],
-  );
-
-  const materialize = useCallback((target: MaterializeTarget) => run(target), [run]);
+    })();
+  }, [pending, targetPath]);
 
   const dialog = (
     <Dialog
@@ -3042,17 +3044,17 @@ function useMaterialize() {
     >
       <DialogPopup className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Choose a projects folder</DialogTitle>
+          <DialogTitle>Materialize {pending?.title ?? "project"}</DialogTitle>
           <DialogDescription>
-            Materialized projects need a folder to clone into. Pick one — it's saved as the default
-            for next time.
+            Choose the folder to clone into. Prefilled from your default projects folder; edit it
+            for this project only — your default is not changed.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <Input
-            value={folder}
-            onChange={(event) => setFolder(event.target.value)}
-            placeholder="~/projects"
+            value={targetPath}
+            onChange={(event) => setTargetPath(event.target.value)}
+            placeholder="~/projects/my-app"
             spellCheck={false}
             disabled={busy}
           />
@@ -3061,19 +3063,8 @@ function useMaterialize() {
           <Button variant="outline" disabled={busy} onClick={() => setPending(null)}>
             Cancel
           </Button>
-          <Button
-            disabled={busy || folder.trim() === ""}
-            onClick={() => {
-              const target = pending;
-              if (target === null) return;
-              setBusy(true);
-              void run(target, folder.trim()).finally(() => {
-                setBusy(false);
-                setPending(null);
-              });
-            }}
-          >
-            {busy ? "Materializing…" : "Save and materialize"}
+          <Button disabled={busy || targetPath.trim() === ""} onClick={submit}>
+            {busy ? "Materializing…" : "Materialize"}
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -3092,7 +3083,6 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
         candidate.materialization.workspaceProjectId === roamingProject.workspaceProjectId,
     )?.materialization ?? null;
   const isMaterializing = materialization?.status === "running";
-  const [requestInFlight, setRequestInFlight] = useState(false);
   const { materialize, dialog: materializeDialog } = useMaterialize();
 
   const runningStep = isMaterializing
@@ -3109,8 +3099,11 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
   const hasConflicts = roamingProject.conflicts.length > 0;
 
   const handleMaterialize = useCallback(() => {
-    setRequestInFlight(true);
-    void materialize(roamingProject).finally(() => setRequestInFlight(false));
+    materialize({
+      title: roamingProject.title,
+      dirName: roamingProject.repository.name ?? roamingProject.title,
+      workspaceProjectId: roamingProject.workspaceProjectId,
+    });
   }, [materialize, roamingProject]);
 
   return (
@@ -3133,7 +3126,7 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
             {isMaterializing ? `materializing: ${runningStep}…` : `${repository} · ${staleness}`}
           </div>
         </div>
-        {isMaterializing || requestInFlight ? (
+        {isMaterializing ? (
           <LoaderIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground/60" />
         ) : (
           <button
