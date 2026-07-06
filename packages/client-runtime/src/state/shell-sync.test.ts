@@ -248,6 +248,8 @@ describe("environment shell synchronization", () => {
         snapshotSequence: 5,
         projects: [],
         threads: [{ id: "cached-thread" } as never],
+        roamingProjects: [],
+        roamingMaterializations: [],
         updatedAt: "2026-06-06T00:00:00.000Z",
       };
       const resetSnapshot: OrchestrationShellSnapshot = {
