@@ -31,7 +31,9 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { applyVaultBundle } from "./VaultSync.ts";
 
@@ -114,6 +116,25 @@ const expandHomePath = (input: string, path: Path.Path): string => {
   return input;
 };
 
+// Trust-on-first-use is only auto-applied for these well-known public git
+// hosts (2026-07-06 decision); anything else surfaces host-key failures with
+// manual instructions rather than silently trusting an unknown server.
+const WELL_KNOWN_SSH_HOSTS = new Set([
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "ssh.dev.azure.com",
+]);
+
+/** SSH host from scp-style (`git@host:...`) or `ssh://` URLs; null for https/other. */
+const sshHostOf = (remoteUrl: string): string | null => {
+  const scp = /^[^/@]+@([^:/]+):/.exec(remoteUrl);
+  if (scp !== null) return scp[1]!.toLowerCase();
+  const ssh = /^ssh:\/\/(?:[^@/]+@)?([^:/]+)/.exec(remoteUrl);
+  if (ssh !== null) return ssh[1]!.toLowerCase();
+  return null;
+};
+
 const remoteRepoName = (remoteUrl: string): string => {
   const withoutTrailingSlash = remoteUrl.replace(/\/+$/, "");
   const segments = withoutTrailingSlash.split(/[/:]/);
@@ -152,13 +173,45 @@ const replaceStep = (
 });
 
 const failureMessage = (cause: unknown): string => {
-  if (cause instanceof Error && cause.message.length > 0) {
-    return cause.message;
+  // Walk the cause chain: upstream source-control errors wrap the real git
+  // failure ("Host key verification failed", auth prompts, DNS) behind a
+  // generic "could not be completed" — the user needs the bottom message
+  // (field finding 2026-07-06).
+  const parts: string[] = [];
+  let current: unknown = cause;
+  for (let depth = 0; depth < 6 && current != null; depth += 1) {
+    if (typeof current === "string") {
+      if (current.length > 0) parts.push(current);
+      break;
+    }
+    if (typeof current !== "object") break;
+    const record = current as {
+      readonly message?: unknown;
+      readonly detail?: unknown;
+      readonly cause?: unknown;
+    };
+    const message =
+      typeof record.detail === "string" && record.detail.length > 0
+        ? record.detail
+        : typeof record.message === "string" && record.message.length > 0
+          ? record.message
+          : null;
+    if (message !== null) parts.push(message);
+    current = record.cause;
   }
-  if (typeof cause === "string" && cause.length > 0) {
-    return cause;
-  }
-  return "Unknown materialize failure";
+  // Known say-nothing wrapper texts add noise once a real message exists.
+  const generic = new Set([
+    "The source control operation could not be completed.",
+    "Git command exited with a non-zero status.",
+    "Process exited with a non-zero status.",
+    "Authentication failed.",
+  ]);
+  const unique = [...new Set(parts)];
+  const informative = unique.filter((part) => !generic.has(part));
+  const chosen = informative.length > 0 ? informative : unique;
+  if (chosen.length === 0) return "Unknown materialize failure";
+  // Outermost context first, root cause last — the root is what to fix.
+  return chosen.join(" · ");
 };
 
 const make = Effect.gen(function* () {
@@ -169,6 +222,8 @@ const make = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const settings = yield* ServerSettingsService;
   const blobStore = yield* RoamingBlobStore;
+  const peerMirror = yield* PeerMirror;
+  const vcsProcess = yield* VcsProcess.VcsProcess;
   const sourceControl = yield* SourceControlRepositoryService;
   const git = yield* VcsDriver;
   const engine = yield* OrchestrationEngineService;
@@ -256,13 +311,84 @@ const make = Effect.gen(function* () {
       return updated;
     });
 
+  // Seed a well-known host's key into the server's known_hosts so a
+  // background clone can verify it (the server has no terminal to answer the
+  // first-connect prompt). Returns whether it seeded. Never throws.
+  const seedKnownHostKey = (remoteUrl: string): Effect.Effect<boolean> =>
+    Effect.gen(function* () {
+      const host = sshHostOf(remoteUrl);
+      if (host === null || !WELL_KNOWN_SSH_HOSTS.has(host)) return false;
+      const scan = yield* vcsProcess
+        .run({
+          operation: "Materializer.sshKeyscan",
+          command: "ssh-keyscan",
+          cwd: "/",
+          args: ["-T", "10", host],
+          allowNonZeroExit: true,
+          timeoutMs: 15_000,
+          maxOutputBytes: 64 * 1024,
+        })
+        .pipe(Effect.orElseSucceed(() => null));
+      const keys = (scan?.stdout ?? "")
+        .split("\n")
+        .filter((line) => line.trim().length > 0 && !line.startsWith("#"));
+      if (scan === null || scan.exitCode !== 0 || keys.length === 0) return false;
+      const sshDir = path.join(NodeOS.homedir(), ".ssh");
+      const knownHosts = path.join(sshDir, "known_hosts");
+      yield* fs.makeDirectory(sshDir, { recursive: true }).pipe(Effect.ignore);
+      const existing = yield* fs.readFileString(knownHosts).pipe(Effect.orElseSucceed(() => ""));
+      const missing = keys.filter((line) => !existing.includes(line));
+      if (missing.length === 0) return true;
+      const prefix = existing.length > 0 && !existing.endsWith("\n") ? `${existing}\n` : existing;
+      yield* fs.writeFileString(knownHosts, `${prefix}${missing.join("\n")}\n`).pipe(Effect.ignore);
+      yield* Effect.logInfo("roaming: seeded known_hosts for materialize", { host });
+      return true;
+    });
+
+  const diagnoseRemote = (remoteUrl: string): Effect.Effect<string | null> =>
+    vcsProcess
+      .run({
+        operation: "Materializer.diagnoseRemote",
+        command: "git",
+        cwd: "/",
+        args: ["ls-remote", "--exit-code", remoteUrl, "HEAD"],
+        allowNonZeroExit: true,
+        timeoutMs: 20_000,
+        maxOutputBytes: 64 * 1024,
+        env: { GIT_TERMINAL_PROMPT: "0", GIT_SSH_COMMAND: "ssh -oBatchMode=yes" },
+      })
+      .pipe(
+        Effect.map((result) => {
+          if (result.exitCode === 0) return null;
+          const stderr = result.stderr
+            .trim()
+            // never echo embedded credentials (https://user:token@host/...)
+            .replace(/\/\/[^/@\s]+@/g, "//<redacted>@");
+          return stderr.length > 0
+            ? `Cannot reach ${remoteUrl.replace(/\/\/[^/@\s]+@/g, "//<redacted>@")} from this machine's background server: ${stderr}`
+            : null;
+        }),
+        Effect.orElseSucceed(() => null),
+      );
+
   const loadRegistry = (workspaceProjectId: WorkspaceProjectId) =>
     Effect.gen(function* () {
-      const blob = yield* blobStore
+      const readBlob = blobStore
         .get({ kind: "registry", key: workspaceProjectId })
         .pipe(Effect.mapError(internalError("registry blob lookup failed")));
+      let blob = yield* readBlob;
       if (blob === null) {
-        return yield* stepError("not-found", `No registry blob for ${workspaceProjectId}`);
+        // Materialize must not depend on background sync timing: when the
+        // local mirror has no copy yet (live peer, freshly enabled sync),
+        // pull one on demand before giving up (2026-07-06 field finding).
+        yield* peerMirror.syncNowAndWait();
+        blob = yield* readBlob;
+      }
+      if (blob === null) {
+        return yield* stepError(
+          "not-found",
+          `No synced copy of ${workspaceProjectId} — is sync on and the machine reachable?`,
+        );
       }
       return yield* decodeRegistryPayload(blob.payload).pipe(
         Effect.mapError(internalError("registry payload decode failed")),
@@ -336,10 +462,35 @@ const make = Effect.gen(function* () {
           );
         }
       }
-      yield* sourceControl
-        .cloneRepository({ remoteUrl, destinationPath: targetPath })
-        .pipe(Effect.mapError((cause) => stepError("clone-failed", failureMessage(cause), cause)));
-      return `cloned to ${targetPath}`;
+      const clone = () => sourceControl.cloneRepository({ remoteUrl, destinationPath: targetPath });
+      const firstAttempt = yield* clone().pipe(Effect.exit);
+      if (firstAttempt._tag === "Success") return `cloned to ${targetPath}`;
+
+      // The vcs layer drops git's stderr from errors (token safety), leaving
+      // "exited with a non-zero status" — diagnose with a harmless ls-remote
+      // whose stderr we CAN read.
+      const diagnostic = yield* diagnoseRemote(remoteUrl);
+      // Host-key verification is the fresh-machine trap: the background server
+      // never accepted the host key. For well-known public hosts, seed it and
+      // retry once so materialize just works.
+      if (diagnostic !== null && /host key verification failed/i.test(diagnostic)) {
+        const seeded = yield* seedKnownHostKey(remoteUrl);
+        if (seeded) {
+          const retry = yield* clone().pipe(Effect.exit);
+          if (retry._tag === "Success") return `cloned to ${targetPath}`;
+          const retryDiagnostic = yield* diagnoseRemote(remoteUrl);
+          return yield* stepError(
+            "clone-failed",
+            retryDiagnostic ?? failureMessage(retry.cause),
+            retry.cause,
+          );
+        }
+      }
+      return yield* stepError(
+        "clone-failed",
+        diagnostic ?? failureMessage(firstAttempt.cause),
+        firstAttempt.cause,
+      );
     });
 
   const appendMirrorNotice = (record: RoamingMaterializationRecord) =>
@@ -363,9 +514,17 @@ const make = Effect.gen(function* () {
         return yield* stepError("invalid-target", "Target path has not been resolved");
       }
       let next = yield* appendMirrorNotice(record);
-      const blob = yield* blobStore
+      const readVault = blobStore
         .get({ kind: "vault", key: record.workspaceProjectId })
         .pipe(Effect.mapError(internalError("vault blob lookup failed")));
+      let blob = yield* readVault;
+      if (blob === null) {
+        // Same on-demand pull as the registry: a freshly-enabled sync may
+        // have delivered the registry but not yet the vault. Try once before
+        // reporting "no secret files synced".
+        yield* peerMirror.syncNowAndWait();
+        blob = yield* readVault;
+      }
       if (blob === null) {
         return {
           record: addNotice(next, "no secret files synced"),

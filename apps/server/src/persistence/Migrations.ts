@@ -48,6 +48,7 @@ import Migration0032 from "./Migrations/032_AuthPairingProofKeyThumbprint.ts";
 import Migration0033 from "./Migrations/033_RoamingBlobs.ts";
 import Migration0034 from "./Migrations/034_RoamingPeersAndProjectionWorkspaceId.ts";
 import Migration0035 from "./Migrations/035_RoamingMaterializations.ts";
+import Migration0036 from "./Migrations/036_RoamingPeerSyncEnabled.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -95,6 +96,7 @@ export const migrationEntries = [
   [33, "RoamingBlobs", Migration0033],
   [34, "RoamingPeersAndProjectionWorkspaceId", Migration0034],
   [35, "RoamingMaterializations", Migration0035],
+  [36, "RoamingPeerSyncEnabled", Migration0036],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

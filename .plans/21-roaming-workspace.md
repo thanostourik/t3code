@@ -29,14 +29,16 @@ the one pairing flow (plus ordinary settings rows for changing your mind
 later); pairing must never leave the user in a state where the other
 machine's projects are visible but dead.
 
-> **Status:** M2.5 (unified pairing) DONE 2026-07-05 via PRs #19–#24:
-> `scripts/roaming/accept-m2.5.mjs` passes the full transport chain from two
-> fresh machines, and the canonical-workflow walk passes in a real browser
-> (empty laptop → sync options inside the ONE Add Environment dialog →
-> "Machine paired" → the desktop's project LIVE in the one list → peer
-> killed → the SAME row greyed with Materialize). **M3 (bootstrap recipes)
-> is next.** Optional spot-check: repeat the walk once on the real
-> two-machine desktop setup.
+> **Status:** M2.5 (unified pairing) DONE 2026-07-06 — original build PRs
+> #19–#24, then a field-hardening round (PRs #26–#29+) driven by real
+> two-machine use that reshaped the product model: sync = pause not codes,
+> ONE secrets decision per pairing, ONE device row, Materialize enabled-iff-
+> workable with on-demand blob fetch + host-key auto-trust + folder prompt,
+> revoke→dead-row flip, handshake self-revoke, user-label inheritance. All
+> verified on the real desktop by the user and on the M0 harness
+> (`accept-m2.5.mjs` + browser walks). Materialize today = clone + secret
+> files; uncommitted-work sync is **M4**, not built. **M3 (bootstrap
+> recipes) is next.**
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -60,6 +62,20 @@ machine's projects are visible but dead.
 > peer-introduction seam (`PeerIntroduction` in client-runtime): cloud
 > arrives as a new producer behind an existing seam, not a redesign. Same
 > discipline as D0's `RoamingBlobStore` for the M7 storage backend.
+> 2026-07-06 — **M2.5 product model finalized under real two-machine use
+> (user, across a long field session).** Corrections that OVERRIDE earlier
+> wording, now reflected in [Landed constraints](#landed-constraints-m0m25):
+> (1) sync on/off is a PAUSE on the standing pairing, never a code — codes
+> are only for the first enable on an unpaired machine; (2) the pairing's
+> "Secret files" choice is ONE decision applied to whichever machine holds
+> each project (overrides M2's per-machine consent); (3) one paired machine
+> = one row in Authorized clients, credentials collapsed, user's pairing
+> label wins over hostnames; (4) Materialize is enabled-iff-workable
+> (visible+disabled-with-reason otherwise), fetches blobs on demand, auto-
+> trusts well-known SSH host keys, and prompts once for a projects folder;
+> (5) revoked/auth-failed remotes go dead and flip to offline+Materialize.
+> Full field-findings narrative in the history file. Materialize today =
+> clone + secrets; uncommitted-work sync remains M4.
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
 > section at the end. Milestones run strictly in order (M0 → M2, M2.5, M3 → M7).
@@ -619,56 +635,71 @@ narrative moves to the history file — this document stays current-state.
 - Conflict get/resolve routes require `access:write` (they carry secret
   payloads); resolution = pick a side, written as a new higher version.
 
-### Unified pairing (M2.5, PRs #19–#24)
+### Unified pairing (M2.5, PRs #19–#29 + field-hardening)
 
+Handshake (unchanged from the original M2.5 build):
 - ONE handshake, orchestrated by the initiating machine's own server
   (`POST /api/roaming/peers`): exchange the single-use code at the peer's
-  `/oauth/token` with NO scope parameter — the peer consumes the code
-  BEFORE its scope check, so requesting scopes a weaker code lacks burns
-  it — then branch on the granted scopes in the response.
-- With `access:write`: mint the 365-day `roaming:mirror` machine
-  credential AND derive a fresh STANDARD attach bearer (mint + immediately
-  exchange a pairing credential on the peer). The privileged handshake
-  bearer never leaves the server and CANNOT be revoked (the peer forbids
-  revoking the calling session); it ages out on TTL, labeled, visible in
-  the peer's authorized-clients list.
-- Without `access:write`: attach-only with a typed reason
-  (`credential-not-administrative` / `peer-does-not-support-machine-pairing`)
-  and zero side effects. Attach-only is a first-class outcome, not an
-  error; the UI notice says how to get the full pairing.
-- The peers + machine-credential routes are NOT gated on the `roaming`
-  flag (auth unchanged): pairing is what flips the flag on, on both
-  machines.
-- Consent propagation: `syncOptions` apply on the peer ONLY when the same
-  mint flips `roaming` off→on (first pairing); an explicit prior choice is
-  never overridden remotely. Locally the dialog's choice always applies,
-  and the dialog seeds the Secret-files checkbox from the current setting
-  once roaming is on (never silently re-enables a withdrawn consent).
-- Credential hygiene: bearer-bearing responses carry
-  `cache-control: no-store`; tokens never reach logs (failure tags only);
-  the attach grant names the base URL that actually answered; all network
-  steps complete before anything persists locally.
-- Accepted risks (rationale in history file): initiator-side environmentId
-  clobber (the mirror pushes all blobs to every paired peer anyway;
-  rejecting collisions would break re-pairing after an address change);
-  first-pairing settings TOCTOU (negligible window).
-- Peer-introduction seam: `PeerIntroduction` + `registerBearerGrant` (the
-  registration half of `connectPairing`; the descriptor at the URL must
-  match the granted environmentId) live in `packages/client-runtime`; the
-  manual dialog is producer #1; T3 Cloud/relay discovery later constructs
-  the same introduction and drives the same two calls.
-- Sidebar liveness: rows from a non-live remote environment (shell status
-  not `live`/`synchronizing`) leave the merged list so the mirrored
-  offline+Materialize rows surface; ONE filter point feeds both the
-  rendered rows and the offline dedup; primary and desktopLocal
-  environments are exempt; the brief disconnect-detection window is
-  accepted.
-- The create-pairing-URL dialog carries the "Another machine of yours"
-  (administrative) preset; `MachineSyncSettings` is deleted; the secrets
-  consent survives as one ordinary settings row under Remote environments.
-- Acceptance: `accept-m2.5.mjs` (transport chain, from fresh machines) +
-  the canonical-workflow browser walk (empty laptop → sync options inside
-  the one dialog → live row → kill peer → same row offline+Materialize).
+  `/oauth/token` with NO scope parameter (the peer consumes the code before
+  its scope check, so requesting scopes a weaker code lacks would burn it),
+  then branch on the granted scopes. With `access:write`: mint the 365-day
+  `roaming:mirror` credential AND derive a fresh STANDARD attach bearer.
+  Without it: attach-only with a typed reason, zero side effects — a
+  first-class outcome. The peers + machine-credential routes are NOT gated
+  on the `roaming` flag; pairing is what turns it on.
+- The handshake session IS retired: `POST /api/roaming/handshake-complete`
+  self-revokes it (the generic revoke endpoint forbids self-revocation;
+  this route exists for exactly this). One pairing leaves no stray admin
+  session. (Corrects the original build's "cannot be revoked".)
+- Peer-introduction seam: `PeerIntroduction` + `registerBearerGrant` in
+  `packages/client-runtime`; manual dialog is producer #1, relay/cloud
+  discovery later constructs the same value.
+- Credential hygiene: bearer responses carry `cache-control: no-store`;
+  tokens never logged; the attach grant names the reachable base URL; all
+  network steps complete before anything persists locally.
+
+Product model — LOCKED by the user across the 2026-07-06 two-machine
+sessions; these OVERRIDE earlier M2/M2.5 wording:
+- **Sync on/off is a PAUSE, never a pairing code.** `sync_enabled` on the
+  peer row (migration 036) gates outbound passes AND inbound mirror RPCs
+  (paused peer → 403 by session subject) while the credential survives. A
+  one-time code is needed ONLY for the first enable on a machine with no
+  pairing at all. `POST /api/roaming/peers/{list,sync,remove}` back the
+  per-environment controls; Remove is full teardown (row + credential +
+  revoke the peer's inbound sessions).
+- **ONE secrets decision for the pairing.** The dialog's "Secret files"
+  choice ALWAYS applies to the paired-into machine (not first-pairing-only)
+  — the machine holding a project captures its secrets with no second
+  toggle anywhere. Overrides M2's "each machine consents to its own files".
+- **ONE device = ONE row** in Authorized clients: all credentials behind a
+  paired machine collapse to a single entry named after the machine, whose
+  Revoke tears them all down. Session labels inherit the name the user
+  typed on the pairing link ("Laptop"), never a hostname.
+- **Materialize** shows on every live remote-only row; it's ENABLED when it
+  can work (peer sync on, or a retained local copy) and DISABLED-with-reason
+  otherwise — never hidden on invisible state, never a doomed click. It
+  fetches the registry AND vault blobs on demand from the reachable peer
+  (no dependence on background-sync timing), auto-trusts well-known SSH host
+  keys on first clone (github/gitlab/bitbucket/azure; others surface the
+  real git error), and prompts once for a projects folder when none is
+  configured (saved as the default).
+- **Revoked / auth-failed remotes count as dead:** their rows leave the
+  merged list and the mirrored offline+Materialize rows surface (rows from
+  a connection in phase `error`, plus the `live`/`synchronizing`-only
+  liveness filter; primary and desktopLocal exempt).
+- **Scope shipped today:** materialize = clone + synced secret files +
+  register. Syncing the uncommitted working tree (staged/unstaged/untracked)
+  is milestone **M4**, NOT built — materialize does not restore dirty work
+  yet, by design.
+- `MachineSyncSettings` deleted; no user-visible "roaming"/"machine sync"
+  concept anywhere.
+
+Accepted risks (rationale in history file): initiator-side environmentId
+clobber; first-pairing settings TOCTOU.
+
+Acceptance: `accept-m2.5.mjs` (transport chain) + the canonical-workflow
+browser walk + `round3` field-sequence walk (standard-then-upgrade pairing,
+live-row materialize, revoke→offline flip), all green on the M0 harness.
 
 ## Execution process
 
