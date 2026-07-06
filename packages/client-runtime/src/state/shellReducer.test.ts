@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId, WorkspaceProjectId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  WorkspaceProjectId,
+} from "@t3tools/contracts";
 import type { OrchestrationShellSnapshot, OrchestrationShellStreamEvent } from "@t3tools/contracts";
 
 import { applyShellStreamEvent } from "./shellReducer.ts";
@@ -11,6 +17,7 @@ const baseSnapshot: OrchestrationShellSnapshot = {
   threads: [],
   roamingProjects: [],
   roamingMaterializations: [],
+  roamingWipStatus: [],
   updatedAt: "2026-04-01T00:00:00.000Z",
 };
 
@@ -98,7 +105,6 @@ describe("applyShellStreamEvent", () => {
     expect(removed.roamingProjects).toEqual([]);
     expect(removed.snapshotSequence).toBe(10);
   });
-
 
   it("applies materialization updates by workspaceProjectId despite sequence 0", () => {
     const materialization = {
