@@ -398,9 +398,7 @@ in a small `roaming_materializations` SQLite table:
    the default-root precedent).
 2. Clone via `SourceControlRepositoryService.cloneRepository` (skip if the path
    already holds a clone of the right remote — verify via `listRemotes`).
-3. Apply vault (step 2 machinery) from the local blob copy; warn with
-   last-mirror-contact age if the peer hasn't been seen recently.
-4. Fetch and apply the newest WIP snapshot if one exists (step 5 machinery,
+3. Fetch and apply the newest WIP snapshot if one exists (step 5 machinery,
    restore path = `CheckpointStore.restoreCheckpoint`), controlled by an
    explicit `restoreWip` toggle on the materialize request — **default ON**
    (revised in the M3 analysis pass: materialize means bring-to-latest; the
@@ -414,7 +412,15 @@ in a small `roaming_materializations` SQLite table:
    HEAD tree, or when the target tree is not clean. The applied snapshot's
    age and authoring machine are recorded in the step detail (a snapshot
    older than the clone's HEAD can legitimately win — the notice keeps that
-   honest).
+   honest). **Ordering (M3 analysis, review finding): restore-wip runs
+   BEFORE apply-vault** — restore's cleanliness check and `git clean -fd`
+   then operate on the pristine clone instead of depending on vault files
+   being gitignored; content-wise the order is free because WIP capture
+   subtracts the vault set (step 5), so the two file sets are disjoint.
+   Resume of pre-M3 in-flight materialization records must tolerate the
+   old step order.
+4. Apply vault (step 2 machinery) from the local blob copy; warn with
+   last-mirror-contact age if the peer hasn't been seen recently.
 5. Dispatch `project.create` with the registry title + link
    `workspaceProjectId`, reusing the normal decider path so projections/shell
    update for free.
@@ -453,20 +459,32 @@ free).
 step text are folded in; the original assumptions and why they moved are noted
 inline.)*
 
-**Capture:** no extraction needed — `captureCheckpoint` already takes the ref
-name as a parameter (`CheckpointRef` is a plain branded string; the
-`refs/t3/checkpoints/` prefix lives only in a caller-side helper), so the WIP
-reactor calls the existing VCS driver op verbatim with
-`refs/t3/wip/<workspaceProjectId>/<environmentId>`. Checkpoint commits are
-parentless (`commit-tree` with no `-p`) — fine for push (pack negotiation
-subtracts objects reachable from the remote's refs) and for bundles
-(object-level `--not`). New reactor `roaming/WipSnapshotReactor.ts` (modeled
-on `VaultSync`, the closest roaming reactor): triggered by
-`thread.turn-diff-completed` domain events (post-turn, tree stable), a startup
-scan, and an interval scan (default 120s — equal to the debounce cap, so
-per-cwd `VcsStatusBroadcaster` subscriptions would add no effective freshness;
-there is no global dirty-transition stream and no idle/pre-sleep hook in the
-codebase); coalesced per project via `makeKeyedCoalescingWorker`.
+**Capture:** the temp-index recipe (`GIT_INDEX_FILE` + `read-tree HEAD` /
+`add -A` / `write-tree` / `commit-tree` / `update-ref`) is reimplemented in
+`roaming/` (~40 lines of the proven `captureCheckpoint` recipe run through the
+existing process runner — no upstream-file edits) rather than calling the
+driver op verbatim, for two verified reasons: WIP commits must carry
+**`parent = HEAD`** (checkpoint commits are parentless; a 2026-07-06 spike
+showed parentless commits make `git bundle --not --remotes=origin` emit FAT
+whole-tree bundles since bundle thinning is commit-ancestry-based — with
+parent=HEAD the same bundle is bytes-sized with HEAD as the satisfied
+prerequisite; parents are also what give M5's divergence flow its common
+ancestor), and capture must return `{ treeOid, commitOid }` for no-op
+detection. The driver's `restoreCheckpoint` IS reused verbatim for restore.
+**WIP capture subtracts the project's effective vault set from the temp index
+before `write-tree`** — vault-targeted files are gitignored by convention
+(gitignored files are excluded from `add -A` anyway), but a vault include
+override can name a non-gitignored file, and vault content must never reach
+the origin host (it is P2P-only by design). New reactor
+`roaming/WipSnapshotReactor.ts` (modeled on `VaultSync`, the closest roaming
+reactor): triggered by `thread.turn-diff-completed` domain events (post-turn,
+tree stable), a startup scan, and an interval scan (default 120s — equal to
+the debounce cap, so per-cwd `VcsStatusBroadcaster` subscriptions would add no
+effective freshness; there is no global dirty-transition stream and no
+idle/pre-sleep hook in the codebase); coalesced per project via
+`makeKeyedCoalescingWorker`. Known window (accepted): a manual CLI commit
+fires no domain event, so a stale dirty snapshot can outlive the commit by up
+to one interval tick; the restore-side age/author notice keeps it honest.
 
 **Snapshot semantics — the WIP ref mirrors the worktree TREE, dirty or
 clean.** Capturing also when the tree becomes clean is what prevents a stale
@@ -502,6 +520,11 @@ whose tree differs from its last WIP ref. Done.
   size-capped (`ROAMING_WIP_BUNDLE_MAX_BYTES`, default 8 MiB; oversize skipped
   with a surfaced warning — vault pattern). For repos without push rights on
   the origin. Freshness then depends on mirror overlap, like other small state.
+  **Spiked GO 2026-07-06:** with parent=HEAD the bundle is thin (prerequisite
+  = HEAD, satisfied by any fresh clone of the origin; `bundle verify` +
+  fetch-from-bundle + checkpoint-restore round-trip confirmed); parentless
+  commits would make every bundle a whole-tree fat bundle — hence the
+  parent=HEAD capture decision above.
 
 **Consent (new in the analysis pass — vault logic does not transfer):** WIP
 content goes to the project's ORIGIN, a third-party host, unlike vault data
@@ -514,6 +537,17 @@ row — it does not switch itself on.
 **Push-failure surfacing:** a `roamingWipStatus` shell-snapshot field (same
 merge-point pattern as `roamingMaterializations`) carries per-project
 `{ mode, lastCapturedAt, lastPushedAt, lastError }` for the UI.
+
+**Accepted risks (M3 analysis review):** a cloned state dir (two machines
+sharing one persisted environmentId) makes both write the same WIP ref and
+lease-adopt each other's pushes in a ping-pong — same class as the accepted
+initiator-side environmentId clobber; a re-install minting a new
+environmentId orphans the old machine's WIP ref on the origin (bounded: one
+stale ref per abandoned environmentId, prunable by hand). Implementation
+note: the pre-M3 code carries swapped milestone labels from the renumbering
+(`Materializer.ts` restore-wip skip says "M4", bootstrap says "M3", and the
+contracts step comment says "M4 lands WIP snapshots") — the restore-wip PR
+must fix all three.
 
 **Interference guards** (the riskiest point in this step — the same worktree is
 touched by turn checkpoints, user git commands, and provider runs): capture is
