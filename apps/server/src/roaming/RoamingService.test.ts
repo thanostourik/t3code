@@ -178,7 +178,8 @@ const unusedStubs = Layer.mergeAll(
   } satisfies PeerMirror["Service"]),
   Layer.succeed(ServerEnvironment.ServerEnvironment, {
     getEnvironmentId: Effect.succeed(LOCAL_ENVIRONMENT_ID),
-    getDescriptor: Effect.die("unused"),
+    // The handshake reads its own label to name the sessions it mints.
+    getDescriptor: Effect.succeed({ label: "Test Laptop" }) as never,
   }),
   Layer.succeed(OrchestrationEngineService, {
     readEvents: () => Stream.empty,

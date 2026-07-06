@@ -329,6 +329,13 @@ export const RoamingPeer = Schema.Struct({
   baseUrls: Schema.Array(TrimmedNonEmptyString),
   lastContactAt: Schema.NullOr(IsoDateTime),
   enrolledAt: IsoDateTime,
+  /**
+   * Sync on/off is a pause on the standing pairing (2026-07-06 decision):
+   * off gates outbound passes and inbound mirror RPCs but keeps the peer
+   * and its credential, so re-enabling never needs a new pairing code.
+   * A code is only needed when no peer record exists at all.
+   */
+  syncEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type RoamingPeer = typeof RoamingPeer.Type;
 
@@ -410,6 +417,8 @@ export const RoamingMachineCredentialRequest = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   syncOptions: Schema.optional(RoamingPairSyncOptions),
+  /** Human name of the calling machine — used to label the minted sessions. */
+  callerLabel: Schema.optional(TrimmedNonEmptyString),
 });
 export type RoamingMachineCredentialRequest = typeof RoamingMachineCredentialRequest.Type;
 
@@ -499,6 +508,17 @@ export const RoamingListPeersResponse = Schema.Struct({
 });
 export type RoamingListPeersResponse = typeof RoamingListPeersResponse.Type;
 
+export const RoamingSetPeerSyncRequest = Schema.Struct({
+  environmentId: EnvironmentId,
+  syncEnabled: Schema.Boolean,
+});
+export type RoamingSetPeerSyncRequest = typeof RoamingSetPeerSyncRequest.Type;
+
+export const RoamingSetPeerSyncResponse = Schema.Struct({
+  peer: Schema.NullOr(RoamingPeer),
+});
+export type RoamingSetPeerSyncResponse = typeof RoamingSetPeerSyncResponse.Type;
+
 export const RoamingRemovePeerRequest = Schema.Struct({
   environmentId: EnvironmentId,
 });
@@ -529,6 +549,8 @@ export const ROAMING_MACHINE_CREDENTIAL_PATH = "/api/roaming/machine-credential"
 export const ROAMING_PEERS_PATH = "/api/roaming/peers";
 export const ROAMING_PEERS_LIST_PATH = "/api/roaming/peers/list";
 export const ROAMING_PEERS_REMOVE_PATH = "/api/roaming/peers/remove";
+export const ROAMING_PEERS_SYNC_PATH = "/api/roaming/peers/sync";
+export const ROAMING_HANDSHAKE_COMPLETE_PATH = "/api/roaming/handshake-complete";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";

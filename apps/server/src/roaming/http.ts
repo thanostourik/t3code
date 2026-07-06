@@ -24,7 +24,9 @@ import {
   ROAMING_MIRROR_PUSH_PATH,
   ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
+  ROAMING_HANDSHAKE_COMPLETE_PATH,
   ROAMING_PEERS_REMOVE_PATH,
+  ROAMING_PEERS_SYNC_PATH,
   RoamingAddPeerRequest,
   RoamingListPeersResponse,
   RoamingConflictGetRequest,
@@ -43,6 +45,8 @@ import {
   RoamingPushBlobsRequest,
   RoamingRemovePeerRequest,
   RoamingRemovePeerResponse,
+  RoamingSetPeerSyncRequest,
+  RoamingSetPeerSyncResponse,
   RoamingPushBlobsResponse,
   RoamingSyncManifestRequest,
   RoamingSyncManifestResponse,
@@ -56,6 +60,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { Materializer } from "./Materializer.ts";
@@ -136,12 +141,32 @@ const handleRejection = <A, R>(
     ),
   );
 
+/**
+ * Inbound half of the sync pause: a mirror session's subject names its peer
+ * (`roaming-peer:<environmentId>`); while that peer's sync is off, its
+ * passes are rejected — the credential itself stays valid for when the
+ * user re-enables sync.
+ */
+const rejectPausedPeer = (session: { readonly subject: string }) =>
+  Effect.gen(function* () {
+    const match = /^roaming-peer:(.+)$/.exec(session.subject);
+    if (match === null) return;
+    const peers = yield* RoamingPeers;
+    const peer = (yield* peers.list().pipe(Effect.orElseSucceed(() => []))).find(
+      (candidate) => candidate.environmentId === match[1],
+    );
+    if (peer !== undefined && !peer.syncEnabled) {
+      return yield* reject(403, "Sync is turned off for this machine");
+    }
+  });
+
 const manifestRoute = HttpRouter.add(
   "POST",
   ROAMING_MIRROR_MANIFEST_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthRoamingMirrorScope);
+      const session = yield* requireRoamingScope(AuthRoamingMirrorScope);
+      yield* rejectPausedPeer(session);
       yield* decodeBody(RoamingSyncManifestRequest);
       const blobStore = yield* RoamingBlobStore;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -161,7 +186,8 @@ const fetchRoute = HttpRouter.add(
   ROAMING_MIRROR_FETCH_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthRoamingMirrorScope);
+      const session = yield* requireRoamingScope(AuthRoamingMirrorScope);
+      yield* rejectPausedPeer(session);
       const body = yield* decodeBody(RoamingFetchBlobsRequest);
       const blobStore = yield* RoamingBlobStore;
       const blobs = yield* blobStore
@@ -177,7 +203,8 @@ const pushRoute = HttpRouter.add(
   ROAMING_MIRROR_PUSH_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireRoamingScope(AuthRoamingMirrorScope);
+      const session = yield* requireRoamingScope(AuthRoamingMirrorScope);
+      yield* rejectPausedPeer(session);
       const body = yield* decodeBody(RoamingPushBlobsRequest);
       const blobStore = yield* RoamingBlobStore;
       const results: Array<{
@@ -219,6 +246,7 @@ const machineCredentialRoute = HttpRouter.add(
           callerEnvironmentId: body.environmentId,
           callerBaseUrls: body.baseUrls,
           ...(body.syncOptions !== undefined ? { syncOptions: body.syncOptions } : {}),
+          ...(body.callerLabel !== undefined ? { callerLabel: body.callerLabel } : {}),
         })
         .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
       return yield* respondJson(RoamingMachineCredentialResponse, response).pipe(
@@ -319,6 +347,47 @@ const removePeerRoute = HttpRouter.add(
         Effect.ignore,
       );
       return yield* respondJson(RoamingRemovePeerResponse, { removed });
+    }),
+  ),
+);
+
+const setPeerSyncRoute = HttpRouter.add(
+  "POST",
+  ROAMING_PEERS_SYNC_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingSetPeerSyncRequest);
+      const peers = yield* RoamingPeers;
+      const changed = yield* peers
+        .setSyncEnabled(body.environmentId, body.syncEnabled)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      if (!changed) {
+        return yield* reject(404, "No pairing exists for that machine");
+      }
+      const peer =
+        (yield* peers.list().pipe(Effect.orElseSucceed(() => []))).find(
+          (candidate) => candidate.environmentId === body.environmentId,
+        ) ?? null;
+      return yield* respondJson(RoamingSetPeerSyncResponse, { peer });
+    }),
+  ),
+);
+
+const handshakeCompleteRoute = HttpRouter.add(
+  "POST",
+  ROAMING_HANDSHAKE_COMPLETE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      // Deliberate self-revocation: the generic revoke endpoint forbids
+      // revoking the calling session, but retiring the privileged handshake
+      // session is this route's entire purpose. The caller must already
+      // hold access:write, so this grants nothing it could not do to any
+      // OTHER session.
+      const session = yield* requireScope(AuthAccessWriteScope);
+      const sessions = yield* SessionStore.SessionStore;
+      yield* sessions.revoke(session.sessionId).pipe(Effect.ignore);
+      return yield* respondJson(RoamingRemovePeerResponse, { removed: true });
     }),
   ),
 );
@@ -437,6 +506,8 @@ export const roamingRoutesLayer = Layer.mergeAll(
   addPeerRoute,
   listPeersRoute,
   removePeerRoute,
+  setPeerSyncRoute,
+  handshakeCompleteRoute,
   enrollProjectRoute,
   materializeRoute,
   conflictGetRoute,

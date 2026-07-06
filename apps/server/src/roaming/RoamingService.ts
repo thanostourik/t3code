@@ -17,6 +17,7 @@ import {
   CommandId,
   EnvironmentId,
   ProjectId,
+  ROAMING_HANDSHAKE_COMPLETE_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
   RoamingMachineCredentialRequest,
   RoamingMachineCredentialResponse,
@@ -101,6 +102,7 @@ export class RoamingService extends Context.Service<
       readonly callerEnvironmentId: EnvironmentId;
       readonly callerBaseUrls: ReadonlyArray<string>;
       readonly syncOptions?: RoamingPairSyncOptions | undefined;
+      readonly callerLabel?: string | undefined;
     }) => Effect.Effect<RoamingMachineCredentialResponse, RoamingEnrollError>;
   }
 >()("t3/roaming/RoamingService") {}
@@ -302,6 +304,7 @@ const make = Effect.gen(function* () {
     readonly baseUrl: string;
     readonly handshakeToken: string;
     readonly peerEnvironmentId: EnvironmentId;
+    readonly attachLabel: string;
   }) =>
     Effect.gen(function* () {
       const minted = yield* httpClient
@@ -312,7 +315,7 @@ const make = Effect.gen(function* () {
         )
         .post(`${input.baseUrl.replace(/\/$/, "")}/api/auth/pairing-token`, {
           body: HttpBody.jsonUnsafe({
-            label: "Paired machine",
+            label: input.attachLabel,
             scopes: AuthStandardClientScopes,
           }),
         })
@@ -432,10 +435,12 @@ const make = Effect.gen(function* () {
       // Mirror half. The server cannot discover its own reachable URLs
       // (M1 analysis), so it advertises none; the peer reaches us or we
       // reach it.
+      const ownLabel = (yield* serverEnvironment.getDescriptor).label;
       const requestBody = yield* encodeMachineCredentialRequest({
         environmentId,
         baseUrls: [],
         ...(input.syncOptions !== undefined ? { syncOptions: input.syncOptions } : {}),
+        callerLabel: ownLabel,
       }).pipe(Effect.mapError(internalError("machine credential request encode failed")));
       const mintResponse = yield* httpClient
         .pipe(
@@ -472,13 +477,23 @@ const make = Effect.gen(function* () {
           credential !== null
             ? credential.environmentId
             : yield* fetchPeerEnvironmentId(reachableBaseUrl),
+        attachLabel: ownLabel,
       });
 
-      // The handshake session cannot be revoked: the peer's revoke route
-      // forbids revoking the calling session and no other credential we hold
-      // has access:write there. It ages out on its own TTL and stays visible
-      // (and revocable) in the peer's authorized-clients list under the
-      // "roaming-enrollment" label.
+      // Retire the handshake session: the generic revoke endpoint forbids
+      // self-revocation, so the roaming handshake-complete route exists for
+      // exactly this. Best-effort — a failure leaves a labeled session that
+      // ages out on TTL.
+      yield* httpClient
+        .pipe(
+          HttpClient.mapRequest(
+            HttpClientRequest.setHeader("authorization", `Bearer ${exchange.token}`),
+          ),
+        )
+        .post(`${reachableBaseUrl.replace(/\/$/, "")}${ROAMING_HANDSHAKE_COMPLETE_PATH}`, {
+          body: HttpBody.jsonUnsafe({}),
+        })
+        .pipe(Effect.ignore);
 
       let peer: RoamingPeer | null = null;
       if (credential !== null) {
@@ -495,6 +510,7 @@ const make = Effect.gen(function* () {
           baseUrls: input.baseUrls,
           lastContactAt: null,
           enrolledAt: yield* nowIso,
+          syncEnabled: true,
         };
         yield* peers.upsert(peer).pipe(Effect.mapError(internalError("peer record failed")));
         // Pairing IS how roaming turns on locally; the dialog's sync options
@@ -523,7 +539,10 @@ const make = Effect.gen(function* () {
         ttl: MACHINE_CREDENTIAL_TTL,
         scopes: [AuthRoamingMirrorScope],
         subject: `roaming-peer:${input.callerEnvironmentId}`,
-        label: `Roaming mirror credential for ${input.callerEnvironmentId}`,
+        label:
+          input.callerLabel !== undefined
+            ? `${input.callerLabel} — sync`
+            : `Sync credential for ${input.callerEnvironmentId}`,
       })
       .pipe(Effect.mapError(internalError("machine credential issue failed")));
 

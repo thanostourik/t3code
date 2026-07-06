@@ -34,6 +34,11 @@ export class RoamingPeers extends Context.Service<
     ) => Effect.Effect<void, RoamingPeersError>;
     /** Unpair: drop the row; returns whether one existed. */
     readonly remove: (environmentId: EnvironmentId) => Effect.Effect<boolean, RoamingPeersError>;
+    /** Pause/resume sync without touching the credential; null if no row. */
+    readonly setSyncEnabled: (
+      environmentId: EnvironmentId,
+      syncEnabled: boolean,
+    ) => Effect.Effect<boolean, RoamingPeersError>;
     readonly list: () => Effect.Effect<ReadonlyArray<RoamingPeer>, RoamingPeersError>;
     readonly recordContact: (
       environmentId: EnvironmentId,
@@ -63,11 +68,12 @@ const make = Effect.gen(function* () {
         ),
       );
       yield* sql`
-      INSERT INTO roaming_peers (environment_id, base_urls, last_contact_at, enrolled_at)
-      VALUES (${peer.environmentId}, ${baseUrlsJson}, ${peer.lastContactAt}, ${peer.enrolledAt})
+      INSERT INTO roaming_peers (environment_id, base_urls, last_contact_at, enrolled_at, sync_enabled)
+      VALUES (${peer.environmentId}, ${baseUrlsJson}, ${peer.lastContactAt}, ${peer.enrolledAt}, ${peer.syncEnabled ? 1 : 0})
       ON CONFLICT (environment_id) DO UPDATE SET
         base_urls = excluded.base_urls,
-        last_contact_at = COALESCE(excluded.last_contact_at, roaming_peers.last_contact_at)
+        last_contact_at = COALESCE(excluded.last_contact_at, roaming_peers.last_contact_at),
+        sync_enabled = excluded.sync_enabled
     `.pipe(Effect.mapError(sqlError("roaming.peers.upsert")));
       yield* PubSub.publish(changes, undefined);
     },
@@ -99,18 +105,33 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const setSyncEnabled: RoamingPeers["Service"]["setSyncEnabled"] = Effect.fn(
+    "RoamingPeers.setSyncEnabled",
+  )(function* (environmentId, syncEnabled) {
+    const rows = yield* sql<{ readonly environmentId: string }>`
+      UPDATE roaming_peers
+      SET sync_enabled = ${syncEnabled ? 1 : 0}
+      WHERE environment_id = ${environmentId}
+      RETURNING environment_id AS "environmentId"
+    `.pipe(Effect.mapError(sqlError("roaming.peers.setSyncEnabled")));
+    yield* PubSub.publish(changes, undefined);
+    return rows.length > 0;
+  });
+
   const list: RoamingPeers["Service"]["list"] = Effect.fn("RoamingPeers.list")(function* () {
     const rows = yield* sql<{
       readonly environmentId: string;
       readonly baseUrls: string;
       readonly lastContactAt: string | null;
       readonly enrolledAt: string;
+      readonly syncEnabled: number;
     }>`
       SELECT
         environment_id AS "environmentId",
         base_urls AS "baseUrls",
         last_contact_at AS "lastContactAt",
-        enrolled_at AS "enrolledAt"
+        enrolled_at AS "enrolledAt",
+        sync_enabled AS "syncEnabled"
       FROM roaming_peers
       ORDER BY enrolled_at, environment_id
     `.pipe(Effect.mapError(sqlError("roaming.peers.list")));
@@ -119,6 +140,7 @@ const make = Effect.gen(function* () {
     for (const row of rows) {
       peers.push({
         environmentId: row.environmentId,
+        syncEnabled: row.syncEnabled !== 0,
         baseUrls: yield* decodeBaseUrls(row.baseUrls).pipe(
           Effect.mapError((cause) =>
             PersistenceDecodeError.fromSchemaError("roaming.peers.list", cause),
@@ -149,6 +171,7 @@ const make = Effect.gen(function* () {
     upsert,
     ensurePeer,
     remove,
+    setSyncEnabled,
     list,
     recordContact,
     subscribeChanges: PubSub.subscribe(changes),
