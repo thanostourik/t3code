@@ -89,7 +89,7 @@ import {
   useThreadShellsForProjectRefs,
 } from "../state/entities";
 import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
-import { materializeRoamingProject } from "../environments/primary/roaming";
+import { listRoamingPeers, materializeRoamingProject } from "../environments/primary/roaming";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
@@ -213,7 +213,11 @@ import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
-import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
+import {
+  useClientSettings,
+  usePrimarySettings,
+  useUpdateClientSettings,
+} from "~/hooks/useSettings";
 import { primaryServerConfigAtom, primaryServerKeybindingsAtom } from "../state/server";
 import {
   derivePhysicalProjectKey,
@@ -1963,49 +1967,67 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, router, serverConfigs, setOpenMobile],
   );
 
-  // A live remote project can be materialized too — online is when the
-  // mirror is freshest (canonical workflow: "ANY of those projects can be
-  // materialized"). Offered when this machine's mirror has the registry
-  // entry and no local checkout exists yet.
+  // The Materialize action renders on EVERY live remote-only row — never
+  // hidden based on background state (2026-07-06, third field finding of
+  // an invisible button). The click resolves what it can and otherwise
+  // explains itself.
   const roamingEntries = useRoamingProjects();
-  const [materializeInFlight, setMaterializeInFlight] = useState(false);
-  const materializeCandidate = useMemo(() => {
-    if (project.environmentPresence !== "remote-only" || project.allRemoteMembersAreDesktopLocal) {
-      return null;
-    }
-    // Prefer the exact workspace identity the remote members carry; the
-    // repository key is only a fallback (several workspace projects can
-    // share one repository — worktrees, separate enrollments).
-    const workspaceIds = new Set(
-      project.memberProjects.flatMap((member) =>
-        member.workspaceProjectId != null ? [member.workspaceProjectId] : [],
-      ),
-    );
+  const { materialize, dialog: materializeDialog } = useMaterialize();
+  const showMaterialize =
+    project.environmentPresence === "remote-only" && !project.allRemoteMembersAreDesktopLocal;
+  const remoteMemberEnvironmentId = showMaterialize
+    ? (project.memberProjects[0]?.environmentId ?? null)
+    : null;
+  const peerSyncEnabled = useRoamingPeerSyncEnabled(remoteMemberEnvironmentId);
+  const hasLocalMirrorCopy = useMemo(() => {
+    if (!showMaterialize) return false;
     const repositoryKeys = new Set(
       project.memberProjects.flatMap((member) =>
         member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
       ),
     );
-    const available = roamingEntries.filter(
-      (entry) => entry.roamingProject.localProjectId === null,
+    return roamingEntries.some((candidate) =>
+      repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
     );
-    return (
-      available.find((entry) => workspaceIds.has(entry.roamingProject.workspaceProjectId)) ??
-      available.find((entry) => repositoryKeys.has(entry.roamingProject.repository.canonicalKey)) ??
-      null
-    );
-  }, [project, roamingEntries]);
+  }, [showMaterialize, project, roamingEntries]);
+  // Disabled (never hidden) exactly when we KNOW it cannot work: sync is off
+  // for that machine and no synced copy is retained locally.
+  const materializeBlockedReason =
+    peerSyncEnabled === false && !hasLocalMirrorCopy
+      ? "Sync is off for this machine — turn it on in Settings → Connections to materialize."
+      : null;
   const handleMaterializeClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      if (materializeCandidate === null || materializeInFlight) return;
-      setMaterializeInFlight(true);
-      void materializeFromMirror(materializeCandidate.roamingProject).finally(() =>
-        setMaterializeInFlight(false),
+      const memberWorkspaceId = project.memberProjects.find(
+        (member) => member.workspaceProjectId != null,
+      )?.workspaceProjectId;
+      const repositoryKeys = new Set(
+        project.memberProjects.flatMap((member) =>
+          member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
+        ),
       );
+      const registryEntry = roamingEntries.find((candidate) =>
+        repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
+      );
+      const workspaceProjectId =
+        memberWorkspaceId ?? registryEntry?.roamingProject.workspaceProjectId;
+      if (workspaceProjectId == null) {
+        toastManager.add({
+          type: "error",
+          title: `Cannot materialize ${project.displayName} yet`,
+          description:
+            "The other machine hasn't registered this project for sync — check that its Sync toggle is on, then retry.",
+        });
+        return;
+      }
+      const dirName =
+        project.memberProjects.find((member) => member.repositoryIdentity)?.repositoryIdentity
+          ?.name ?? project.displayName;
+      materialize({ workspaceProjectId, title: project.displayName, dirName });
     },
-    [materializeCandidate, materializeInFlight],
+    [project, roamingEntries, materialize],
   );
 
   const handleCreateThreadClick = useCallback(
@@ -2300,6 +2322,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   return (
     <>
+      {materializeDialog}
       <div className="group/project-header relative">
         <SidebarMenuButton
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
@@ -2384,7 +2407,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </TooltipPopup>
           </Tooltip>
         )}
-        {materializeCandidate !== null ? (
+        {showMaterialize ? (
           <Tooltip>
             <TooltipTrigger
               render={
@@ -2393,20 +2416,17 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                     type="button"
                     aria-label={`Materialize ${project.displayName} on this machine`}
                     className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                    disabled={materializeInFlight}
+                    disabled={materializeBlockedReason !== null}
                     onClick={handleMaterializeClick}
                   >
-                    {materializeInFlight ? (
-                      <LoaderIcon className="size-3.5 animate-spin" />
-                    ) : (
-                      <FolderPlusIcon className="size-3.5" />
-                    )}
+                    <FolderPlusIcon className="size-3.5" />
                   </button>
                 </div>
               }
             />
             <TooltipPopup side="top">
-              Materialize: clone here with synced secret files, keep working offline
+              {materializeBlockedReason ??
+                "Materialize: clone here with synced secret files, keep working offline"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -2976,34 +2996,144 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
  * list as local/attached projects (no separate section — 2026-07-05 product
  * model), greyed, with an honest staleness label and a Materialize action.
  */
-async function materializeFromMirror(roamingProject: {
-  readonly title: string;
-  readonly workspaceProjectId: EnvironmentRoamingProject["roamingProject"]["workspaceProjectId"];
-}) {
-  try {
-    const { materialization: result } = await materializeRoamingProject({
-      workspaceProjectId: roamingProject.workspaceProjectId,
-    });
-    if (result.status === "failed") {
-      toastManager.add({
-        type: "error",
-        title: `Materialize failed: ${roamingProject.title}`,
-        description: result.error ?? "See the server log for details.",
-      });
+// Peer sync state, lightly cached across rows. Standard-scoped sessions
+// cannot read it (403) — they get null and the button stays enabled with
+// click-time resolution.
+let roamingPeersCache: { at: number; map: ReadonlyMap<string, boolean> } | null = null;
+function useRoamingPeerSyncEnabled(environmentId: string | null): boolean | null {
+  const [map, setMap] = useState<ReadonlyMap<string, boolean> | null>(
+    roamingPeersCache?.map ?? null,
+  );
+  useEffect(() => {
+    if (environmentId === null) return;
+    if (roamingPeersCache !== null && Date.now() - roamingPeersCache.at < 15_000) {
+      setMap(roamingPeersCache.map);
       return;
     }
-    toastManager.add({
-      type: "success",
-      title: `${roamingProject.title} is ready`,
-      description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
-    });
-  } catch (error) {
-    toastManager.add({
-      type: "error",
-      title: `Materialize failed: ${roamingProject.title}`,
-      description: error instanceof Error ? error.message : "Request failed.",
-    });
-  }
+    let alive = true;
+    listRoamingPeers().then(
+      (result) => {
+        const next = new Map(result.peers.map((peer) => [peer.environmentId, peer.syncEnabled]));
+        roamingPeersCache = { at: Date.now(), map: next };
+        if (alive) setMap(next);
+      },
+      () => {
+        if (alive) setMap(null);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [environmentId]);
+  if (environmentId === null || map === null) return null;
+  return map.get(environmentId) ?? null;
+}
+
+type MaterializeTarget = {
+  readonly title: string;
+  readonly dirName: string;
+  readonly workspaceProjectId: EnvironmentRoamingProject["roamingProject"]["workspaceProjectId"];
+};
+
+const joinTargetPath = (baseDirectory: string, dirName: string): string => {
+  const base = baseDirectory.trim().replace(/[/\\]+$/, "");
+  return base.length === 0 ? dirName : `${base}/${dirName}`;
+};
+
+/**
+ * Materialize always asks where to clone: a dialog prefilled with
+ * <default folder>/<project> when a default exists (2026-07-06). The chosen
+ * path is a one-off `targetPath` for THIS materialize — the default folder
+ * setting is never modified from here.
+ */
+function useMaterialize() {
+  const defaultBaseDirectory = usePrimarySettings((settings) => settings.addProjectBaseDirectory);
+  const [pending, setPending] = useState<MaterializeTarget | null>(null);
+  const [targetPath, setTargetPath] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const materialize = useCallback(
+    (target: MaterializeTarget) => {
+      setTargetPath(joinTargetPath(defaultBaseDirectory, target.dirName));
+      setPending(target);
+    },
+    [defaultBaseDirectory],
+  );
+
+  const submit = useCallback(() => {
+    const target = pending;
+    const chosen = targetPath.trim();
+    if (target === null || chosen === "") return;
+    setBusy(true);
+    void (async () => {
+      try {
+        const { materialization: result } = await materializeRoamingProject({
+          workspaceProjectId: target.workspaceProjectId,
+          targetPath: chosen,
+        });
+        if (result.status === "failed") {
+          toastManager.add({
+            type: "error",
+            title: `Materialize failed: ${target.title}`,
+            description: result.error ?? "See the server log for details.",
+          });
+          return;
+        }
+        toastManager.add({
+          type: "success",
+          title: `${target.title} is ready`,
+          description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
+        });
+        setPending(null);
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: `Materialize failed: ${target.title}`,
+          description: error instanceof Error ? error.message : "Request failed.",
+        });
+      } finally {
+        setBusy(false);
+      }
+    })();
+  }, [pending, targetPath]);
+
+  const dialog = (
+    <Dialog
+      open={pending !== null}
+      onOpenChange={(open) => {
+        if (!open && !busy) setPending(null);
+      }}
+    >
+      <DialogPopup className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Materialize {pending?.title ?? "project"}</DialogTitle>
+          <DialogDescription>
+            Choose the folder to clone into. Prefilled from your default projects folder; edit it
+            for this project only — your default is not changed.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <Input
+            value={targetPath}
+            onChange={(event) => setTargetPath(event.target.value)}
+            placeholder="~/projects/my-app"
+            spellCheck={false}
+            disabled={busy}
+          />
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="outline" disabled={busy} onClick={() => setPending(null)}>
+            Cancel
+          </Button>
+          <Button disabled={busy || targetPath.trim() === ""} onClick={submit}>
+            {busy ? "Materializing…" : "Materialize"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+
+  return { materialize, dialog };
 }
 
 function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
@@ -3015,7 +3145,7 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
         candidate.materialization.workspaceProjectId === roamingProject.workspaceProjectId,
     )?.materialization ?? null;
   const isMaterializing = materialization?.status === "running";
-  const [requestInFlight, setRequestInFlight] = useState(false);
+  const { materialize, dialog: materializeDialog } = useMaterialize();
 
   const runningStep = isMaterializing
     ? (materialization.steps.find((step) => step.status === "running")?.step ?? "starting")
@@ -3031,9 +3161,12 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
   const hasConflicts = roamingProject.conflicts.length > 0;
 
   const handleMaterialize = useCallback(() => {
-    setRequestInFlight(true);
-    void materializeFromMirror(roamingProject).finally(() => setRequestInFlight(false));
-  }, [roamingProject]);
+    materialize({
+      title: roamingProject.title,
+      dirName: roamingProject.repository.name ?? roamingProject.title,
+      workspaceProjectId: roamingProject.workspaceProjectId,
+    });
+  }, [materialize, roamingProject]);
 
   return (
     <SidebarMenuItem key={`${environmentId}:${roamingProject.workspaceProjectId}`}>
@@ -3055,7 +3188,7 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
             {isMaterializing ? `materializing: ${runningStep}…` : `${repository} · ${staleness}`}
           </div>
         </div>
-        {isMaterializing || requestInFlight ? (
+        {isMaterializing ? (
           <LoaderIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground/60" />
         ) : (
           <button
@@ -3069,6 +3202,7 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
           </button>
         )}
       </div>
+      {materializeDialog}
     </SidebarMenuItem>
   );
 }
@@ -3434,15 +3568,35 @@ export default function Sidebar() {
   // reconnects don't flap rows to offline; the primary and desktop-local
   // sandboxes are never dead peers.
   const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
+  // Connections stuck in "error" (e.g. this client's access was revoked)
+  // must count as dead even though the shell keeps a cached snapshot and
+  // the retry loop keeps the status at synchronizing — otherwise revoked
+  // rows look alive forever (2026-07-06 field finding).
+  const erroredEnvironmentIds = useMemo(
+    () =>
+      new Set(
+        environments
+          .filter((environment) => environment.connection.phase === "error")
+          .map((environment) => environment.environmentId),
+      ),
+    [environments],
+  );
   const liveProjects = useMemo(
     () =>
       projects.filter((project) => {
         if (project.environmentId === primaryEnvironmentId) return true;
         if (desktopLocalEnvironmentIds.has(project.environmentId)) return true;
+        if (erroredEnvironmentIds.has(project.environmentId)) return false;
         const status = environmentShellStatuses.get(project.environmentId);
         return status === "live" || status === "synchronizing";
       }),
-    [projects, primaryEnvironmentId, desktopLocalEnvironmentIds, environmentShellStatuses],
+    [
+      projects,
+      primaryEnvironmentId,
+      desktopLocalEnvironmentIds,
+      environmentShellStatuses,
+      erroredEnvironmentIds,
+    ],
   );
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
