@@ -89,7 +89,7 @@ import {
   useThreadShellsForProjectRefs,
 } from "../state/entities";
 import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
-import { materializeRoamingProject } from "../environments/primary/roaming";
+import { listRoamingPeers, materializeRoamingProject } from "../environments/primary/roaming";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
@@ -1921,6 +1921,27 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [materializeInFlight, setMaterializeInFlight] = useState(false);
   const showMaterialize =
     project.environmentPresence === "remote-only" && !project.allRemoteMembersAreDesktopLocal;
+  const remoteMemberEnvironmentId = showMaterialize
+    ? (project.memberProjects[0]?.environmentId ?? null)
+    : null;
+  const peerSyncEnabled = useRoamingPeerSyncEnabled(remoteMemberEnvironmentId);
+  const hasLocalMirrorCopy = useMemo(() => {
+    if (!showMaterialize) return false;
+    const repositoryKeys = new Set(
+      project.memberProjects.flatMap((member) =>
+        member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
+      ),
+    );
+    return roamingEntries.some((candidate) =>
+      repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
+    );
+  }, [showMaterialize, project, roamingEntries]);
+  // Disabled (never hidden) exactly when we KNOW it cannot work: sync is off
+  // for that machine and no synced copy is retained locally.
+  const materializeBlockedReason =
+    peerSyncEnabled === false && !hasLocalMirrorCopy
+      ? "Sync is off for this machine — turn it on in Settings → Connections to materialize."
+      : null;
   const handleMaterializeClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -2341,7 +2362,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                     type="button"
                     aria-label={`Materialize ${project.displayName} on this machine`}
                     className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                    disabled={materializeInFlight}
+                    disabled={materializeInFlight || materializeBlockedReason !== null}
                     onClick={handleMaterializeClick}
                   >
                     {materializeInFlight ? (
@@ -2354,7 +2375,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               }
             />
             <TooltipPopup side="top">
-              Materialize: clone here with synced secret files, keep working offline
+              {materializeBlockedReason ??
+                "Materialize: clone here with synced secret files, keep working offline"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -2912,6 +2934,39 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
  * list as local/attached projects (no separate section — 2026-07-05 product
  * model), greyed, with an honest staleness label and a Materialize action.
  */
+// Peer sync state, lightly cached across rows. Standard-scoped sessions
+// cannot read it (403) — they get null and the button stays enabled with
+// click-time resolution.
+let roamingPeersCache: { at: number; map: ReadonlyMap<string, boolean> } | null = null;
+function useRoamingPeerSyncEnabled(environmentId: string | null): boolean | null {
+  const [map, setMap] = useState<ReadonlyMap<string, boolean> | null>(
+    roamingPeersCache?.map ?? null,
+  );
+  useEffect(() => {
+    if (environmentId === null) return;
+    if (roamingPeersCache !== null && Date.now() - roamingPeersCache.at < 15_000) {
+      setMap(roamingPeersCache.map);
+      return;
+    }
+    let alive = true;
+    listRoamingPeers().then(
+      (result) => {
+        const next = new Map(result.peers.map((peer) => [peer.environmentId, peer.syncEnabled]));
+        roamingPeersCache = { at: Date.now(), map: next };
+        if (alive) setMap(next);
+      },
+      () => {
+        if (alive) setMap(null);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [environmentId]);
+  if (environmentId === null || map === null) return null;
+  return map.get(environmentId) ?? null;
+}
+
 async function materializeFromMirror(roamingProject: {
   readonly title: string;
   readonly workspaceProjectId: EnvironmentRoamingProject["roamingProject"]["workspaceProjectId"];

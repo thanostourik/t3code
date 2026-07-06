@@ -1246,6 +1246,41 @@ type PairingClientsListProps = {
   onRevokeClientSession: (sessionId: ServerClientSessionRecord["sessionId"]) => void;
 };
 
+/**
+ * One device, one block (2026-07-06 decision): every credential referring to
+ * the same paired machine — the client session ("Laptop") and its sync
+ * credential ("Laptop — sync") — renders under a single device heading.
+ * Sessions that don't belong to a paired device (CLI, this browser) stay as
+ * plain rows.
+ */
+function groupSessionsByDevice(sessions: ReadonlyArray<ServerClientSessionRecord>): Array<{
+  deviceName: string | null;
+  sessions: ServerClientSessionRecord[];
+}> {
+  const deviceNames = new Set<string>();
+  for (const session of sessions) {
+    if (session.subject.startsWith("roaming-peer:")) {
+      deviceNames.add((session.client.label ?? "").replace(/ — sync$/, ""));
+    }
+  }
+  const groups = new Map<string, ServerClientSessionRecord[]>();
+  const loose: ServerClientSessionRecord[] = [];
+  for (const session of sessions) {
+    const base = (session.client.label ?? "").replace(/ — sync$/, "");
+    if (base !== "" && deviceNames.has(base) && !session.current) {
+      const group = groups.get(base) ?? [];
+      group.push(session);
+      groups.set(base, group);
+    } else {
+      loose.push(session);
+    }
+  }
+  return [
+    { deviceName: null, sessions: loose },
+    ...[...groups.entries()].map(([deviceName, grouped]) => ({ deviceName, sessions: grouped })),
+  ];
+}
+
 const PairingClientsList = memo(function PairingClientsList({
   endpointUrl,
   endpoints,
@@ -1274,15 +1309,38 @@ const PairingClientsList = memo(function PairingClientsList({
         />
       ))}
 
-      {clientSessions.map((clientSession) => (
-        <ConnectedClientListRow
-          key={clientSession.sessionId}
-          clientSession={clientSession}
-          presentation={presentation}
-          revokingClientSessionId={revokingClientSessionId}
-          onRevokeSession={onRevokeClientSession}
-        />
-      ))}
+      {groupSessionsByDevice(clientSessions).map((group) =>
+        group.deviceName === null ? (
+          group.sessions.map((clientSession) => (
+            <ConnectedClientListRow
+              key={clientSession.sessionId}
+              clientSession={clientSession}
+              presentation={presentation}
+              revokingClientSessionId={revokingClientSessionId}
+              onRevokeSession={onRevokeClientSession}
+            />
+          ))
+        ) : (
+          <div key={`device:${group.deviceName}`}>
+            <div className={accessRowClassName(presentation)}>
+              <p className="text-xs font-semibold tracking-[-0.01em] text-foreground">
+                {group.deviceName}
+              </p>
+            </div>
+            <div className="ml-3 border-l border-border/60">
+              {group.sessions.map((clientSession) => (
+                <ConnectedClientListRow
+                  key={clientSession.sessionId}
+                  clientSession={clientSession}
+                  presentation={presentation}
+                  revokingClientSessionId={revokingClientSessionId}
+                  onRevokeSession={onRevokeClientSession}
+                />
+              ))}
+            </div>
+          </div>
+        ),
+      )}
 
       {pairingLinks.length === 0 && clientSessions.length === 0 && !isLoading ? (
         <div className={accessRowClassName(presentation)}>
@@ -2416,14 +2474,9 @@ export function ConnectionsSettings() {
     const event = authAccessChanges.data;
     if (event?.type !== "snapshot") return [];
     return sortDesktopClientSessions(
-      event.payload.clientSessions
-        // Machine-to-machine sync credentials are plumbing behind the ONE
-        // visible pairing (2026-07-06 decision): each paired machine shows
-        // one entry here; sync teardown lives on the environment row.
-        .filter(
-          (clientSession: AuthClientSession) => !clientSession.subject.startsWith("roaming-peer:"),
-        )
-        .map((clientSession: AuthClientSession) => toDesktopClientSessionRecord(clientSession)),
+      event.payload.clientSessions.map((clientSession: AuthClientSession) =>
+        toDesktopClientSessionRecord(clientSession),
+      ),
     );
   }, [authAccessChanges.data]);
   const isLocalBackendNetworkAccessible = desktopBridge
