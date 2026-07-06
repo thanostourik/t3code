@@ -103,6 +103,8 @@ export class RoamingService extends Context.Service<
       readonly callerBaseUrls: ReadonlyArray<string>;
       readonly syncOptions?: RoamingPairSyncOptions | undefined;
       readonly callerLabel?: string | undefined;
+      /** The authenticating handshake session's label — the user's own name for the caller. */
+      readonly sessionLabel?: string | undefined;
     }) => Effect.Effect<RoamingMachineCredentialResponse, RoamingEnrollError>;
   }
 >()("t3/roaming/RoamingService") {}
@@ -477,7 +479,7 @@ const make = Effect.gen(function* () {
           credential !== null
             ? credential.environmentId
             : yield* fetchPeerEnvironmentId(reachableBaseUrl),
-        attachLabel: ownLabel,
+        attachLabel: credential?.label ?? ownLabel,
       });
 
       // Retire the handshake session: the generic revoke endpoint forbids
@@ -539,10 +541,10 @@ const make = Effect.gen(function* () {
         ttl: MACHINE_CREDENTIAL_TTL,
         scopes: [AuthRoamingMirrorScope],
         subject: `roaming-peer:${input.callerEnvironmentId}`,
-        label:
-          input.callerLabel !== undefined
-            ? `${input.callerLabel} — sync`
-            : `Sync credential for ${input.callerEnvironmentId}`,
+        // The label the user typed on the pairing link wins; machine names
+        // are fallbacks only (field finding: never override "Laptop" with a
+        // hostname).
+        label: `${input.sessionLabel ?? input.callerLabel ?? input.callerEnvironmentId} — sync`,
       })
       .pipe(Effect.mapError(internalError("machine credential issue failed")));
 
@@ -576,6 +578,7 @@ const make = Effect.gen(function* () {
       environmentId,
       token: session.token,
       expiresAt: DateTime.formatIso(session.expiresAt),
+      ...(input.sessionLabel !== undefined ? { label: input.sessionLabel } : {}),
     };
   });
 

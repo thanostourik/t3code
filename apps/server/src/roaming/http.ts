@@ -238,8 +238,19 @@ const machineCredentialRoute = HttpRouter.add(
     Effect.gen(function* () {
       // Deliberately not gated on the roaming setting: a successful mint is
       // what turns the setting on (pairing is the consent).
-      yield* requireScope(AuthAccessWriteScope);
+      const session = yield* requireScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingMachineCredentialRequest);
+      // The handshake session carries the label the user typed on the
+      // pairing link ("Laptop") — the user's name always wins over
+      // machine-derived names downstream.
+      const sessions = yield* SessionStore.SessionStore;
+      const sessionLabel = yield* sessions.listActive().pipe(
+        Effect.map(
+          (active) =>
+            active.find((candidate) => candidate.sessionId === session.sessionId)?.client.label,
+        ),
+        Effect.orElseSucceed(() => undefined),
+      );
       const roamingService = yield* RoamingService;
       const response = yield* roamingService
         .mintMachineCredential({
@@ -247,6 +258,7 @@ const machineCredentialRoute = HttpRouter.add(
           callerBaseUrls: body.baseUrls,
           ...(body.syncOptions !== undefined ? { syncOptions: body.syncOptions } : {}),
           ...(body.callerLabel !== undefined ? { callerLabel: body.callerLabel } : {}),
+          ...(sessionLabel !== undefined ? { sessionLabel } : {}),
         })
         .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
       return yield* respondJson(RoamingMachineCredentialResponse, response).pipe(

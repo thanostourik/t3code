@@ -426,6 +426,11 @@ export const RoamingMachineCredentialResponse = Schema.Struct({
   environmentId: EnvironmentId,
   token: TrimmedNonEmptyString,
   expiresAt: Schema.NullOr(IsoDateTime),
+  /**
+   * The label the peer's user gave the pairing link ("Laptop") — the name
+   * the user chose ALWAYS wins over machine-derived names downstream.
+   */
+  label: Schema.optional(TrimmedNonEmptyString),
 });
 export type RoamingMachineCredentialResponse = typeof RoamingMachineCredentialResponse.Type;
 

@@ -2416,9 +2416,14 @@ export function ConnectionsSettings() {
     const event = authAccessChanges.data;
     if (event?.type !== "snapshot") return [];
     return sortDesktopClientSessions(
-      event.payload.clientSessions.map((clientSession: AuthClientSession) =>
-        toDesktopClientSessionRecord(clientSession),
-      ),
+      event.payload.clientSessions
+        // Machine-to-machine sync credentials are plumbing behind the ONE
+        // visible pairing (2026-07-06 decision): each paired machine shows
+        // one entry here; sync teardown lives on the environment row.
+        .filter(
+          (clientSession: AuthClientSession) => !clientSession.subject.startsWith("roaming-peer:"),
+        )
+        .map((clientSession: AuthClientSession) => toDesktopClientSessionRecord(clientSession)),
     );
   }, [authAccessChanges.data]);
   const isLocalBackendNetworkAccessible = desktopBridge

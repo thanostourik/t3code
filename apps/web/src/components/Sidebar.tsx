@@ -1913,52 +1913,47 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, router, serverConfigs, setOpenMobile],
   );
 
-  // A LIVE remote project can always be materialized (canonical workflow:
-  // "ANY of those projects") — the button keys off the live attach data
-  // itself (the enrolled member's workspaceProjectId); the local mirror
-  // copy is NOT required, because materialize fetches blobs on demand from
-  // the reachable peer (2026-07-06 field finding: gating on the local
-  // mirror made the button invisibly dependent on background sync timing).
+  // The Materialize action renders on EVERY live remote-only row — never
+  // hidden based on background state (2026-07-06, third field finding of
+  // an invisible button). The click resolves what it can and otherwise
+  // explains itself.
   const roamingEntries = useRoamingProjects();
   const [materializeInFlight, setMaterializeInFlight] = useState(false);
-  const materializeCandidate = useMemo(() => {
-    if (project.environmentPresence !== "remote-only" || project.allRemoteMembersAreDesktopLocal) {
-      return null;
-    }
-    const memberWorkspaceId = project.memberProjects.find(
-      (member) => member.workspaceProjectId != null,
-    )?.workspaceProjectId;
-    if (memberWorkspaceId != null) {
-      return { workspaceProjectId: memberWorkspaceId, title: project.displayName };
-    }
-    // Fallback for rows whose live member has no workspace identity yet:
-    // the mirrored registry entry, matched by repository.
-    const repositoryKeys = new Set(
-      project.memberProjects.flatMap((member) =>
-        member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
-      ),
-    );
-    const entry = roamingEntries.find(
-      (candidate) =>
-        candidate.roamingProject.localProjectId === null &&
-        repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
-    );
-    return entry === undefined
-      ? null
-      : {
-          workspaceProjectId: entry.roamingProject.workspaceProjectId,
-          title: entry.roamingProject.title,
-        };
-  }, [project, roamingEntries]);
+  const showMaterialize =
+    project.environmentPresence === "remote-only" && !project.allRemoteMembersAreDesktopLocal;
   const handleMaterializeClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      if (materializeCandidate === null || materializeInFlight) return;
+      if (materializeInFlight) return;
+      const memberWorkspaceId = project.memberProjects.find(
+        (member) => member.workspaceProjectId != null,
+      )?.workspaceProjectId;
+      const repositoryKeys = new Set(
+        project.memberProjects.flatMap((member) =>
+          member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
+        ),
+      );
+      const registryEntry = roamingEntries.find((candidate) =>
+        repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
+      );
+      const workspaceProjectId =
+        memberWorkspaceId ?? registryEntry?.roamingProject.workspaceProjectId;
+      if (workspaceProjectId == null) {
+        toastManager.add({
+          type: "error",
+          title: `Cannot materialize ${project.displayName} yet`,
+          description:
+            "The other machine hasn't registered this project for sync — check that its Sync toggle is on, then retry.",
+        });
+        return;
+      }
       setMaterializeInFlight(true);
-      void materializeFromMirror(materializeCandidate).finally(() => setMaterializeInFlight(false));
+      void materializeFromMirror({ workspaceProjectId, title: project.displayName }).finally(() =>
+        setMaterializeInFlight(false),
+      );
     },
-    [materializeCandidate, materializeInFlight],
+    [project, roamingEntries, materializeInFlight],
   );
 
   const handleCreateThreadClick = useCallback(
@@ -2337,7 +2332,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </TooltipPopup>
           </Tooltip>
         )}
-        {materializeCandidate !== null ? (
+        {showMaterialize ? (
           <Tooltip>
             <TooltipTrigger
               render={
