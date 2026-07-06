@@ -174,7 +174,7 @@ type TrackedLookup =
  * than shipping committed lookalikes. A workspace that simply isn't a git
  * repository has no tracked files, so everything is a candidate there.
  */
-const listTrackedCandidates = (workspaceRoot: string, candidates: ReadonlyArray<string>) =>
+export const listTrackedCandidates = (workspaceRoot: string, candidates: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     if (candidates.length === 0) {
       return { _tag: "tracked", paths: new Set<string>() } as TrackedLookup;
@@ -215,7 +215,10 @@ const listTrackedCandidates = (workspaceRoot: string, candidates: ReadonlyArray<
     } as TrackedLookup;
   });
 
-const buildCandidatePaths = (workspaceRoot: string, workspaceProjectId: WorkspaceProjectId) =>
+export const buildCandidatePaths = (
+  workspaceRoot: string,
+  workspaceProjectId: WorkspaceProjectId,
+) =>
   Effect.gen(function* () {
     const patternCandidates = yield* readTopLevelPatternCandidates(workspaceRoot);
     const overrides = yield* readRegistryOverrides(workspaceProjectId);

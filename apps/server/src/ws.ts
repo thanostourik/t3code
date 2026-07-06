@@ -78,6 +78,7 @@ import {
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { Materializer } from "./roaming/Materializer.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -357,6 +358,7 @@ const makeWsRpcLayer = (
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const roamingBlobStore = yield* RoamingBlobStore;
       const materializer = yield* Materializer;
+      const wipSnapshotReactor = yield* WipSnapshotReactor;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1208,8 +1210,25 @@ const makeWsRpcLayer = (
                 ),
               );
 
+              const wipStatusLive = Stream.unwrap(
+                wipSnapshotReactor.subscribeUpdates.pipe(
+                  Effect.map((subscription) =>
+                    Stream.fromSubscription(subscription).pipe(
+                      Stream.map((wipStatus) => ({
+                        kind: "roaming-wip-status-updated" as const,
+                        sequence: 0,
+                        wipStatus,
+                      })),
+                    ),
+                  ),
+                ),
+              );
+
               const liveTail = roamingEnabled
-                ? Stream.merge(bufferedLiveStream, Stream.merge(roamingLive, materializationLive))
+                ? Stream.merge(
+                    bufferedLiveStream,
+                    Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
+                  )
                 : bufferedLiveStream;
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
@@ -1223,12 +1242,21 @@ const makeWsRpcLayer = (
                       cause,
                     }),
                 ),
-                // Roaming projects are hidden while the flag is off; every
-                // snapshot-emitting path below masks through this one helper.
-                Effect.map((snapshot) =>
+                // Roaming state is hidden while the flag is off; when on, the
+                // snapshot carries the live WIP statuses. Every snapshot-emitting
+                // path below goes through this one helper.
+                Effect.flatMap((snapshot) =>
                   roamingEnabled
-                    ? snapshot
-                    : { ...snapshot, roamingProjects: [], roamingMaterializations: [] },
+                    ? Effect.map(wipSnapshotReactor.listStatuses(), (wipStatus) => ({
+                        ...snapshot,
+                        roamingWipStatus: wipStatus,
+                      }))
+                    : Effect.succeed({
+                        ...snapshot,
+                        roamingProjects: [],
+                        roamingMaterializations: [],
+                        roamingWipStatus: [],
+                      }),
                 ),
               );
 
