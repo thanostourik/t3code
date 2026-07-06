@@ -401,8 +401,20 @@ in a small `roaming_materializations` SQLite table:
 3. Apply vault (step 2 machinery) from the local blob copy; warn with
    last-mirror-contact age if the peer hasn't been seen recently.
 4. Fetch and apply the newest WIP snapshot if one exists (step 5 machinery,
-   restore path = `CheckpointStore.restoreCheckpoint`), only with an explicit
-   user toggle — default on for takeover flows, off for "just browse".
+   restore path = `CheckpointStore.restoreCheckpoint`), controlled by an
+   explicit `restoreWip` toggle on the materialize request — **default ON**
+   (revised in the M3 analysis pass: materialize means bring-to-latest; the
+   original "off for just-browse" distinction belongs to M5's takeover flow).
+   Rendered as a pre-checked checkbox in the existing materialize
+   folder-prompt step. Sources, in order: origin `refs/t3/wip/<wsid>/*`
+   (explicit fetch — the default refspec never sees them), then `kind=wip`
+   bundle blobs (local copy, or on-demand peer fetch like vault blobs).
+   Newest by committer timestamp across environments; skipped with a recorded
+   notice when no snapshot exists, when the snapshot tree equals the clone's
+   HEAD tree, or when the target tree is not clean. The applied snapshot's
+   age and authoring machine are recorded in the step detail (a snapshot
+   older than the clone's HEAD can legitimately win — the notice keeps that
+   honest).
 5. Dispatch `project.create` with the registry title + link
    `workspaceProjectId`, reusing the normal decider path so projections/shell
    update for free.
@@ -437,38 +449,86 @@ free).
 
 ## Step 5 — Continuous WIP snapshots
 
-**Capture:** generalize the checkpoint primitive: extract the temp-index capture
-from `GitVcsDriver.makeVcsDriverShape` checkpoint ops so it can target a new
-namespace `refs/t3/wip/<workspaceProjectId>/<environmentId>`. New reactor
-`roaming/WipSnapshotReactor.ts` (modeled on `CheckpointReactor`): triggered by
-`VcsStatusBroadcaster` dirty-status transitions, turn-completion domain events,
-and a debounce timer; coalesced per project root via
-`makeKeyedCoalescingWorker`. Cheap no-op detection: compare the new
-`write-tree` OID against the last snapshot's tree — identical tree, no commit,
-no push.
+*(Rewritten by the M3 analysis pass, 2026-07-06 — deviations from the original
+step text are folded in; the original assumptions and why they moved are noted
+inline.)*
+
+**Capture:** no extraction needed — `captureCheckpoint` already takes the ref
+name as a parameter (`CheckpointRef` is a plain branded string; the
+`refs/t3/checkpoints/` prefix lives only in a caller-side helper), so the WIP
+reactor calls the existing VCS driver op verbatim with
+`refs/t3/wip/<workspaceProjectId>/<environmentId>`. Checkpoint commits are
+parentless (`commit-tree` with no `-p`) — fine for push (pack negotiation
+subtracts objects reachable from the remote's refs) and for bundles
+(object-level `--not`). New reactor `roaming/WipSnapshotReactor.ts` (modeled
+on `VaultSync`, the closest roaming reactor): triggered by
+`thread.turn-diff-completed` domain events (post-turn, tree stable), a startup
+scan, and an interval scan (default 120s — equal to the debounce cap, so
+per-cwd `VcsStatusBroadcaster` subscriptions would add no effective freshness;
+there is no global dirty-transition stream and no idle/pre-sleep hook in the
+codebase); coalesced per project via `makeKeyedCoalescingWorker`.
+
+**Snapshot semantics — the WIP ref mirrors the worktree TREE, dirty or
+clean.** Capturing also when the tree becomes clean is what prevents a stale
+dirty snapshot on the origin from shadowing work the user has since committed.
+No-op detection: skip the push when the new tree OID equals the last-pushed
+tree OID (last-pushed commit tracked in a local marker ref
+`refs/t3/wip-pushed/<workspaceProjectId>/<environmentId>`, adopted from the
+remote on lease mismatch). Restore correspondingly skips when the snapshot
+tree equals the target clone's HEAD tree, and applies only to a clean target
+tree. Staged/unstaged distinction is flattened on restore (existing checkpoint
+restore semantics; accepted).
 
 **No durable job queue needed:** a snapshot is a pure function of the current
 tree, not a queue of missed deltas. On startup, snapshot any enrolled project
 whose tree differs from its last WIP ref. Done.
 
 **Transport, two modes per project:**
-- *Origin refs* (default): `git push origin refs/t3/wip/...` — zero new
-  infrastructure, delta-compressed, works with any host, **and works while the
-  authoring machine is off** (the origin is the middleman). Guard: refuse this
-  mode when the remote is one you don't control pushes to. **Validated in M0**
-  against the real hosts in use.
-- *Mirrored bundles* (fallback): `git bundle create <last-synced>..<wip>` →
-  blob `kind=wip` over the peer mirror. For repos without push rights on the
-  origin. Freshness then depends on mirror overlap, like other small state.
+- *Origin refs* (default): `git push origin refs/t3/wip/...` with
+  `--force-with-lease=<ref>:<last-pushed>` — zero new infrastructure,
+  delta-compressed, works with any host, **and works while the authoring
+  machine is off** (the origin is the middleman). The driver's push/fetch API
+  is branch-oriented only, so WIP push/fetch runs as raw git through the
+  existing process runner from `roaming/` code (no upstream-file edits).
+  **Controlled-origin guard (revised): push rights cannot be proven without
+  pushing — the guard IS a push probe.** Permission-shaped failures
+  (denied/403/read-only) flip the project to bundle mode (held in memory,
+  re-probed on restart so granted rights self-heal); other failures retry and
+  surface. **Validated in M0** against the real hosts in use (the spike script
+  itself did not survive; the GO verdict in Landed constraints stands).
+- *Mirrored bundles* (fallback): `git bundle create <wip> --not
+  --remotes=origin` → blob `kind=wip` over the peer mirror, payload
+  `{ schemaVersion, capturedAt, refName, commitOid, treeOid, bundleBase64 }`,
+  size-capped (`ROAMING_WIP_BUNDLE_MAX_BYTES`, default 8 MiB; oversize skipped
+  with a surfaced warning — vault pattern). For repos without push rights on
+  the origin. Freshness then depends on mirror overlap, like other small state.
+
+**Consent (new in the analysis pass — vault logic does not transfer):** WIP
+content goes to the project's ORIGIN, a third-party host, unlike vault data
+which never leaves the user's machines. So `roamingWipSync` defaults to false
+in the settings schema; the pairing dialog's pre-checked "Work in progress"
+row is the consent and applies to both machines as one decision (same rule as
+Secret files). Machines paired before M3 enable it via the ordinary settings
+row — it does not switch itself on.
+
+**Push-failure surfacing:** a `roamingWipStatus` shell-snapshot field (same
+merge-point pattern as `roamingMaterializations`) carries per-project
+`{ mode, lastCapturedAt, lastPushedAt, lastError }` for the UI.
 
 **Interference guards** (the riskiest point in this step — the same worktree is
-touched by turn checkpoints, user git commands, and provider runs): serialize
-capture with `CheckpointStore` per cwd (shared semaphore keyed by workspace
-root); skip while `MERGE_HEAD`/`REBASE_HEAD`/`CHERRY_PICK_HEAD` exist; skip
-worktree paths belonging to thread worktrees (`thread.worktreePath`) — those
-are turn-checkpoint territory; cap snapshot frequency (default: 2-min debounce,
-on-idle, on turn-complete). Retention: keep last N (default 20) per machine,
-prune older refs opportunistically after push.
+touched by turn checkpoints, user git commands, and provider runs): capture is
+worktree-read-only (temp index; it never touches the real index or files) and
+the only mutating op — restore — runs at materialize time on a fresh clone, so
+the originally planned shared semaphore with `CheckpointStore` is dropped (no
+such lock exists to share; adding one means editing upstream files to guard a
+non-mutating race). The reactor serializes itself per project via the keyed
+worker; skips while `MERGE_HEAD`/`REBASE_HEAD`/`CHERRY_PICK_HEAD` exist; caps
+snapshot frequency (default: 2-min debounce, on turn-complete, on startup —
+no idle/pre-sleep hooks exist to ride). Thread worktrees live under
+`<baseDir>/worktrees/`, outside project roots, so snapshotting only the
+project root excludes them by construction. Retention: local rolling history
+refs, last N (default 20) per (project, machine), oldest slot overwritten
+after each successful push; the origin holds only the newest snapshot.
 
 **Worktrees decision:** v1 snapshots the *project root* only. Thread worktrees
 are branch-backed and turn-checkpointed already; roaming them adds little and
