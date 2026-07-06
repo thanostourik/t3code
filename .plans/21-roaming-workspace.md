@@ -37,8 +37,8 @@ machine's projects are visible but dead.
 > revoke→dead-row flip, handshake self-revoke, user-label inheritance. All
 > verified on the real desktop by the user and on the M0 harness
 > (`accept-m2.5.mjs` + browser walks). Materialize today = clone + secret
-> files; uncommitted-work sync is **M4**, not built. **M3 (bootstrap
-> recipes) is next.**
+> files; uncommitted-work sync is **M4**, not built. **M4 (WIP snapshots)
+> is next, then M3** — order swapped 2026-07-06 (user decision, below).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -76,9 +76,16 @@ machine's projects are visible but dead.
 > (5) revoked/auth-failed remotes go dead and flip to offline+Materialize.
 > Full field-findings narrative in the history file. Materialize today =
 > clone + secrets; uncommitted-work sync remains M4.
+> 2026-07-06 — **Milestone order swapped: M4 (WIP snapshots) runs before M3
+> (bootstrap recipes)** (user decision). Rationale: uncommitted work is in
+> the thesis's first sentence and kept surfacing as the missing piece in
+> real use; recipes are the comfort feature. No technical dependency either
+> way — materialize's restore-wip step already has its slot, and M3's
+> bootstrap step is independent. Milestone NAMES keep their numbers; only
+> execution order changes: M2.5 → M4 → M3 → M5 → M6 → M7.
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
-> section at the end. Milestones run strictly in order (M0 → M2, M2.5, M3 → M7).
+> section at the end. Milestones run strictly in order (M0 → M2, M2.5, then M4 → M3 → M5 → M6 → M7 — see the 2026-07-06 order swap).
 > Every milestone begins by re-reading the Canonical workflow section and ends
 > by demonstrating it end to end.
 
