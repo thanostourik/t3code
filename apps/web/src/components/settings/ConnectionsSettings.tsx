@@ -2758,10 +2758,20 @@ export function ConnectionsSettings() {
       if (canPairMachine && result._tag === "Success") {
         const pairedEnvironmentId = result.value as string;
         if (roamingPeersById.get(pairedEnvironmentId)?.syncEnabled) {
-          await setRoamingPeerSync({
-            environmentId: pairedEnvironmentId as EnvironmentId,
-            syncEnabled: false,
-          }).catch(() => undefined);
+          try {
+            await setRoamingPeerSync({
+              environmentId: pairedEnvironmentId as EnvironmentId,
+              syncEnabled: false,
+            });
+          } catch (error) {
+            // The user explicitly chose no sync — a failed pause must not
+            // masquerade as success.
+            toastManager.add({
+              type: "error",
+              title: "Connected, but sync could not be turned off",
+              description: error instanceof Error ? error.message : "Request failed.",
+            });
+          }
           refreshRoamingPeers();
         }
       }
