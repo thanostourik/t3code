@@ -1913,37 +1913,42 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, router, serverConfigs, setOpenMobile],
   );
 
-  // A live remote project can be materialized too — online is when the
-  // mirror is freshest (canonical workflow: "ANY of those projects can be
-  // materialized"). Offered when this machine's mirror has the registry
-  // entry and no local checkout exists yet.
+  // A LIVE remote project can always be materialized (canonical workflow:
+  // "ANY of those projects") — the button keys off the live attach data
+  // itself (the enrolled member's workspaceProjectId); the local mirror
+  // copy is NOT required, because materialize fetches blobs on demand from
+  // the reachable peer (2026-07-06 field finding: gating on the local
+  // mirror made the button invisibly dependent on background sync timing).
   const roamingEntries = useRoamingProjects();
   const [materializeInFlight, setMaterializeInFlight] = useState(false);
   const materializeCandidate = useMemo(() => {
     if (project.environmentPresence !== "remote-only" || project.allRemoteMembersAreDesktopLocal) {
       return null;
     }
-    // Prefer the exact workspace identity the remote members carry; the
-    // repository key is only a fallback (several workspace projects can
-    // share one repository — worktrees, separate enrollments).
-    const workspaceIds = new Set(
-      project.memberProjects.flatMap((member) =>
-        member.workspaceProjectId != null ? [member.workspaceProjectId] : [],
-      ),
-    );
+    const memberWorkspaceId = project.memberProjects.find(
+      (member) => member.workspaceProjectId != null,
+    )?.workspaceProjectId;
+    if (memberWorkspaceId != null) {
+      return { workspaceProjectId: memberWorkspaceId, title: project.displayName };
+    }
+    // Fallback for rows whose live member has no workspace identity yet:
+    // the mirrored registry entry, matched by repository.
     const repositoryKeys = new Set(
       project.memberProjects.flatMap((member) =>
         member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
       ),
     );
-    const available = roamingEntries.filter(
-      (entry) => entry.roamingProject.localProjectId === null,
+    const entry = roamingEntries.find(
+      (candidate) =>
+        candidate.roamingProject.localProjectId === null &&
+        repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
     );
-    return (
-      available.find((entry) => workspaceIds.has(entry.roamingProject.workspaceProjectId)) ??
-      available.find((entry) => repositoryKeys.has(entry.roamingProject.repository.canonicalKey)) ??
-      null
-    );
+    return entry === undefined
+      ? null
+      : {
+          workspaceProjectId: entry.roamingProject.workspaceProjectId,
+          title: entry.roamingProject.title,
+        };
   }, [project, roamingEntries]);
   const handleMaterializeClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -1951,9 +1956,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       event.stopPropagation();
       if (materializeCandidate === null || materializeInFlight) return;
       setMaterializeInFlight(true);
-      void materializeFromMirror(materializeCandidate.roamingProject).finally(() =>
-        setMaterializeInFlight(false),
-      );
+      void materializeFromMirror(materializeCandidate).finally(() => setMaterializeInFlight(false));
     },
     [materializeCandidate, materializeInFlight],
   );
@@ -3372,15 +3375,35 @@ export default function Sidebar() {
   // reconnects don't flap rows to offline; the primary and desktop-local
   // sandboxes are never dead peers.
   const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
+  // Connections stuck in "error" (e.g. this client's access was revoked)
+  // must count as dead even though the shell keeps a cached snapshot and
+  // the retry loop keeps the status at synchronizing — otherwise revoked
+  // rows look alive forever (2026-07-06 field finding).
+  const erroredEnvironmentIds = useMemo(
+    () =>
+      new Set(
+        environments
+          .filter((environment) => environment.connection.phase === "error")
+          .map((environment) => environment.environmentId),
+      ),
+    [environments],
+  );
   const liveProjects = useMemo(
     () =>
       projects.filter((project) => {
         if (project.environmentId === primaryEnvironmentId) return true;
         if (desktopLocalEnvironmentIds.has(project.environmentId)) return true;
+        if (erroredEnvironmentIds.has(project.environmentId)) return false;
         const status = environmentShellStatuses.get(project.environmentId);
         return status === "live" || status === "synchronizing";
       }),
-    [projects, primaryEnvironmentId, desktopLocalEnvironmentIds, environmentShellStatuses],
+    [
+      projects,
+      primaryEnvironmentId,
+      desktopLocalEnvironmentIds,
+      environmentShellStatuses,
+      erroredEnvironmentIds,
+    ],
   );
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({

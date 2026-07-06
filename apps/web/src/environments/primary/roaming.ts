@@ -12,6 +12,7 @@ import {
   ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
   ROAMING_PEERS_REMOVE_PATH,
+  ROAMING_PEERS_SYNC_PATH,
   RoamingAddPeerRequest,
   RoamingListPeersResponse,
   RoamingConflictGetRequest,
@@ -23,6 +24,8 @@ import {
   RoamingPairMachineResponse,
   RoamingRemovePeerRequest,
   RoamingRemovePeerResponse,
+  RoamingSetPeerSyncRequest,
+  RoamingSetPeerSyncResponse,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -119,6 +122,18 @@ export function removeRoamingPeer(
     path: ROAMING_PEERS_REMOVE_PATH,
     requestSchema: RoamingRemovePeerRequest,
     responseSchema: RoamingRemovePeerResponse,
+    body,
+  });
+}
+
+export function setRoamingPeerSync(
+  body: RoamingSetPeerSyncRequest,
+): Promise<RoamingSetPeerSyncResponse> {
+  return postRoaming({
+    operation: "roaming.set-peer-sync",
+    path: ROAMING_PEERS_SYNC_PATH,
+    requestSchema: RoamingSetPeerSyncRequest,
+    responseSchema: RoamingSetPeerSyncResponse,
     body,
   });
 }

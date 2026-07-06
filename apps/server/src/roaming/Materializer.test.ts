@@ -28,6 +28,7 @@ import { SourceControlRepositoryService } from "../sourceControl/SourceControlRe
 import { ServerSettingsService } from "../serverSettings.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { Materializer, layer as MaterializerLayer } from "./Materializer.ts";
+import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore, layer as RoamingBlobStoreLayer } from "./RoamingBlobStore.ts";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("env-materializer");
@@ -35,6 +36,12 @@ const WORKSPACE_PROJECT_ID = WorkspaceProjectId.make("wp-materializer");
 const REMOTE_URL = "https://example.test/owner/materializer.git";
 
 const encodeRegistryPayload = Schema.encodeEffect(Schema.fromJsonString(RoamingRegistryPayload));
+
+const peerMirrorStub = Layer.succeed(PeerMirror, {
+  start: () => Effect.void,
+  syncNow: () => Effect.void,
+  syncNowAndWait: () => Effect.void,
+} satisfies PeerMirror["Service"]);
 
 const serverEnvironmentStub = Layer.succeed(ServerEnvironment.ServerEnvironment, {
   getEnvironmentId: Effect.succeed(LOCAL_ENVIRONMENT_ID),
@@ -223,6 +230,7 @@ const makeLayer = (input: {
         ),
       ),
       Layer.provideMerge(makeEngineLayer(input.dispatches, input.projectRows)),
+      Layer.provideMerge(peerMirrorStub),
     )
     .pipe(Layer.provideMerge(NodeServices.layer));
 

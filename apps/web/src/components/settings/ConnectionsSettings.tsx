@@ -135,7 +135,9 @@ import {
   addRoamingPeer,
   listRoamingPeers,
   removeRoamingPeer,
+  setRoamingPeerSync,
 } from "~/environments/primary/roaming";
+import type { RoamingPeer } from "@t3tools/contracts";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import { useEnvironmentQuery } from "~/state/query";
@@ -1582,45 +1584,42 @@ function SavedBackendListRow({
 /**
  * Per-environment sync controls (2026-07-06 product decision): each paired
  * machine's row carries its own Sync toggle and options, editable after
- * pairing. Turning sync ON needs a fresh one-time code from that machine
- * (codes are single-use); turning it OFF drops the mirror credential.
- * The Secret files option currently maps to this machine's capture consent
- * (identical semantics while there is one paired machine).
+ * pairing. Sync on/off is a PAUSE on the standing pairing — the credential
+ * survives, so toggling never involves pairing codes. A code is only needed
+ * when no pairing exists at all (first enable on a plain-connected
+ * environment). The Secret files option maps to this machine's capture
+ * consent (identical semantics while there is one paired machine).
  */
 function EnvironmentSyncControls(props: {
   environment: EnvironmentPresentation;
-  paired: boolean;
+  peer: RoamingPeer | null;
   secretsSync: boolean;
   onChangeSecrets: (checked: boolean) => void;
   onChanged: () => void;
 }) {
-  const { environment, paired, secretsSync, onChangeSecrets, onChanged } = props;
+  const { environment, peer, secretsSync, onChangeSecrets, onChanged } = props;
   const registerBearerGrant = useAtomCommand(registerBearerGrantAtom, { reportFailure: false });
   const [busy, setBusy] = useState(false);
   const [codePromptOpen, setCodePromptOpen] = useState(false);
   const [code, setCode] = useState("");
 
+  const syncOn = peer?.syncEnabled === true;
   const httpBaseUrl =
     Option.isSome(environment.entry.profile) && "httpBaseUrl" in environment.entry.profile.value
       ? (environment.entry.profile.value.httpBaseUrl as string)
       : null;
 
-  const handleSyncOff = () => {
+  const setPaused = (syncEnabled: boolean) => {
     if (busy) return;
     setBusy(true);
     void (async () => {
       try {
-        await removeRoamingPeer({ environmentId: environment.environmentId });
-        toastManager.add({
-          type: "success",
-          title: "Sync turned off",
-          description: `${environment.label} stays connected; its projects no longer sync here.`,
-        });
+        await setRoamingPeerSync({ environmentId: environment.environmentId, syncEnabled });
         onChanged();
       } catch (error) {
         toastManager.add({
           type: "error",
-          title: "Could not turn sync off",
+          title: syncEnabled ? "Could not turn sync on" : "Could not turn sync off",
           description: error instanceof Error ? error.message : "Request failed.",
         });
       } finally {
@@ -1629,7 +1628,7 @@ function EnvironmentSyncControls(props: {
     })();
   };
 
-  const handleSyncOn = () => {
+  const handleFirstEnable = () => {
     const trimmed = code.trim();
     if (busy || trimmed === "" || httpBaseUrl === null) return;
     setBusy(true);
@@ -1647,11 +1646,10 @@ function EnvironmentSyncControls(props: {
             title: "Sync not enabled",
             description:
               paired.mirrorUnavailableReason === "credential-not-administrative"
-                ? "That code wasn't created with the “Another machine of yours” preset — generate a new one there and try again."
-                : "This environment doesn't support pairing between machines.",
+                ? "That code wasn\u2019t created with the \u201cAnother machine of yours\u201d preset \u2014 generate a new one there and try again."
+                : "This environment doesn\u2019t support pairing between machines.",
           });
         } else {
-          toastManager.add({ type: "success", title: "Sync turned on" });
           setCodePromptOpen(false);
           setCode("");
         }
@@ -1669,73 +1667,76 @@ function EnvironmentSyncControls(props: {
   };
 
   return (
-    <div className="mt-1 ml-3 space-y-2 border-l border-border/60 pl-3">
-      <div className="flex items-center justify-between gap-3">
-        <span className="min-w-0">
-          <span className="block text-xs font-medium text-foreground">Sync</span>
-          <span className="block text-xs leading-snug text-muted-foreground">
-            {paired
-              ? "This machine's projects stay in your list and available offline."
-              : "Off — connected only. Turning on needs a new pairing code from that machine."}
-          </span>
-        </span>
-        <Switch
-          checked={paired}
-          disabled={busy || (!paired && httpBaseUrl === null)}
-          onCheckedChange={(checked) => {
-            if (checked === paired) return;
-            if (!checked) {
-              handleSyncOff();
-            } else {
-              setCodePromptOpen(true);
-            }
-          }}
-        />
-      </div>
-      {paired ? (
-        <label className="flex cursor-pointer items-center gap-2">
-          <Checkbox
-            checked={secretsSync}
-            disabled={busy}
-            onCheckedChange={(checked) => onChangeSecrets(checked === true)}
-          />
-          <span className="text-xs text-muted-foreground">
-            Secret files (.env and similar) travel between your machines
-          </span>
-        </label>
-      ) : null}
-      {codePromptOpen && !paired ? (
-        <div className="flex items-center gap-2">
-          <Input
-            value={code}
-            onChange={(event) => setCode(event.target.value)}
-            placeholder={`New pairing code from ${environment.label}`}
-            disabled={busy}
-            spellCheck={false}
-            className="h-7 text-xs"
-          />
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={busy || code.trim() === ""}
-            onClick={handleSyncOn}
-          >
-            {busy ? "Pairing…" : "Turn on"}
-          </Button>
-          <Button
-            size="xs"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => {
-              setCodePromptOpen(false);
-              setCode("");
+    <>
+      <SettingsRow
+        title="Sync"
+        description={
+          syncOn
+            ? "This machine\u2019s projects stay in your list and available offline."
+            : peer !== null
+              ? "Paused \u2014 connected only; flip the switch to resume."
+              : "Off \u2014 connected only. First enable needs a one-time code from that machine."
+        }
+        control={
+          <Switch
+            checked={syncOn}
+            disabled={busy || (peer === null && httpBaseUrl === null)}
+            onCheckedChange={(checked) => {
+              if (checked === syncOn) return;
+              if (peer !== null) {
+                setPaused(checked === true);
+              } else if (checked) {
+                setCodePromptOpen(true);
+              }
             }}
-          >
-            Cancel
-          </Button>
-        </div>
-      ) : null}
-    </div>
+          />
+        }
+      >
+        {syncOn ? (
+          <label className="flex cursor-pointer items-center gap-2 pt-2 pb-3.5">
+            <Checkbox
+              checked={secretsSync}
+              disabled={busy}
+              onCheckedChange={(checked) => onChangeSecrets(checked === true)}
+            />
+            <span className="text-xs text-muted-foreground">
+              Secret files (.env and similar) travel between your machines
+            </span>
+          </label>
+        ) : null}
+        {codePromptOpen && peer === null ? (
+          <div className="flex items-center gap-2 pt-2 pb-3.5">
+            <Input
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              placeholder={`One-time code from ${environment.label}`}
+              disabled={busy}
+              spellCheck={false}
+              className="h-7 flex-1 text-xs"
+            />
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy || code.trim() === ""}
+              onClick={handleFirstEnable}
+            >
+              {busy ? "Pairing\u2026" : "Turn on"}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setCodePromptOpen(false);
+                setCode("");
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        ) : null}
+      </SettingsRow>
+    </>
   );
 }
 
@@ -2285,14 +2286,17 @@ export function ConnectionsSettings() {
   // to the plain client attach (no sync options shown).
   const canPairMachine =
     desktopBridge != null || (currentSessionScopes?.includes(AuthAccessWriteScope) ?? false);
-  // Which saved environments have a live mirror (peer + credential on this
-  // machine) — drives the per-environment sync controls.
-  const [roamingPeerIds, setRoamingPeerIds] = useState<ReadonlySet<string>>(new Set());
+  // Standing pairings (peer records; sync on/off is a flag on them) —
+  // drives the per-environment sync controls.
+  const [roamingPeersById, setRoamingPeersById] = useState<ReadonlyMap<string, RoamingPeer>>(
+    new Map(),
+  );
   const refreshRoamingPeers = useCallback(() => {
     if (!canPairMachine) return;
     void listRoamingPeers().then(
-      (result) => setRoamingPeerIds(new Set(result.peers.map((peer) => peer.environmentId))),
-      () => setRoamingPeerIds(new Set()),
+      (result) =>
+        setRoamingPeersById(new Map(result.peers.map((peer) => [peer.environmentId, peer]))),
+      () => setRoamingPeersById(new Map()),
     );
   }, [canPairMachine]);
   useEffect(() => {
@@ -2747,6 +2751,19 @@ export function ConnectionsSettings() {
           setIsAddingSavedBackend(false);
         }
         return;
+      }
+      // Sync OFF must mean off: if a standing pairing with this machine
+      // already exists (e.g. from an earlier pairing), pause it rather than
+      // silently leaving it running (field finding 2026-07-06).
+      if (canPairMachine && result._tag === "Success") {
+        const pairedEnvironmentId = result.value as string;
+        if (roamingPeersById.get(pairedEnvironmentId)?.syncEnabled) {
+          await setRoamingPeerSync({
+            environmentId: pairedEnvironmentId as EnvironmentId,
+            syncEnabled: false,
+          }).catch(() => undefined);
+          refreshRoamingPeers();
+        }
       }
     }
 
@@ -3996,7 +4013,7 @@ export function ConnectionsSettings() {
             {canPairMachine && environment.entry.target._tag === "BearerConnectionTarget" ? (
               <EnvironmentSyncControls
                 environment={environment}
-                paired={roamingPeerIds.has(environment.environmentId)}
+                peer={roamingPeersById.get(environment.environmentId) ?? null}
                 secretsSync={roamingSecretsSync}
                 onChangeSecrets={(checked) =>
                   updatePrimarySettings({ roamingSecretsSync: checked })

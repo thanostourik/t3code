@@ -32,6 +32,7 @@ import { ProjectionProjectRepository } from "../persistence/Services/ProjectionP
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { applyVaultBundle } from "./VaultSync.ts";
 
@@ -169,6 +170,7 @@ const make = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const settings = yield* ServerSettingsService;
   const blobStore = yield* RoamingBlobStore;
+  const peerMirror = yield* PeerMirror;
   const sourceControl = yield* SourceControlRepositoryService;
   const git = yield* VcsDriver;
   const engine = yield* OrchestrationEngineService;
@@ -258,11 +260,22 @@ const make = Effect.gen(function* () {
 
   const loadRegistry = (workspaceProjectId: WorkspaceProjectId) =>
     Effect.gen(function* () {
-      const blob = yield* blobStore
+      const readBlob = blobStore
         .get({ kind: "registry", key: workspaceProjectId })
         .pipe(Effect.mapError(internalError("registry blob lookup failed")));
+      let blob = yield* readBlob;
       if (blob === null) {
-        return yield* stepError("not-found", `No registry blob for ${workspaceProjectId}`);
+        // Materialize must not depend on background sync timing: when the
+        // local mirror has no copy yet (live peer, freshly enabled sync),
+        // pull one on demand before giving up (2026-07-06 field finding).
+        yield* peerMirror.syncNowAndWait();
+        blob = yield* readBlob;
+      }
+      if (blob === null) {
+        return yield* stepError(
+          "not-found",
+          `No synced copy of ${workspaceProjectId} — is sync on and the machine reachable?`,
+        );
       }
       return yield* decodeRegistryPayload(blob.payload).pipe(
         Effect.mapError(internalError("registry payload decode failed")),

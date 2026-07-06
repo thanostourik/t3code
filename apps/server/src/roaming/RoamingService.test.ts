@@ -175,6 +175,7 @@ const unusedStubs = Layer.mergeAll(
   Layer.succeed(PeerMirror, {
     start: () => Effect.void,
     syncNow: () => Effect.void,
+    syncNowAndWait: () => Effect.void,
   } satisfies PeerMirror["Service"]),
   Layer.succeed(ServerEnvironment.ServerEnvironment, {
     getEnvironmentId: Effect.succeed(LOCAL_ENVIRONMENT_ID),
