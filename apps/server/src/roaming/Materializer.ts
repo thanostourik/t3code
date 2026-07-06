@@ -153,13 +153,36 @@ const replaceStep = (
 });
 
 const failureMessage = (cause: unknown): string => {
-  if (cause instanceof Error && cause.message.length > 0) {
-    return cause.message;
+  // Walk the cause chain: upstream source-control errors wrap the real git
+  // failure ("Host key verification failed", auth prompts, DNS) behind a
+  // generic "could not be completed" — the user needs the bottom message
+  // (field finding 2026-07-06).
+  const parts: string[] = [];
+  let current: unknown = cause;
+  for (let depth = 0; depth < 6 && current != null; depth += 1) {
+    if (typeof current === "string") {
+      if (current.length > 0) parts.push(current);
+      break;
+    }
+    if (typeof current !== "object") break;
+    const record = current as {
+      readonly message?: unknown;
+      readonly detail?: unknown;
+      readonly cause?: unknown;
+    };
+    const message =
+      typeof record.detail === "string" && record.detail.length > 0
+        ? record.detail
+        : typeof record.message === "string" && record.message.length > 0
+          ? record.message
+          : null;
+    if (message !== null) parts.push(message);
+    current = record.cause;
   }
-  if (typeof cause === "string" && cause.length > 0) {
-    return cause;
-  }
-  return "Unknown materialize failure";
+  const unique = [...new Set(parts)];
+  if (unique.length === 0) return "Unknown materialize failure";
+  // Outermost context first, root cause last — the root is what to fix.
+  return unique.join(" · ");
 };
 
 const make = Effect.gen(function* () {
