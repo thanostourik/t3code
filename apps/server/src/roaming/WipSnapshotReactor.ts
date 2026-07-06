@@ -121,6 +121,24 @@ const vaultExcludePathsFor = (target: WipTarget) =>
     return candidates.filter((path) => !tracked.paths.has(path));
   });
 
+const decodeWipPayloadJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingWipPayload));
+
+/** Tree the current wip blob carries, or null (no blob / undecodable). */
+const bundleTreeOid = (workspaceProjectId: WorkspaceProjectId, environmentId: string) =>
+  Effect.gen(function* () {
+    const blobStore = yield* RoamingBlobStore;
+    const blob = yield* blobStore
+      .get({ kind: "wip", key: `${workspaceProjectId}/${environmentId}` })
+      .pipe(Effect.orElseSucceed(() => null));
+    if (blob === null) {
+      return null;
+    }
+    const payload = yield* decodeWipPayloadJson(blob.payload).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    return payload?.treeOid ?? null;
+  });
+
 const primaryRemoteName = (cwd: string) =>
   Effect.gen(function* () {
     const git = yield* GitVcsDriver;
@@ -182,10 +200,16 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     return { _tag: "skipped" } as WipPassOutcome;
   }
 
+  // The no-op baseline is the last SHIPPED tree: the pushed-marker ref in
+  // origin mode (written only after a successful push), the current wip
+  // blob's tree in bundle mode (there is no marker there — without this the
+  // bundle path would re-mirror up to 8 MiB every interval on an idle repo).
   const markerTree = yield* resolveOid(cwd, `${markerRef}^{tree}`);
+  const shippedTree =
+    mode === "bundle" ? yield* bundleTreeOid(target.workspaceProjectId, environmentId) : markerTree;
 
-  // Fast path: clean worktree whose HEAD tree is already the pushed tree.
-  if (markerTree !== null) {
+  // Fast path: clean worktree whose HEAD tree is already the shipped tree.
+  if (shippedTree !== null) {
     const status = yield* git.execute({
       operation: "WipSnapshotReactor.statusPorcelain",
       cwd,
@@ -193,7 +217,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     });
     if (status.stdout.trim().length === 0) {
       const headTree = yield* resolveOid(cwd, "HEAD^{tree}");
-      if (headTree !== null && headTree === markerTree) {
+      if (headTree !== null && headTree === shippedTree) {
         return { _tag: "skipped" } as WipPassOutcome;
       }
     }
@@ -204,7 +228,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     workspaceProjectId: target.workspaceProjectId,
     environmentId,
     vaultExcludePaths: excludePaths,
-    skipIfTreeOid: markerTree,
+    skipIfTreeOid: shippedTree,
   });
   if (captured === null) {
     return { _tag: "skipped" } as WipPassOutcome;
@@ -258,6 +282,11 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
           lastError: "wip bundle exceeds size cap",
         } satisfies RoamingWipStatusEntry;
       }
+      // The origin→bundle flip captures before knowing the blob baseline:
+      // skip the write when the blob already carries this exact tree.
+      if ((yield* bundleTreeOid(target.workspaceProjectId, environmentId)) === captured.treeOid) {
+        return { ...entryBase, mode: "bundle" } satisfies RoamingWipStatusEntry;
+      }
       const content = yield* fs.readFile(bundlePath);
       const payload = yield* encodeWipPayloadJson({
         schemaVersion: 1,
@@ -303,7 +332,14 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
 
   const markerOid = yield* resolveOid(cwd, markerRef);
   let pushResult = yield* pushOnce(markerOid ?? "");
-  if (pushResult.exitCode !== 0 && LEASE_STDERR.test(pushResult.stderr)) {
+  // Permission is terminal — git also prints lease-shaped lines ("failed to
+  // push some refs") on denials, so it must be classified first or we would
+  // fetch + re-push against a ref we are not allowed to touch.
+  if (
+    pushResult.exitCode !== 0 &&
+    !PERMISSION_STDERR.test(pushResult.stderr) &&
+    LEASE_STDERR.test(pushResult.stderr)
+  ) {
     // Adopt the remote's value (a lost marker, e.g. a fresh clone of our own
     // state) and retry once. The ref name embeds our environmentId, so the
     // only writer we can race is ourselves.
@@ -507,12 +543,21 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  // Gated like the snapshot field's contract: no stale entries after the
+  // user turns WIP sync off (the roaming flag itself is handled at the ws
+  // merge point).
   const listStatuses: WipSnapshotReactor["Service"]["listStatuses"] = () =>
-    Ref.get(statuses).pipe(
-      Effect.map((map) =>
-        [...map.values()].sort((left, right) =>
-          left.workspaceProjectId.localeCompare(right.workspaceProjectId),
-        ),
+    isEnabled.pipe(
+      Effect.flatMap((enabled) =>
+        enabled
+          ? Ref.get(statuses).pipe(
+              Effect.map((map) =>
+                [...map.values()].sort((left, right) =>
+                  left.workspaceProjectId.localeCompare(right.workspaceProjectId),
+                ),
+              ),
+            )
+          : Effect.succeed([]),
       ),
     );
 
@@ -522,11 +567,14 @@ const make = Effect.gen(function* () {
       yield* Effect.forkScoped(
         Effect.forever(snapshotAll().pipe(Effect.andThen(Effect.sleep(WIP_INTERVAL)))),
       );
-      // Settings enabling triggers a scan so consent takes effect immediately.
+      // Settings enabling triggers a scan so consent takes effect
+      // immediately; disabling drops the retained statuses.
       yield* Effect.forkScoped(
         serverSettings.streamChanges.pipe(
           Stream.runForEach((settings) =>
-            settings.roaming && settings.roamingWipSync ? snapshotAll() : Effect.void,
+            settings.roaming && settings.roamingWipSync
+              ? snapshotAll()
+              : Ref.set(statuses, new Map()),
           ),
           Effect.ignoreCause({ log: true }),
         ),
@@ -549,7 +597,8 @@ const make = Effect.gen(function* () {
               (candidate) => candidate.localProjectId === thread.value.projectId,
             );
             if (target !== undefined) {
-              yield* snapshotProject(target.workspaceProjectId);
+              // Enqueue directly — processTarget re-checks the settings gate.
+              yield* worker.enqueue(target.workspaceProjectId, target);
             }
           }),
         ).pipe(Effect.ignoreCause({ log: true })),
