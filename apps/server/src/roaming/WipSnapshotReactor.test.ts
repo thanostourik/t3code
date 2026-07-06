@@ -303,6 +303,44 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect("surfaces a non-permission push failure and stays in origin mode", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-wip-pushfail");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-pushfail-" });
+      const { workPath, originPath } = yield* initRepoWithOrigin(root);
+      // An unreachable remote fails with neither permission- nor lease-shaped
+      // stderr — the generic branch must surface it and keep origin mode.
+      yield* fs.remove(originPath, { recursive: true, force: true });
+      yield* fs.writeFileString(pathService.join(workPath, "tracked.txt"), "dirty\n");
+
+      const outcome = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+      assert.strictEqual(outcome._tag, "done");
+      assert.strictEqual(outcome._tag === "done" && outcome.nextMode, "origin-refs");
+      assert.match((outcome._tag === "done" && outcome.entry.lastError) || "", /^push failed: /);
+    }),
+  );
+
+  it.effect("reports a project with no git remote instead of failing", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-wip-noremote");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-noremote-" });
+      const { workPath } = yield* initRepoWithOrigin(root);
+      yield* git(workPath, ["remote", "remove", "origin"]);
+      yield* fs.writeFileString(pathService.join(workPath, "tracked.txt"), "dirty\n");
+
+      const outcome = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+      assert.strictEqual(outcome._tag, "done");
+      assert.strictEqual(
+        outcome._tag === "done" && outcome.entry.lastError,
+        "no git remote configured",
+      );
+    }),
+  );
+
   it.effect("skips while a merge is in progress", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-wip-merge");
