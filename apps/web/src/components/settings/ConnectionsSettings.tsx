@@ -131,7 +131,13 @@ import {
   connectSshEnvironment as connectSshEnvironmentAtom,
   registerBearerGrant as registerBearerGrantAtom,
 } from "~/connection/onboarding";
-import { addRoamingPeer } from "~/environments/primary/roaming";
+import {
+  addRoamingPeer,
+  listRoamingPeers,
+  removeRoamingPeer,
+  setRoamingPeerSync,
+} from "~/environments/primary/roaming";
+import type { RoamingPeer } from "@t3tools/contracts";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import { useEnvironmentQuery } from "~/state/query";
@@ -1240,6 +1246,41 @@ type PairingClientsListProps = {
   onRevokeClientSession: (sessionId: ServerClientSessionRecord["sessionId"]) => void;
 };
 
+/**
+ * One device, one block (2026-07-06 decision): every credential referring to
+ * the same paired machine — the client session ("Laptop") and its sync
+ * credential ("Laptop — sync") — renders under a single device heading.
+ * Sessions that don't belong to a paired device (CLI, this browser) stay as
+ * plain rows.
+ */
+function groupSessionsByDevice(sessions: ReadonlyArray<ServerClientSessionRecord>): Array<{
+  deviceName: string | null;
+  sessions: ServerClientSessionRecord[];
+}> {
+  const deviceNames = new Set<string>();
+  for (const session of sessions) {
+    if (session.subject.startsWith("roaming-peer:")) {
+      deviceNames.add((session.client.label ?? "").replace(/ — sync$/, ""));
+    }
+  }
+  const groups = new Map<string, ServerClientSessionRecord[]>();
+  const loose: ServerClientSessionRecord[] = [];
+  for (const session of sessions) {
+    const base = (session.client.label ?? "").replace(/ — sync$/, "");
+    if (base !== "" && deviceNames.has(base) && !session.current) {
+      const group = groups.get(base) ?? [];
+      group.push(session);
+      groups.set(base, group);
+    } else {
+      loose.push(session);
+    }
+  }
+  return [
+    { deviceName: null, sessions: loose },
+    ...[...groups.entries()].map(([deviceName, grouped]) => ({ deviceName, sessions: grouped })),
+  ];
+}
+
 const PairingClientsList = memo(function PairingClientsList({
   endpointUrl,
   endpoints,
@@ -1268,15 +1309,43 @@ const PairingClientsList = memo(function PairingClientsList({
         />
       ))}
 
-      {clientSessions.map((clientSession) => (
-        <ConnectedClientListRow
-          key={clientSession.sessionId}
-          clientSession={clientSession}
-          presentation={presentation}
-          revokingClientSessionId={revokingClientSessionId}
-          onRevokeSession={onRevokeClientSession}
-        />
-      ))}
+      {groupSessionsByDevice(clientSessions).map((group) => {
+        if (group.deviceName === null) {
+          return group.sessions.map((clientSession) => (
+            <ConnectedClientListRow
+              key={clientSession.sessionId}
+              clientSession={clientSession}
+              presentation={presentation}
+              revokingClientSessionId={revokingClientSessionId}
+              onRevokeSession={onRevokeClientSession}
+            />
+          ));
+        }
+        // ONE device, ONE row (2026-07-06): however many credentials sit
+        // behind a paired machine, it renders as a single entry whose
+        // Revoke tears all of them down.
+        const display =
+          group.sessions.find((session) => !session.subject.startsWith("roaming-peer:")) ??
+          group.sessions[0]!;
+        const merged = {
+          ...display,
+          client: { ...display.client, label: group.deviceName },
+          connected: group.sessions.some((session) => session.connected || session.current),
+        };
+        return (
+          <ConnectedClientListRow
+            key={`device:${group.deviceName}`}
+            clientSession={merged}
+            presentation={presentation}
+            revokingClientSessionId={revokingClientSessionId}
+            onRevokeSession={() => {
+              for (const session of group.sessions) {
+                onRevokeClientSession(session.sessionId);
+              }
+            }}
+          />
+        );
+      })}
 
       {pairingLinks.length === 0 && clientSessions.length === 0 && !isLoading ? (
         <div className={accessRowClassName(presentation)}>
@@ -1572,6 +1641,165 @@ function SavedBackendListRow({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Per-environment sync controls (2026-07-06 product decision): each paired
+ * machine's row carries its own Sync toggle and options, editable after
+ * pairing. Sync on/off is a PAUSE on the standing pairing — the credential
+ * survives, so toggling never involves pairing codes. A code is only needed
+ * when no pairing exists at all (first enable on a plain-connected
+ * environment). The Secret files option maps to this machine's capture
+ * consent (identical semantics while there is one paired machine).
+ */
+function EnvironmentSyncControls(props: {
+  environment: EnvironmentPresentation;
+  peer: RoamingPeer | null;
+  secretsSync: boolean;
+  onChangeSecrets: (checked: boolean) => void;
+  onChanged: () => void;
+}) {
+  const { environment, peer, secretsSync, onChangeSecrets, onChanged } = props;
+  const registerBearerGrant = useAtomCommand(registerBearerGrantAtom, { reportFailure: false });
+  const [busy, setBusy] = useState(false);
+  const [codePromptOpen, setCodePromptOpen] = useState(false);
+  const [code, setCode] = useState("");
+
+  const syncOn = peer?.syncEnabled === true;
+  const httpBaseUrl =
+    Option.isSome(environment.entry.profile) && "httpBaseUrl" in environment.entry.profile.value
+      ? (environment.entry.profile.value.httpBaseUrl as string)
+      : null;
+
+  const setPaused = (syncEnabled: boolean) => {
+    if (busy) return;
+    setBusy(true);
+    void (async () => {
+      try {
+        await setRoamingPeerSync({ environmentId: environment.environmentId, syncEnabled });
+        onChanged();
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: syncEnabled ? "Could not turn sync on" : "Could not turn sync off",
+          description: error instanceof Error ? error.message : "Request failed.",
+        });
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const handleFirstEnable = () => {
+    const trimmed = code.trim();
+    if (busy || trimmed === "" || httpBaseUrl === null) return;
+    setBusy(true);
+    void (async () => {
+      try {
+        const paired = await addRoamingPeer({
+          baseUrls: [httpBaseUrl],
+          pairingCredential: trimmed,
+          syncOptions: { secretsSync },
+        });
+        await registerBearerGrant(paired.attach);
+        if (paired.peer === null) {
+          toastManager.add({
+            type: "error",
+            title: "Sync not enabled",
+            description:
+              paired.mirrorUnavailableReason === "credential-not-administrative"
+                ? "That code wasn\u2019t created with the \u201cAnother machine of yours\u201d preset \u2014 generate a new one there and try again."
+                : "This environment doesn\u2019t support pairing between machines.",
+          });
+        } else {
+          setCodePromptOpen(false);
+          setCode("");
+        }
+        onChanged();
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not turn sync on",
+          description: error instanceof Error ? error.message : "Request failed.",
+        });
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  return (
+    <>
+      <SettingsRow
+        title="Sync"
+        description={
+          syncOn
+            ? "This machine\u2019s projects stay in your list and available offline."
+            : peer !== null
+              ? "Paused \u2014 connected only; flip the switch to resume."
+              : "Off \u2014 connected only. First enable needs a one-time code from that machine."
+        }
+        control={
+          <Switch
+            checked={syncOn}
+            disabled={busy || (peer === null && httpBaseUrl === null)}
+            onCheckedChange={(checked) => {
+              if (checked === syncOn) return;
+              if (peer !== null) {
+                setPaused(checked === true);
+              } else if (checked) {
+                setCodePromptOpen(true);
+              }
+            }}
+          />
+        }
+      >
+        {syncOn ? (
+          <label className="flex cursor-pointer items-center gap-2 pt-2 pb-3.5">
+            <Checkbox
+              checked={secretsSync}
+              disabled={busy}
+              onCheckedChange={(checked) => onChangeSecrets(checked === true)}
+            />
+            <span className="text-xs text-muted-foreground">
+              Secret files (.env and similar) travel between your machines
+            </span>
+          </label>
+        ) : null}
+        {codePromptOpen && peer === null ? (
+          <div className="flex items-center gap-2 pt-2 pb-3.5">
+            <Input
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              placeholder={`One-time code from ${environment.label}`}
+              disabled={busy}
+              spellCheck={false}
+              className="h-7 flex-1 text-xs"
+            />
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy || code.trim() === ""}
+              onClick={handleFirstEnable}
+            >
+              {busy ? "Pairing\u2026" : "Turn on"}
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setCodePromptOpen(false);
+                setCode("");
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        ) : null}
+      </SettingsRow>
+    </>
   );
 }
 
@@ -2113,11 +2341,30 @@ export function ConnectionsSettings() {
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
   const [savedBackendSecretsSync, setSavedBackendSecretsSync] = useState(true);
+  // Master switch (2026-07-06 product decision): sync defaults on but the
+  // dialog must allow a plain connect with no sync at all.
+  const [savedBackendSyncEnabled, setSavedBackendSyncEnabled] = useState(true);
   // The unified machine handshake runs through this client's own server and
   // needs an administrative session there; without one the dialog falls back
   // to the plain client attach (no sync options shown).
   const canPairMachine =
     desktopBridge != null || (currentSessionScopes?.includes(AuthAccessWriteScope) ?? false);
+  // Standing pairings (peer records; sync on/off is a flag on them) —
+  // drives the per-environment sync controls.
+  const [roamingPeersById, setRoamingPeersById] = useState<ReadonlyMap<string, RoamingPeer>>(
+    new Map(),
+  );
+  const refreshRoamingPeers = useCallback(() => {
+    if (!canPairMachine) return;
+    void listRoamingPeers().then(
+      (result) =>
+        setRoamingPeersById(new Map(result.peers.map((peer) => [peer.environmentId, peer]))),
+      () => setRoamingPeersById(new Map()),
+    );
+  }, [canPairMachine]);
+  useEffect(() => {
+    refreshRoamingPeers();
+  }, [refreshRoamingPeers]);
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
@@ -2514,7 +2761,7 @@ export function ConnectionsSettings() {
       description: "The environment is saved and will reconnect on app startup.",
     };
 
-    if (canPairMachine) {
+    if (canPairMachine && savedBackendSyncEnabled) {
       // Unified pairing: one code establishes the live attach AND, when the
       // code allows it, the machine-to-machine sync behind it. The local
       // server runs the handshake; this client only registers the returned
@@ -2553,6 +2800,7 @@ export function ConnectionsSettings() {
                   title: "Environment connected",
                   description: "This environment doesn't support pairing between machines.",
                 };
+        refreshRoamingPeers();
       } catch (error) {
         failAddBackend(error);
         return;
@@ -2566,6 +2814,29 @@ export function ConnectionsSettings() {
           setIsAddingSavedBackend(false);
         }
         return;
+      }
+      // Sync OFF must mean off: if a standing pairing with this machine
+      // already exists (e.g. from an earlier pairing), pause it rather than
+      // silently leaving it running (field finding 2026-07-06).
+      if (canPairMachine && result._tag === "Success") {
+        const pairedEnvironmentId = result.value as string;
+        if (roamingPeersById.get(pairedEnvironmentId)?.syncEnabled) {
+          try {
+            await setRoamingPeerSync({
+              environmentId: pairedEnvironmentId as EnvironmentId,
+              syncEnabled: false,
+            });
+          } catch (error) {
+            // The user explicitly chose no sync — a failed pause must not
+            // masquerade as success.
+            toastManager.add({
+              type: "error",
+              title: "Connected, but sync could not be turned off",
+              description: error instanceof Error ? error.message : "Request failed.",
+            });
+          }
+          refreshRoamingPeers();
+        }
       }
     }
 
@@ -2581,6 +2852,7 @@ export function ConnectionsSettings() {
     canPairMachine,
     connectPairing,
     connectSshEnvironment,
+    refreshRoamingPeers,
     registerBearerGrant,
     savedBackendHost,
     savedBackendMode,
@@ -2589,6 +2861,7 @@ export function ConnectionsSettings() {
     savedBackendSshHost,
     savedBackendSshPort,
     savedBackendSshUsername,
+    savedBackendSyncEnabled,
   ]);
 
   const handleConnectSavedBackend = useCallback(
@@ -2800,30 +3073,47 @@ export function ConnectionsSettings() {
       </div>
       {canPairMachine ? (
         <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
-          <label className="flex cursor-default items-start gap-3 px-3 py-2.5 opacity-70">
-            <Checkbox className="mt-0.5" checked disabled />
-            <span className="min-w-0">
-              <span className="block text-xs font-medium text-foreground">Projects</span>
-              <span className="block text-xs leading-snug text-muted-foreground">
-                The other machine's projects appear in your project list and stay available when
-                it's offline.
-              </span>
-            </span>
-          </label>
           <label className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
-            <Checkbox
-              className="mt-0.5"
-              checked={savedBackendSecretsSync}
-              disabled={isAddingSavedBackend}
-              onCheckedChange={(checked) => setSavedBackendSecretsSync(checked === true)}
-            />
-            <span className="min-w-0">
-              <span className="block text-xs font-medium text-foreground">Secret files</span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs font-medium text-foreground">Sync</span>
               <span className="block text-xs leading-snug text-muted-foreground">
-                .env and similar gitignored files travel only between your own machines.
+                For another machine of yours: its projects join your list and stay available when
+                it's offline. Turn off to just connect.
               </span>
             </span>
+            <Switch
+              checked={savedBackendSyncEnabled}
+              disabled={isAddingSavedBackend}
+              onCheckedChange={(checked) => setSavedBackendSyncEnabled(checked === true)}
+            />
           </label>
+          {savedBackendSyncEnabled ? (
+            <>
+              <label className="flex cursor-default items-start gap-3 px-3 py-2.5 opacity-70">
+                <Checkbox className="mt-0.5" checked disabled />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-foreground">Projects</span>
+                  <span className="block text-xs leading-snug text-muted-foreground">
+                    Always included while sync is on.
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={savedBackendSecretsSync}
+                  disabled={isAddingSavedBackend}
+                  onCheckedChange={(checked) => setSavedBackendSecretsSync(checked === true)}
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-foreground">Secret files</span>
+                  <span className="block text-xs leading-snug text-muted-foreground">
+                    .env and similar gitignored files travel only between your own machines.
+                  </span>
+                </span>
+              </label>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -3727,6 +4017,7 @@ export function ConnectionsSettings() {
                 // Pre-checked on first pairing (the canonical default), but
                 // an explicit prior choice is never silently re-enabled.
                 setSavedBackendSecretsSync(roamingEnabled ? roamingSecretsSync : true);
+                setSavedBackendSyncEnabled(true);
               } else {
                 setSavedBackendError(null);
               }
@@ -3785,29 +4076,30 @@ export function ConnectionsSettings() {
         }
       >
         {savedEnvironments.map((environment) => (
-          <SavedBackendListRow
-            key={environment.environmentId}
-            environment={environment}
-            removingEnvironmentId={removingSavedEnvironmentId}
-            onConnect={handleConnectSavedBackend}
-            onRemove={handleRemoveSavedBackend}
-          />
+          <div key={environment.environmentId}>
+            <SavedBackendListRow
+              environment={environment}
+              removingEnvironmentId={removingSavedEnvironmentId}
+              onConnect={handleConnectSavedBackend}
+              onRemove={handleRemoveSavedBackend}
+            />
+            {canPairMachine && environment.entry.target._tag === "BearerConnectionTarget" ? (
+              <EnvironmentSyncControls
+                environment={environment}
+                peer={roamingPeersById.get(environment.environmentId) ?? null}
+                secretsSync={roamingSecretsSync}
+                onChangeSecrets={(checked) =>
+                  updatePrimarySettings({ roamingSecretsSync: checked })
+                }
+                onChanged={refreshRoamingPeers}
+              />
+            ) : null}
+          </div>
         ))}
         <CloudRemoteEnvironmentRows
           primaryEnvironmentId={primaryEnvironmentId}
           savedEnvironmentIds={savedEnvironmentIds}
         />
-        {roamingEnabled ? (
-          <SettingsRow
-            title="Sync secret files"
-            description=".env and similar gitignored files travel only between your own machines. Chosen when pairing; change it here anytime."
-          >
-            <Switch
-              checked={roamingSecretsSync}
-              onCheckedChange={(checked) => updatePrimarySettings({ roamingSecretsSync: checked })}
-            />
-          </SettingsRow>
-        ) : null}
       </SettingsSection>
     </SettingsPageContainer>
   );
