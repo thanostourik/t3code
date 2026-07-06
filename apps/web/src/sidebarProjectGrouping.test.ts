@@ -89,10 +89,30 @@ describe("selectOfflineRoamingProjects", () => {
           canonicalKey: "github.com/acme/live",
         }),
       ],
-      liveProjects: [makeLiveProject({ id: "live", canonicalKey: "github.com/acme/live" })],
+      liveProjects: [
+        makeLiveProject({ id: "live", canonicalKey: "github.com/acme/live" }),
+        // The materialized entry's link must point at a project that still
+        // exists to count as materialized.
+        makeLiveProject({ id: "project-local", canonicalKey: "github.com/acme/local" }),
+      ],
     });
 
     expect(offline.map((entry) => entry.roamingProject.title)).toEqual(["alpha", "zeta"]);
+  });
+
+  it("treats a dangling localProjectId as unmaterialized", () => {
+    const offline = selectOfflineRoamingProjects({
+      roamingProjects: [
+        makeRoamingEntry({
+          workspaceProjectId: "wp-stale",
+          title: "stale-link",
+          canonicalKey: "github.com/acme/stale",
+          localProjectId: "project-deleted-long-ago",
+        }),
+      ],
+      liveProjects: [],
+    });
+    expect(offline.map((entry) => entry.roamingProject.title)).toEqual(["stale-link"]);
   });
 
   it("dedupes the same workspace project mirrored from several environments", () => {
