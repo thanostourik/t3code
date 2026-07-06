@@ -118,6 +118,7 @@ const CACHED_SNAPSHOT: OrchestrationShellSnapshot = {
   threads: [],
   roamingProjects: [],
   roamingMaterializations: [],
+  roamingWipStatus: [],
   updatedAt: "2026-06-06T00:00:00.000Z",
 };
 
