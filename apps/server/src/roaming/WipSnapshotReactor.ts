@@ -243,7 +243,7 @@ const primaryRemoteName = (cwd: string) =>
   });
 
 export type WipPassOutcome =
-  | { readonly _tag: "skipped" }
+  | { readonly _tag: "skipped"; readonly warning?: string }
   | {
       readonly _tag: "done";
       readonly entry: RoamingWipStatusEntry;
@@ -327,7 +327,12 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     skipIfTreeOid: shippedTree,
   });
   if (captured === null) {
-    return { _tag: "skipped" } as WipPassOutcome;
+    // An oversized file may be the ONLY change — the capture no-ops (its
+    // exclusion leaves the tree identical) but the user must still learn
+    // the file is not syncing.
+    return (
+      oversizeWarning === null ? { _tag: "skipped" } : { _tag: "skipped", warning: oversizeWarning }
+    ) as WipPassOutcome;
   }
   const capturedAt = yield* nowIso;
 
@@ -915,20 +920,25 @@ const make = Effect.gen(function* () {
       // blockedReason reflects THIS pass only: set on blocked, cleared on
       // anything else (a stale "blocked" after the user commits would lie).
       const { blockedReason: _stale, ...baseWithoutBlocked } = base;
+      const withWarning: RoamingWipStatusEntry =
+        outcome._tag === "skipped" && outcome.warning !== undefined
+          ? { ...baseWithoutBlocked, lastError: outcome.warning }
+          : baseWithoutBlocked;
       const entry: RoamingWipStatusEntry =
         applied._tag === "applied"
           ? {
-              ...baseWithoutBlocked,
+              ...withWarning,
               lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
               lastAppliedFrom: applied.fromEnvironmentId,
             }
           : applied._tag === "blocked"
-            ? { ...baseWithoutBlocked, blockedReason: applied.reason }
-            : baseWithoutBlocked;
+            ? { ...withWarning, blockedReason: applied.reason }
+            : withWarning;
       if (
         outcome._tag === "done" ||
         applied._tag === "applied" ||
         applied._tag === "blocked" ||
+        (outcome._tag === "skipped" && outcome.warning !== undefined) ||
         (previous !== undefined && previous.blockedReason !== entry.blockedReason)
       ) {
         yield* publishEntry(entry);
