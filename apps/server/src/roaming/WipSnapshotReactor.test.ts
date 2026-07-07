@@ -1,6 +1,11 @@
 import * as NodeCrypto from "node:crypto";
 
-import { EnvironmentId, RoamingWipPayload, WorkspaceProjectId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  RoamingRegistryPayload,
+  RoamingWipPayload,
+  WorkspaceProjectId,
+} from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
 import * as DateTime from "effect/DateTime";
@@ -533,6 +538,55 @@ testLayer("WipSnapshotReactor", (it) => {
       assert.strictEqual(
         yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
         "landed\n",
+      );
+    }),
+  );
+
+  it.effect("preserves locally-edited non-gitignored vault files across apply", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-vaultkeep");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const blobStore = yield* RoamingBlobStore;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-d-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // A vault include-override naming a NON-gitignored untracked file:
+      // invisible to the edit-free guard, and clean -fd would delete it.
+      const registryPayload = yield* Schema.encodeEffect(
+        Schema.fromJsonString(RoamingRegistryPayload),
+      )({
+        workspaceProjectId: wsid,
+        title: "Vault Keep",
+        repository: {
+          canonicalKey: "git:local",
+          locator: { source: "git-remote", remoteName: "origin", remoteUrl: root },
+          name: "vault-keep",
+        },
+        vaultOverrides: { include: ["service.key.txt"], exclude: [] },
+        perMachineRoots: {},
+      });
+      yield* blobStore.writeLocal({
+        kind: "registry",
+        key: wsid,
+        workspaceProjectId: wsid,
+        payload: registryPayload,
+      });
+      yield* fs.writeFileString(pathService.join(localPath, "service.key.txt"), "USER-EDIT\n");
+
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "peer work\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+        "peer work\n",
+      );
+      // The user's local edit — not any mirrored copy — survives the restore.
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "service.key.txt")),
+        "USER-EDIT\n",
       );
     }),
   );
