@@ -149,6 +149,14 @@ testLayer("VaultSync", (it) => {
         pathService.join(workspaceRoot, "packages", "api", ".env"),
         "SECRET=nested\n",
       );
+      // ...but dependency trees full of throwaway certs stay out.
+      yield* fs.makeDirectory(pathService.join(workspaceRoot, "node_modules", "pkg"), {
+        recursive: true,
+      });
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, "node_modules", "pkg", "test-cert.pem"),
+        "FIXTURE\n",
+      );
       yield* git(workspaceRoot, ["add", ".env.example"]);
       yield* writeRegistry({ workspaceProjectId, workspaceRoot });
 
