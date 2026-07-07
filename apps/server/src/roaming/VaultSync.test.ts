@@ -170,6 +170,39 @@ testLayer("VaultSync", (it) => {
       }),
   );
 
+  it.effect(".t3sync carries gitignored trees like .idea/ over the vault channel", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-t3sync");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-t3sync-" });
+      yield* initGit(workspaceRoot);
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".gitignore"), ".idea/\n.cache/\n");
+      yield* git(workspaceRoot, ["add", ".gitignore"]);
+      yield* git(workspaceRoot, ["commit", "-m", "ignore rules"]);
+
+      yield* fs.makeDirectory(pathService.join(workspaceRoot, ".idea"), { recursive: true });
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, ".idea", "workspace.xml"),
+        "<project/>\n",
+      );
+      yield* fs.makeDirectory(pathService.join(workspaceRoot, ".cache"), { recursive: true });
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".cache", "junk.bin"), "junk\n");
+      // gitignore syntax, per project, in the repo root — like .gitignore.
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".t3sync"), ".idea/\n");
+      yield* writeRegistry({ workspaceProjectId, workspaceRoot });
+
+      const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(result.status, "written");
+
+      const bundle = yield* readVaultBundle(workspaceProjectId);
+      const paths = bundle.files.map((file) => file.path);
+      assert.include(paths, ".idea/workspace.xml");
+      // Gitignored content NOT listed in .t3sync stays local.
+      assert.notInclude(paths, ".cache/junk.bin");
+    }),
+  );
+
   it.effect("never captures a matched symlink's target", () =>
     Effect.gen(function* () {
       const workspaceProjectId = WorkspaceProjectId.make("wp-vault-symlink");
@@ -179,7 +212,10 @@ testLayer("VaultSync", (it) => {
       const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-outside-" });
       yield* initGit(workspaceRoot);
       yield* fs.writeFileString(pathService.join(outside, "target"), "OUTSIDE=1\n");
-      yield* fs.symlink(pathService.join(outside, "target"), pathService.join(workspaceRoot, ".env"));
+      yield* fs.symlink(
+        pathService.join(outside, "target"),
+        pathService.join(workspaceRoot, ".env"),
+      );
       yield* fs.writeFileString(pathService.join(workspaceRoot, ".env.local"), "SECRET=real\n");
 
       const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
