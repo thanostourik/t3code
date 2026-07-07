@@ -226,7 +226,8 @@ testLayer("VaultSync", (it) => {
       yield* fs.makeDirectory(pathService.join(workspaceRoot, ".cache"), { recursive: true });
       yield* fs.writeFileString(pathService.join(workspaceRoot, ".cache", "junk.bin"), "junk\n");
       // Field bug 2026-07-07: an unanchored project pattern must NOT reach
-      // into dependency trees — the app-owned denylist is processed last.
+      // into dependency trees — the global file's `!node_modules/**`
+      // exclusion is subtracted after the include pass, so it wins.
       yield* fs.makeDirectory(pathService.join(workspaceRoot, "node_modules", "pkg", ".idea"), {
         recursive: true,
       });
