@@ -523,6 +523,9 @@ const make = Effect.gen(function* () {
             ...(input.syncOptions?.secretsSync !== undefined
               ? { roamingSecretsSync: input.syncOptions.secretsSync }
               : {}),
+            ...(input.syncOptions?.wipSync !== undefined
+              ? { roamingWipSync: input.syncOptions.wipSync }
+              : {}),
           })
           .pipe(Effect.mapError(internalError("local settings update failed")));
         yield* peerMirror.syncNow();
@@ -562,11 +565,17 @@ const make = Effect.gen(function* () {
     // here — so the machine holding a project captures its secrets without a
     // second toggle anywhere. There is deliberately no secrets control on
     // this (the paired-into) machine; the choice rides the pairing.
+    // The same one-decision rule covers Work in progress: WIP snapshots are
+    // captured by the machine holding each project, so the dialog's choice
+    // must land here too.
     yield* settingsService
       .updateSettings({
         roaming: true,
         ...(input.syncOptions?.secretsSync !== undefined
           ? { roamingSecretsSync: input.syncOptions.secretsSync }
+          : {}),
+        ...(input.syncOptions?.wipSync !== undefined
+          ? { roamingWipSync: input.syncOptions.wipSync }
           : {}),
       })
       .pipe(Effect.mapError(internalError("settings update failed")));
