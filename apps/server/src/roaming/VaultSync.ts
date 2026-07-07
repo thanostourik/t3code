@@ -169,24 +169,15 @@ export const T3SYNC_FILE_NAME = ".t3sync";
 export const GLOBAL_T3SYNC_FILE_NAME = "t3sync";
 
 const T3SYNC_TEMPLATE = `# Files that sync between YOUR machines only (never to a git remote).
-# Same syntax as .gitignore. This global file applies to every project;
-# delete a line to stop syncing it everywhere. A project can extend or veto
-# it with its own .t3sync in the repo root (e.g. ".idea/" to sync more,
-# "!.env" to keep this project's .env local).
-# Dependency and build trees (node_modules, vendor, dist, build, target,
-# .venv, __pycache__) are ALWAYS excluded — patterns here or in a project
-# .t3sync never reach into them.
+# Same syntax as .gitignore, applied to every project. Two kinds of line:
+#   pattern      sync files matching it (delete to stop syncing everywhere)
+#   !pattern     NEVER sync it — a hard exclusion applied last, so it wins
+#                even over a project's own .t3sync (delete to allow it again)
+# A project extends or vetoes the plain patterns with its own .t3sync in the
+# repo root (e.g. ".idea/" to sync more, "!.env" to keep that repo's .env
+# local). The "!" exclusions below keep dependency/build trees out.
 ${DEFAULT_VAULT_PATTERNS.join("\n")}
-`;
-
-/**
- * App-owned denylist, processed LAST so it wins over any user pattern —
- * field bug 2026-07-07: a project .t3sync line ".idea" is evaluated after
- * the global file, so a template-resident "!node_modules/**" lost to it
- * and a random node_modules/<pkg>/.idea got synced. Rewritten on every
- * pass (never user-edited) so updates propagate.
- */
-const T3SYNC_NOISE = `!node_modules/**
+!node_modules/**
 !vendor/**
 !dist/**
 !build/**
@@ -194,7 +185,6 @@ const T3SYNC_NOISE = `!node_modules/**
 !.venv/**
 !__pycache__/**
 `;
-export const NOISE_T3SYNC_FILE_NAME = "t3sync-noise";
 
 /**
  * The defaults are not hidden machinery: they live in ONE editable file in
@@ -220,46 +210,13 @@ const ensureGlobalT3Sync = Effect.gen(function* () {
       ),
     );
   }
-  // The noise denylist is app-owned: always rewritten to the current
-  // constant so it cannot drift or be edited into a leak.
-  const noisePath = pathService.join(config.stateDir, NOISE_T3SYNC_FILE_NAME);
-  yield* fs.makeDirectory(config.stateDir, { recursive: true }).pipe(
-    Effect.andThen(fs.writeFileString(noisePath, T3SYNC_NOISE)),
-    Effect.catchCause((cause) =>
-      Effect.logWarning("roaming vault: could not write t3sync noise file", { cause }),
-    ),
-  );
-  return { globalPath, noisePath };
+  return globalPath;
 });
 
-/**
- * Untracked files the sync manifests select, via git's own exclude engine
- * (exact .gitignore semantics: directories, globs, `!` negation). The
- * global file's patterns come first, the optional repo-root .t3sync second,
- * so a project line — including a negation — wins over a global one.
- * Output is repo-relative untracked paths; a pattern can never select
- * anything outside the repo.
- */
-const readT3SyncCandidates = (workspaceRoot: string) =>
+const matchUntracked = (workspaceRoot: string, excludeFromFiles: ReadonlyArray<string>) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-    const { globalPath, noisePath } = yield* ensureGlobalT3Sync;
-    const projectPath = pathService.join(workspaceRoot, T3SYNC_FILE_NAME);
-    const excludeFiles: string[] = [];
-    if (yield* fs.exists(globalPath).pipe(Effect.orElseSucceed(() => false))) {
-      excludeFiles.push(globalPath);
-    }
-    if (yield* fs.exists(projectPath).pipe(Effect.orElseSucceed(() => false))) {
-      excludeFiles.push(T3SYNC_FILE_NAME);
-    }
-    if (excludeFiles.length === 0) {
-      return [];
-    }
-    // ALWAYS last: later patterns win in git's exclude engine, and the
-    // dependency-tree denylist must beat any user pattern.
-    if (yield* fs.exists(noisePath).pipe(Effect.orElseSucceed(() => false))) {
-      excludeFiles.push(noisePath);
+    if (excludeFromFiles.length === 0) {
+      return new Set<string>();
     }
     const git = yield* GitVcsDriver;
     const result = yield* git
@@ -271,19 +228,92 @@ const readT3SyncCandidates = (workspaceRoot: string) =>
           "-z",
           "-o",
           "-i",
-          ...excludeFiles.flatMap((file) => [`--exclude-from=${file}`]),
+          ...excludeFromFiles.flatMap((file) => [`--exclude-from=${file}`]),
         ],
         allowNonZeroExit: true,
       })
       .pipe(Effect.orElseSucceed(() => null));
     if (result === null || result.exitCode !== 0) {
+      return new Set<string>();
+    }
+    return new Set(
+      result.stdout
+        .split("\0")
+        .filter((path) => path.length > 0)
+        .map((path) => normalizeRelativePath(path))
+        .filter((path): path is string => path !== null),
+    );
+  });
+
+/**
+ * Untracked files the two sync manifests select, via git's own exclude
+ * engine (exact .gitignore semantics: directories, globs, `!` negation).
+ *
+ * TWO files, both user-editable — no third file, ever:
+ *  - Include pass: global then project `--exclude-from`, so a project line
+ *    (incl. a `!` veto) wins over a global one, per gitignore ordering.
+ *  - The global file's `!` lines double as HARD exclusions: they are
+ *    subtracted from the result AFTER the include pass, so they beat any
+ *    project pattern (field bug 2026-07-07: a project ".idea" swept a
+ *    node_modules/<pkg>/.idea). Deleting a `!` line from the global file
+ *    removes that exclusion; emptying them removes all.
+ * Output is repo-relative untracked paths; a pattern can never select
+ * anything outside the repo.
+ */
+const readT3SyncCandidates = (workspaceRoot: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const globalPath = yield* ensureGlobalT3Sync;
+    const projectPath = pathService.join(workspaceRoot, T3SYNC_FILE_NAME);
+    const includeFiles: string[] = [];
+    const globalExists = yield* fs.exists(globalPath).pipe(Effect.orElseSucceed(() => false));
+    if (globalExists) {
+      includeFiles.push(globalPath);
+    }
+    if (yield* fs.exists(projectPath).pipe(Effect.orElseSucceed(() => false))) {
+      includeFiles.push(T3SYNC_FILE_NAME);
+    }
+    if (includeFiles.length === 0) {
       return [];
     }
-    return result.stdout
-      .split("\0")
-      .filter((path) => path.length > 0)
-      .map((path) => normalizeRelativePath(path))
-      .filter((path): path is string => path !== null);
+
+    const candidates = yield* matchUntracked(workspaceRoot, includeFiles);
+
+    // Subtract the global file's `!` (exclusion) lines. Written to a temp
+    // exclude-from file with the `!` stripped, so ls-files matches exactly
+    // the trees they name; those paths are removed from the candidate set.
+    if (globalExists) {
+      const globalText = yield* fs.readFileString(globalPath).pipe(Effect.orElseSucceed(() => ""));
+      const exclusionPatterns = globalText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("!") && !line.startsWith("!#"))
+        .map((line) => line.slice(1).trim())
+        .filter((line) => line.length > 0);
+      if (exclusionPatterns.length > 0) {
+        const tempDir = yield* fs
+          .makeTempDirectory({ prefix: "t3-sync-excl-" })
+          .pipe(Effect.orElseSucceed(() => null));
+        if (tempDir !== null) {
+          const exclusionSet = yield* Effect.gen(function* () {
+            const exclPath = pathService.join(tempDir, "exclude");
+            yield* fs.writeFileString(exclPath, `${exclusionPatterns.join("\n")}\n`);
+            return yield* matchUntracked(workspaceRoot, [exclPath]);
+          }).pipe(
+            Effect.ensuring(
+              fs.remove(tempDir, { recursive: true, force: true }).pipe(Effect.ignore),
+            ),
+            Effect.orElseSucceed(() => new Set<string>()),
+          );
+          for (const excluded of exclusionSet) {
+            candidates.delete(excluded);
+          }
+        }
+      }
+    }
+
+    return [...candidates];
   });
 
 export const buildCandidatePaths = (
