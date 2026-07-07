@@ -170,6 +170,16 @@ const T3SYNC_TEMPLATE = `# Files that sync between YOUR machines only (never to 
 # it with its own .t3sync in the repo root (e.g. ".idea/" to sync more,
 # "!.env" to keep this project's .env local).
 ${DEFAULT_VAULT_PATTERNS.join("\n")}
+# Dependency/build trees are full of throwaway certs and keys that would
+# otherwise match the patterns above (this is a denylist — extend it if
+# your tooling drops matches somewhere else).
+!node_modules/**
+!vendor/**
+!dist/**
+!build/**
+!target/**
+!.venv/**
+!__pycache__/**
 `;
 
 /**
@@ -183,6 +193,10 @@ const ensureGlobalT3Sync = Effect.gen(function* () {
   const pathService = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
   const globalPath = pathService.join(config.stateDir, GLOBAL_T3SYNC_FILE_NAME);
+  // On a flaky stat, assume the file EXISTS: writing here would overwrite
+  // a user-edited global manifest with the template — the one unacceptable
+  // outcome. (The read side defaults the other way; a transient miss there
+  // only drops the file from one pass and self-heals.)
   const exists = yield* fs.exists(globalPath).pipe(Effect.orElseSucceed(() => true));
   if (!exists) {
     yield* fs.makeDirectory(config.stateDir, { recursive: true }).pipe(
