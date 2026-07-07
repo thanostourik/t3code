@@ -777,3 +777,36 @@ code. `accept-m3.mjs`, three projects on a fresh harness:
   materialize re-cloned and re-restored for real.
 
 All nine checks passed (M3-EXIT:0).
+
+### M3 field session (2026-07-07, same night as M3 close) → M3.5 inserted
+
+Real two-machine use immediately after M3 merged surfaced three findings:
+
+1. **No delivery path outside materialize.** M3 shipped continuous capture,
+   but an already-materialized checkout never pulls newer WIP — nothing
+   fetches, nothing applies, and the revalidated completed record correctly
+   short-circuits re-materialize. A file created on the desktop therefore
+   never reaches the laptop's working tree. Per the user's stated
+   expectation (Dropbox semantics between one's own machines), M3.5 adds
+   auto-apply for the safe case: strictly-behind checkouts (clean, or
+   exactly at the last-applied snapshot tracked by a local
+   refs/t3/wip-applied marker) fast-forward automatically; locally-edited
+   trees are never touched (divergence stays M5's explicit flow).
+2. **Per-machine consent trap.** The M3 settings row writes roamingWipSync
+   locally only; the one-decision-for-both-machines behavior rides the
+   pairing handshake. Machines paired before M3 must flip the row on BOTH
+   machines — the user hit exactly this (laptop never captured).
+3. **`.idea` moved via git, not via sync.** Tracked files travel in clones
+   and WIP snapshots regardless of .gitignore (gitignore never affects
+   tracked files) — the user's .idea was presumed committed-then-ignored.
+   The design gap it exposed is real either way: there was no channel for
+   "gitignored but should travel between my machines" beyond secret
+   patterns. M3.5 adds `.t3sync` (per-project, repo root, gitignore
+   syntax) feeding the vault/P2P channel.
+
+Also flagged: origin-refs mode had NO size cap (bundle mode caps at 8 MiB)
+— a huge untracked file would be pushed to the git host. M3.5 adds the
+guard. Capture latency: the 2-min interval was the analysis-pass
+simplification; the user directed Dropbox-class freshness now, so the
+originally-planned watch-based trigger lands in M3.5 (VaultSync's
+FileSystem.watch + debounce is the in-repo precedent).
