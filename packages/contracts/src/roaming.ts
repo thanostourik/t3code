@@ -338,6 +338,10 @@ export const RoamingWipStatusEntry = Schema.Struct({
   lastCapturedAt: Schema.optional(IsoDateTime),
   lastPushedAt: Schema.optional(IsoDateTime),
   lastError: Schema.optional(Schema.String),
+  /** Set when auto-apply last fast-forwarded this checkout (M3.5). */
+  lastAppliedAt: Schema.optional(IsoDateTime),
+  /** environmentId whose snapshot was last auto-applied here. */
+  lastAppliedFrom: Schema.optional(EnvironmentId),
 });
 export type RoamingWipStatusEntry = typeof RoamingWipStatusEntry.Type;
 
