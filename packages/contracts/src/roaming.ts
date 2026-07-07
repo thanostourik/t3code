@@ -106,18 +106,15 @@ export type RoamingBlobConflict = typeof RoamingBlobConflict.Type;
 
 // ── Vault (step 2) ───────────────────────────────────────────────────
 //
-// Secret-file capture is a global category: `DEFAULT_VAULT_PATTERNS` applies
-// to every enrolled project's root-level files, filtered to those git
-// actually ignores. Per-project overrides are the rare exception: `include`
-// adds explicit repo-relative paths (may be nested; not globs), `exclude`
-// drops files the defaults matched. Effective set = defaults + include −
-// exclude.
+// Secret-file capture is driven by two editable manifests with exact
+// .gitignore semantics (M3.5): a global t3sync file in the server state dir
+// (written once, pre-populated from DEFAULT_VAULT_PATTERNS below) and an
+// optional user-created repo-root .t3sync that extends or vetoes it. The
+// server additionally requires a matched file to be untracked (committed
+// lookalikes travel via git). RoamingVaultOverrides below is retired — the
+// schema field survives for payload compatibility but is no longer consumed.
 
-/**
- * Matching alone never captures: the server additionally requires the file
- * to be untracked (committed lookalikes like `.env.example` match `.env.*`
- * but travel via git and stay out).
- */
+/** Seeds the GLOBAL t3sync manifest on first run; not consulted directly. */
 export const DEFAULT_VAULT_PATTERNS = [
   ".env",
   ".env.*",
