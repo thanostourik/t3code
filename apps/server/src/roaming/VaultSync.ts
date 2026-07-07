@@ -215,19 +215,58 @@ export const listTrackedCandidates = (workspaceRoot: string, candidates: Readonl
     } as TrackedLookup;
   });
 
+export const T3SYNC_FILE_NAME = ".t3sync";
+
+/**
+ * Per-project sync manifest, gitignore syntax, in the repo root — the
+ * user-facing way to say ".idea/ (gitignored or not) travels between my
+ * machines". Matching runs through git's own exclude engine
+ * (`ls-files -o -i --exclude-from`), so semantics are exactly .gitignore's:
+ * directories, globs, negations. Output is repo-relative untracked files —
+ * a pattern can never select anything outside the repo.
+ */
+const readT3SyncCandidates = (workspaceRoot: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const t3syncPath = pathService.join(workspaceRoot, T3SYNC_FILE_NAME);
+    const exists = yield* fs.exists(t3syncPath).pipe(Effect.orElseSucceed(() => false));
+    if (!exists) {
+      return [];
+    }
+    const git = yield* GitVcsDriver;
+    const result = yield* git
+      .execute({
+        operation: "VaultSync.t3syncMatches",
+        cwd: workspaceRoot,
+        args: ["ls-files", "-z", "-o", "-i", `--exclude-from=${T3SYNC_FILE_NAME}`],
+        allowNonZeroExit: true,
+      })
+      .pipe(Effect.orElseSucceed(() => null));
+    if (result === null || result.exitCode !== 0) {
+      return [];
+    }
+    return result.stdout
+      .split("\0")
+      .filter((path) => path.length > 0)
+      .map((path) => normalizeRelativePath(path))
+      .filter((path): path is string => path !== null);
+  });
+
 export const buildCandidatePaths = (
   workspaceRoot: string,
   workspaceProjectId: WorkspaceProjectId,
 ) =>
   Effect.gen(function* () {
     const patternCandidates = yield* readTopLevelPatternCandidates(workspaceRoot);
+    const t3syncCandidates = yield* readT3SyncCandidates(workspaceRoot);
     const overrides = yield* readRegistryOverrides(workspaceProjectId);
     const excluded = new Set(
       overrides.exclude
         .map((path) => normalizeRelativePath(path))
         .filter((path): path is string => path !== null),
     );
-    const candidates = new Set(patternCandidates);
+    const candidates = new Set([...patternCandidates, ...t3syncCandidates]);
     for (const include of overrides.include) {
       const normalized = normalizeRelativePath(include);
       if (normalized !== null) {
