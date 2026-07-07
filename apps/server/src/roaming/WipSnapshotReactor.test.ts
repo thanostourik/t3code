@@ -551,27 +551,15 @@ testLayer("WipSnapshotReactor", (it) => {
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-d-" });
       const { peerPath, localPath } = yield* initApplyFixture(root);
 
-      // A vault include-override naming a NON-gitignored untracked file:
-      // invisible to the edit-free guard, and clean -fd would delete it.
-      const registryPayload = yield* Schema.encodeEffect(
-        Schema.fromJsonString(RoamingRegistryPayload),
-      )({
-        workspaceProjectId: wsid,
-        title: "Vault Keep",
-        repository: {
-          canonicalKey: "git:local",
-          locator: { source: "git-remote", remoteName: "origin", remoteUrl: root },
-          name: "vault-keep",
-        },
-        vaultOverrides: { include: ["service.key.txt"], exclude: [] },
-        perMachineRoots: {},
-      });
-      yield* blobStore.writeLocal({
-        kind: "registry",
-        key: wsid,
-        workspaceProjectId: wsid,
-        payload: registryPayload,
-      });
+      // A COMMITTED project .t3sync naming a NON-gitignored untracked file:
+      // that file is invisible to the edit-free guard, and clean -fd would
+      // delete it. (An untracked .t3sync would itself count as a local edit
+      // and block the apply — correct, but not this scenario.)
+      yield* fs.writeFileString(pathService.join(peerPath, ".t3sync"), "service.key.txt\n");
+      yield* git(peerPath, ["add", ".t3sync"]);
+      yield* git(peerPath, ["commit", "-m", "sync manifest"]);
+      yield* git(peerPath, ["push", "origin", "main"]);
+      yield* git(localPath, ["pull", "origin", "main"]);
       yield* fs.writeFileString(pathService.join(localPath, "service.key.txt"), "USER-EDIT\n");
 
       yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "peer work\n");

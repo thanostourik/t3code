@@ -44,6 +44,7 @@ import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -812,6 +813,7 @@ const make = Effect.gen(function* () {
   const updates = yield* PubSub.unbounded<RoamingWipStatusEntry>();
 
   const vcs = yield* VcsDriver;
+  const serverConfig = yield* ServerConfig.ServerConfig;
   const providePassDeps = <A, E>(
     effect: Effect.Effect<
       A,
@@ -822,6 +824,7 @@ const make = Effect.gen(function* () {
       | FileSystem.FileSystem
       | Path.Path
       | ServerEnvironment.ServerEnvironment
+      | ServerConfig.ServerConfig
     >,
   ) =>
     effect.pipe(
@@ -831,6 +834,7 @@ const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, pathService),
       Effect.provideService(ServerEnvironment.ServerEnvironment, serverEnvironment),
+      Effect.provideService(ServerConfig.ServerConfig, serverConfig),
     );
 
   const isEnabled = serverSettings.getSettings.pipe(
