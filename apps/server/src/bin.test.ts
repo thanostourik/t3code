@@ -31,6 +31,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
+import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import {
@@ -117,6 +118,15 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     const config = yield* makeCliTestServerConfig(baseDir);
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
       Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(
+        Layer.succeed(WipSnapshotReactor, {
+          start: () => Effect.void,
+          snapshotProject: () => Effect.void,
+          snapshotAll: () => Effect.void,
+          listStatuses: () => Effect.succeed([]),
+          subscribeUpdates: Effect.die("unused in cli tests"),
+        } satisfies WipSnapshotReactor["Service"]),
+      ),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
