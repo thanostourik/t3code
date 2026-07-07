@@ -1,6 +1,7 @@
 import * as NodeOS from "node:os";
 
 import {
+  CheckpointRef,
   CommandId,
   ProjectId,
   RoamingMaterializationRecord,
@@ -9,6 +10,7 @@ import {
   type RoamingMaterializeStepStatus,
   RoamingRegistryPayload,
   RoamingVaultBundle,
+  RoamingWipPayload,
   WorkspaceProjectId,
 } from "@t3tools/contracts";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
@@ -36,12 +38,19 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { applyVaultBundle } from "./VaultSync.ts";
+import { wipRefGlob } from "./WipSnapshots.ts";
 
+// restore-wip runs BEFORE apply-vault: its cleanliness check and the
+// checkpoint restore's `git clean` then operate on the pristine clone instead
+// of depending on vault files being gitignored (content-wise the order is
+// free — WIP capture subtracts the vault set, so the file sets are disjoint).
+// Old records store steps as JSON but the loop looks them up by name, so
+// records persisted under the previous order resume unchanged.
 const STEP_ORDER: ReadonlyArray<RoamingMaterializeStepName> = [
   "resolve-path",
   "clone",
-  "apply-vault",
   "restore-wip",
+  "apply-vault",
   "register-project",
   "bootstrap",
 ];
@@ -81,6 +90,7 @@ const decodeRegistryPayload = Schema.decodeUnknownEffect(
 const decodeRawJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 const encodeRawJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeVaultBundle = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
+const decodeWipPayload = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingWipPayload));
 const decodeMaterializationRecord = Schema.decodeUnknownEffect(RoamingMaterializationRecord);
 const RoamingMaterializeStepsJson = Schema.fromJsonString(
   RoamingMaterializationRecord.fields.steps,
@@ -561,6 +571,196 @@ const make = Effect.gen(function* () {
       };
     });
 
+  interface RestoreWipResult {
+    readonly status: "completed" | "skipped";
+    readonly detail: string;
+    readonly record: RoamingMaterializationRecord;
+  }
+
+  /**
+   * Bring the peer's uncommitted work into the fresh clone: newest snapshot
+   * across environments wins, sourced from the origin's hidden WIP refs
+   * first (they work with the authoring machine off) and mirrored bundle
+   * blobs second. Applies only to a clean tree; skips (never fails the
+   * materialization) when there is nothing applicable.
+   */
+  const restoreWip = (
+    record: RoamingMaterializationRecord,
+    request: RoamingMaterializeRequest,
+  ): Effect.Effect<RestoreWipResult, MaterializeError> =>
+    Effect.gen(function* () {
+      if (record.targetPath === null) {
+        return yield* stepError("invalid-target", "Target path has not been resolved");
+      }
+      if (request.restoreWip === false) {
+        return { status: "skipped", detail: "disabled by request", record };
+      }
+      const cwd = record.targetPath;
+      const gitExec = (args: ReadonlyArray<string>, operation: string) =>
+        git
+          .execute({ operation, cwd, args, allowNonZeroExit: true })
+          .pipe(Effect.mapError(internalError(operation)));
+
+      const porcelain = yield* gitExec(
+        ["status", "--porcelain"],
+        "roaming.materializer.wip-status",
+      );
+      if (porcelain.exitCode !== 0) {
+        return yield* stepError("internal", "git status failed in the materialized clone");
+      }
+      if (porcelain.stdout.trim().length > 0) {
+        return {
+          status: "skipped",
+          detail: "local changes present; remote work in progress not applied",
+          record: addNotice(record, "work in progress not applied: local changes present"),
+        };
+      }
+
+      const glob = yield* wipRefGlob(record.workspaceProjectId).pipe(
+        Effect.mapError(internalError("workspace project id is not ref-safe")),
+      );
+      // Non-fatal: the origin may refuse (bundle-mode projects) or lack the
+      // namespace entirely; wildcard refspecs succeed with zero matches.
+      yield* gitExec(["fetch", "origin", `+${glob}:${glob}`], "roaming.materializer.wip-fetch");
+
+      const listWipRefs = gitExec(
+        [
+          "for-each-ref",
+          "--format=%(refname) %(committerdate:unix) %(committerdate:iso-strict) %(objectname)",
+          glob.slice(0, -1),
+        ],
+        "roaming.materializer.wip-list",
+      ).pipe(
+        Effect.map((listing) =>
+          listing.exitCode !== 0
+            ? []
+            : listing.stdout
+                .split("\n")
+                .map((line) => line.trim().split(" "))
+                .flatMap((parts) =>
+                  parts.length === 4 && parts[0]!.length > 0
+                    ? [
+                        {
+                          refName: parts[0]!,
+                          committedAtUnix: Number(parts[1]!),
+                          committedAtIso: parts[2]!,
+                          commitOid: parts[3]!,
+                        },
+                      ]
+                    : [],
+                ),
+        ),
+      );
+
+      // Mirrored bundle blobs (the no-push-rights transport) import into the
+      // same local namespace, then both sources compete on committer date.
+      const importBundles = Effect.gen(function* () {
+        const manifest = yield* blobStore
+          .manifest()
+          .pipe(Effect.mapError(internalError("blob manifest failed")));
+        const refs = manifest.filter(
+          (entry) => entry.kind === "wip" && entry.key.startsWith(`${record.workspaceProjectId}/`),
+        );
+        let imported = record;
+        for (const ref of refs) {
+          const blob = yield* blobStore
+            .get({ kind: "wip", key: ref.key })
+            .pipe(Effect.orElseSucceed(() => null));
+          if (blob === null) {
+            continue;
+          }
+          const payload = yield* decodeWipPayload(blob.payload).pipe(
+            Effect.orElseSucceed(() => null),
+          );
+          if (payload === null) {
+            imported = addNotice(imported, `undecodable work-in-progress blob: ${ref.key}`);
+            continue;
+          }
+          const tempDir = yield* fs
+            .makeTempDirectory({ prefix: "t3-wip-restore-" })
+            .pipe(Effect.mapError(internalError("temp dir for wip bundle failed")));
+          const bundlePath = path.join(tempDir, "wip.bundle");
+          const applied = yield* Effect.gen(function* () {
+            yield* fs
+              .writeFile(bundlePath, Buffer.from(payload.bundleBase64, "base64"))
+              .pipe(Effect.mapError(internalError("wip bundle write failed")));
+            const fetched = yield* gitExec(
+              ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
+              "roaming.materializer.wip-bundle-fetch",
+            );
+            return fetched.exitCode === 0;
+          }).pipe(
+            Effect.ensuring(
+              fs.remove(tempDir, { recursive: true, force: true }).pipe(Effect.ignore),
+            ),
+          );
+          if (!applied) {
+            imported = addNotice(
+              imported,
+              `work-in-progress bundle from ${ref.key.split("/")[1] ?? ref.key} did not apply`,
+            );
+          }
+        }
+        return imported;
+      });
+
+      let next = yield* importBundles;
+      let candidates = yield* listWipRefs;
+      if (candidates.length === 0) {
+        // Same on-demand pull as registry/vault: a freshly-paired machine may
+        // not have mirrored the wip blob yet.
+        yield* peerMirror.syncNowAndWait();
+        next = yield* importBundles;
+        candidates = yield* listWipRefs;
+      }
+      if (candidates.length === 0) {
+        return { status: "skipped", detail: "no work in progress found", record: next };
+      }
+
+      const newest = [...candidates].sort(
+        (left, right) => right.committedAtUnix - left.committedAtUnix,
+      )[0]!;
+      const environment = newest.refName.split("/").pop() ?? "unknown";
+
+      const newestTree = yield* gitExec(
+        ["rev-parse", "-q", "--verify", `${newest.refName}^{tree}`],
+        "roaming.materializer.wip-tree",
+      );
+      const headTree = yield* gitExec(
+        ["rev-parse", "-q", "--verify", "HEAD^{tree}"],
+        "roaming.materializer.head-tree",
+      );
+      if (
+        newestTree.exitCode === 0 &&
+        headTree.exitCode === 0 &&
+        newestTree.stdout.trim() === headTree.stdout.trim()
+      ) {
+        return {
+          status: "skipped",
+          detail: "work in progress already matches the checkout",
+          record: next,
+        };
+      }
+
+      const checkpoints = git.checkpoints;
+      if (checkpoints === undefined) {
+        return yield* stepError("internal", "VCS driver does not support checkpoint restore");
+      }
+      const restored = yield* checkpoints
+        .restoreCheckpoint({ cwd, checkpointRef: CheckpointRef.make(newest.refName) })
+        .pipe(Effect.mapError(internalError("work-in-progress restore failed")));
+      if (!restored) {
+        return { status: "skipped", detail: "work-in-progress ref vanished", record: next };
+      }
+      // A snapshot older than the clone's HEAD can legitimately win — the
+      // age in the detail keeps that honest.
+      return {
+        status: "completed",
+        detail: `applied work in progress from ${environment}, captured ${newest.committedAtIso}`,
+        record: next,
+      };
+    });
+
   const findLinkedProject = (workspaceProjectId: WorkspaceProjectId) =>
     projectRepository.listAll().pipe(
       Effect.map((projects) =>
@@ -715,11 +915,13 @@ const make = Effect.gen(function* () {
             error: null,
           });
         }
-        case "restore-wip":
+        case "restore-wip": {
+          const restored = yield* restoreWip(running, request);
           return yield* saveRecord({
-            ...replaceStep(running, step, "skipped", "M4"),
+            ...replaceStep(restored.record, step, restored.status, restored.detail),
             error: null,
           });
+        }
         case "register-project": {
           const registered = yield* registerProject(running, registry);
           return yield* saveRecord({
@@ -730,7 +932,7 @@ const make = Effect.gen(function* () {
         }
         case "bootstrap":
           return yield* saveRecord({
-            ...replaceStep(running, step, "skipped", "M3"),
+            ...replaceStep(running, step, "skipped", "M4"),
             status: "completed",
             error: null,
           });
@@ -748,26 +950,59 @@ const make = Effect.gen(function* () {
       error: failureMessage(cause),
     });
 
+  /**
+   * A completed record only short-circuits while its outcome still exists:
+   * the target path must still hold a git checkout and the registered
+   * project must still be live. Otherwise (user deleted the project and/or
+   * the files — 2026-07-07 field bug: the stale record returned success
+   * while materializing nothing) the record is discarded and a fresh run
+   * starts; every step is idempotent against whatever survived.
+   */
+  const completedRecordStillValid = (record: RoamingMaterializationRecord) =>
+    Effect.gen(function* () {
+      if (record.targetPath === null) {
+        return false;
+      }
+      const hasGitDir = yield* fs
+        .exists(path.join(record.targetPath, ".git"))
+        .pipe(Effect.orElseSucceed(() => false));
+      if (!hasGitDir) {
+        return false;
+      }
+      const linked = yield* findLinkedProject(record.workspaceProjectId).pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
+      return linked !== undefined;
+    });
+
   const materialize: Materializer["Service"]["materialize"] = Effect.fn("Materializer.materialize")(
     function* (request) {
       const existing = yield* readRecord(request.workspaceProjectId);
       if (existing?.status === "completed") {
-        return existing;
+        if (yield* completedRecordStillValid(existing)) {
+          return existing;
+        }
       }
 
+      const freshRecord = () =>
+        Effect.gen(function* () {
+          return yield* saveRecord({
+            workspaceProjectId: request.workspaceProjectId,
+            status: "running",
+            steps: initialSteps(),
+            notices: [],
+            targetPath: null,
+            localProjectId: null,
+            error: null,
+            startedAt: yield* nowIso,
+            updatedAt: yield* nowIso,
+          });
+        });
+
       let record =
-        existing ??
-        (yield* saveRecord({
-          workspaceProjectId: request.workspaceProjectId,
-          status: "running",
-          steps: initialSteps(),
-          notices: [],
-          targetPath: null,
-          localProjectId: null,
-          error: null,
-          startedAt: yield* nowIso,
-          updatedAt: yield* nowIso,
-        }));
+        existing === undefined || existing === null || existing.status === "completed"
+          ? yield* freshRecord()
+          : existing;
 
       const registryResult = yield* loadRegistry(request.workspaceProjectId).pipe(Effect.result);
       if (Result.isFailure(registryResult)) {
