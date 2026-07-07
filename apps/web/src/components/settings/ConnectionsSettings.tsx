@@ -126,7 +126,8 @@ import {
   removeRoamingPeer,
   setRoamingPeerSync,
 } from "~/environments/primary/roaming";
-import type { RoamingPeer } from "@t3tools/contracts";
+import type { RoamingPeer, RoamingWipStatusEntry } from "@t3tools/contracts";
+import { useEnvironmentRoamingWipStatus } from "../../state/entities";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import { useEnvironmentQuery } from "~/state/query";
@@ -1608,9 +1609,21 @@ function EnvironmentSyncControls(props: {
   peer: RoamingPeer | null;
   secretsSync: boolean;
   onChangeSecrets: (checked: boolean) => void;
+  wipSync: boolean;
+  onChangeWip: (checked: boolean) => void;
+  wipStatus: ReadonlyArray<RoamingWipStatusEntry>;
   onChanged: () => void;
 }) {
-  const { environment, peer, secretsSync, onChangeSecrets, onChanged } = props;
+  const {
+    environment,
+    peer,
+    secretsSync,
+    onChangeSecrets,
+    wipSync,
+    onChangeWip,
+    wipStatus,
+    onChanged,
+  } = props;
   const registerBearerGrant = useAtomCommand(registerBearerGrantAtom, { reportFailure: false });
   const [busy, setBusy] = useState(false);
   const [codePromptOpen, setCodePromptOpen] = useState(false);
@@ -1706,16 +1719,39 @@ function EnvironmentSyncControls(props: {
         }
       >
         {syncOn ? (
-          <label className="flex cursor-pointer items-center gap-2 pt-2 pb-3.5">
-            <Checkbox
-              checked={secretsSync}
-              disabled={busy}
-              onCheckedChange={(checked) => onChangeSecrets(checked === true)}
-            />
-            <span className="text-xs text-muted-foreground">
-              Secret files (.env and similar) travel between your machines
-            </span>
-          </label>
+          <>
+            <label className="flex cursor-pointer items-center gap-2 pt-2 pb-1.5">
+              <Checkbox
+                checked={secretsSync}
+                disabled={busy}
+                onCheckedChange={(checked) => onChangeSecrets(checked === true)}
+              />
+              <span className="text-xs text-muted-foreground">
+                Secret files (.env and similar) travel between your machines
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 pt-1 pb-3.5">
+              <Checkbox
+                checked={wipSync}
+                disabled={busy}
+                onCheckedChange={(checked) => onChangeWip(checked === true)}
+              />
+              <span className="text-xs text-muted-foreground">
+                Work in progress follows you as hidden snapshots on each project's git remote
+              </span>
+            </label>
+            {wipSync && wipStatus.some((entry) => entry.lastError !== undefined) ? (
+              <div className="space-y-1 pb-3.5">
+                {wipStatus
+                  .filter((entry) => entry.lastError !== undefined)
+                  .map((entry) => (
+                    <p key={entry.workspaceProjectId} className="text-xs text-destructive">
+                      Work-in-progress sync: {entry.lastError}
+                    </p>
+                  ))}
+              </div>
+            ) : null}
+          </>
         ) : null}
         {codePromptOpen && peer === null ? (
           <div className="flex items-center gap-2 pt-2 pb-3.5">
@@ -1968,10 +2004,12 @@ export function ConnectionsSettings() {
   });
   const roamingEnabled = usePrimarySettings((settings) => settings.roaming);
   const roamingSecretsSync = usePrimarySettings((settings) => settings.roamingSecretsSync);
+  const roamingWipSync = usePrimarySettings((settings) => settings.roamingWipSync);
   const updatePrimarySettings = useUpdatePrimarySettings();
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  const primaryWipStatus = useEnvironmentRoamingWipStatus(primaryEnvironmentId);
   const primarySessionState = usePrimarySessionState();
   const currentSessionScopes = desktopBridge
     ? AuthAdministrativeScopes
@@ -2042,6 +2080,7 @@ export function ConnectionsSettings() {
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
   const [savedBackendSecretsSync, setSavedBackendSecretsSync] = useState(true);
+  const [savedBackendWipSync, setSavedBackendWipSync] = useState(true);
   // Master switch (2026-07-06 product decision): sync defaults on but the
   // dialog must allow a plain connect with no sync at all.
   const [savedBackendSyncEnabled, setSavedBackendSyncEnabled] = useState(true);
@@ -2475,7 +2514,7 @@ export function ConnectionsSettings() {
         const paired = await addRoamingPeer({
           baseUrls: [target.httpBaseUrl],
           pairingCredential: target.credential,
-          syncOptions: { secretsSync: savedBackendSecretsSync },
+          syncOptions: { secretsSync: savedBackendSecretsSync, wipSync: savedBackendWipSync },
         });
         const registered = await registerBearerGrant(paired.attach);
         if (registered._tag === "Failure") {
@@ -2813,6 +2852,23 @@ export function ConnectionsSettings() {
                   <span className="block text-xs font-medium text-foreground">Secret files</span>
                   <span className="block text-xs leading-snug text-muted-foreground">
                     .env and similar gitignored files travel only between your own machines.
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={savedBackendWipSync}
+                  disabled={isAddingSavedBackend}
+                  onCheckedChange={(checked) => setSavedBackendWipSync(checked === true)}
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-foreground">
+                    Work in progress
+                  </span>
+                  <span className="block text-xs leading-snug text-muted-foreground">
+                    Uncommitted changes ride along as hidden snapshots on each project's git remote,
+                    so they follow you even when this machine is off.
                   </span>
                 </span>
               </label>
@@ -3749,6 +3805,7 @@ export function ConnectionsSettings() {
                 // Pre-checked on first pairing (the canonical default), but
                 // an explicit prior choice is never silently re-enabled.
                 setSavedBackendSecretsSync(roamingEnabled ? roamingSecretsSync : true);
+                setSavedBackendWipSync(roamingEnabled ? roamingWipSync : true);
                 setSavedBackendSyncEnabled(true);
               } else {
                 setSavedBackendError(null);
@@ -3823,6 +3880,9 @@ export function ConnectionsSettings() {
                 onChangeSecrets={(checked) =>
                   updatePrimarySettings({ roamingSecretsSync: checked })
                 }
+                wipSync={roamingWipSync}
+                onChangeWip={(checked) => updatePrimarySettings({ roamingWipSync: checked })}
+                wipStatus={primaryWipStatus}
                 onChanged={refreshRoamingPeers}
               />
             ) : null}
