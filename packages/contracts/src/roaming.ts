@@ -134,7 +134,9 @@ export const DEFAULT_VAULT_PATTERNS = [
  * something huge must not silently ship it: an oversize capture is skipped
  * and surfaced as a warning, never truncated or partially written.
  */
-export const ROAMING_VAULT_BUNDLE_MAX_BYTES = 2 * 1024 * 1024;
+// 16 MiB since M3.5: the bundle also carries .t3sync-selected trees like
+// .idea/ — still P2P-only, still skipped-with-warning when exceeded.
+export const ROAMING_VAULT_BUNDLE_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Cap on the WIP bundle-fallback blob (compressed git bundle bytes). */
 export const ROAMING_WIP_BUNDLE_MAX_BYTES = 8 * 1024 * 1024;
