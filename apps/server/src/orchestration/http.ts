@@ -16,6 +16,7 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { WipSnapshotReactor } from "../roaming/WipSnapshotReactor.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
@@ -27,6 +28,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const orchestrationEngine = yield* OrchestrationEngineService;
     const wipSnapshotReactor = yield* WipSnapshotReactor;
+    const serverSettings = yield* ServerSettingsService;
 
     return handlers
       .handle(
@@ -55,10 +57,24 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
                 failEnvironmentInternal("orchestration_snapshot_failed", cause),
               ),
             );
-          // WIP statuses live in the reactor, not the projection store; merge
-          // here like the ws subscribe point does (listStatuses self-gates on
-          // the roaming settings, so flag-off stays empty).
-          return { ...snapshot, roamingWipStatus: yield* wipSnapshotReactor.listStatuses() };
+          // Mirror the ws subscribe point exactly: WIP statuses live in the
+          // reactor, not the projection store, and with the roaming setting
+          // OFF every roaming field empties — mirrored rows must not leak
+          // through the HTTP-first shell load on an enabled-then-disabled
+          // machine (the "no roaming concept visible while off" invariant).
+          const settings = yield* serverSettings.getSettings.pipe(
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_snapshot_failed", cause),
+            ),
+          );
+          return settings.roaming
+            ? { ...snapshot, roamingWipStatus: yield* wipSnapshotReactor.listStatuses() }
+            : {
+                ...snapshot,
+                roamingProjects: [],
+                roamingMaterializations: [],
+                roamingWipStatus: [],
+              };
         }),
       )
       .handle(

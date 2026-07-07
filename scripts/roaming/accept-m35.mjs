@@ -264,4 +264,23 @@ for (const ref of git(["-C", p1Origin, "for-each-ref", "--format=%(refname)", "r
 }
 pass("oversize untracked file warned and kept off the origin");
 
+// ── 7. roaming off ⇒ the HTTP shell snapshot hides every roaming field ─
+// (the ws path always stripped them; the HTTP-first load must too)
+const settingsB = readSettings(B);
+writeFileSync(
+  join(B.base, "userdata", "settings.json"),
+  JSON.stringify({ ...settingsB, roaming: false }),
+);
+await waitFor("HTTP shell snapshot empties with roaming off", 30_000, async () => {
+  const response = await api(B.url, "/api/orchestration/shell", { token: adminB });
+  if (!response.ok) return null;
+  const snapshot = await response.json();
+  return (snapshot.roamingProjects ?? []).length === 0 &&
+    (snapshot.roamingMaterializations ?? []).length === 0 &&
+    (snapshot.roamingWipStatus ?? []).length === 0
+    ? true
+    : null;
+});
+pass("roaming off: HTTP shell snapshot shows no roaming rows (invariant holds)");
+
 console.log("\nM3.5 ACCEPTANCE: ALL CRITERIA PASS");
