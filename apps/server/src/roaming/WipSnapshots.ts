@@ -94,6 +94,23 @@ export const resolveOid = (cwd: string, spec: string) =>
     return oid.length > 0 ? oid : null;
   });
 
+/** The T3-Based-On trailer of a snapshot commit, or null. */
+export const readBasedOn = (cwd: string, spec: string) =>
+  Effect.gen(function* () {
+    const git = yield* GitVcsDriver;
+    const result = yield* git.execute({
+      operation: "WipSnapshots.readBasedOn",
+      cwd,
+      args: ["show", "-s", "--format=%(trailers:key=T3-Based-On,valueonly)", spec],
+      allowNonZeroExit: true,
+    });
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    const value = result.stdout.trim();
+    return /^[0-9a-f]{40,64}$/.test(value) ? value : null;
+  });
+
 export interface CaptureWipInput {
   readonly cwd: string;
   readonly workspaceProjectId: WorkspaceProjectId;
@@ -237,6 +254,7 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
   const git = yield* GitVcsDriver;
   const refName = yield* wipRefName(input.workspaceProjectId, input.environmentId);
   const historyPrefix = yield* wipHistoryRefPrefix(input.workspaceProjectId, input.environmentId);
+  const appliedMarker = yield* wipAppliedMarkerRefName(input.workspaceProjectId);
 
   const { treeOid, headOid } = yield* writeWorktreeTree({
     cwd: input.cwd,
@@ -245,6 +263,11 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
   if (input.skipIfTreeOid != null && treeOid === input.skipIfTreeOid) {
     return null;
   }
+
+  // Provenance for the peer's fast-forward check (M3.6): this machine's
+  // edits started from the snapshot it last auto-applied. A peer whose
+  // worktree still IS that snapshot can apply this one safely.
+  const basedOn = yield* resolveOid(input.cwd, appliedMarker);
 
   const commitTreeResult = yield* git.execute({
     operation: "WipSnapshots.commitTree",
@@ -255,6 +278,7 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
       ...(headOid !== null ? ["-p", headOid] : []),
       "-m",
       "t3 wip snapshot",
+      ...(basedOn !== null ? ["-m", `T3-Based-On: ${basedOn}`] : []),
     ],
     env: { ...process.env, ...COMMIT_ENV_IDENTITY },
   });
