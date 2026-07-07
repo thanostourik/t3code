@@ -54,6 +54,21 @@ export function applyShellStreamEvent(
         : Arr.append(snapshot.roamingMaterializations, event.materialization),
     };
   }
+  if (event.kind === "roaming-wip-status-updated") {
+    const exists = snapshot.roamingWipStatus.some(
+      (entry) => entry.workspaceProjectId === event.wipStatus.workspaceProjectId,
+    );
+    return {
+      ...snapshot,
+      roamingWipStatus: exists
+        ? Arr.map(snapshot.roamingWipStatus, (entry) =>
+            entry.workspaceProjectId === event.wipStatus.workspaceProjectId
+              ? event.wipStatus
+              : entry,
+          )
+        : Arr.append(snapshot.roamingWipStatus, event.wipStatus),
+    };
+  }
 
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 
