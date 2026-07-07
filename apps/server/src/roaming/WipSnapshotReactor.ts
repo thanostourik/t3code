@@ -16,7 +16,10 @@
  * origin/bundle mode per project is a Ref re-probed each process start.
  */
 import {
+  CheckpointRef,
+  EnvironmentId,
   ROAMING_WIP_BUNDLE_MAX_BYTES,
+  RoamingVaultBundle,
   RoamingWipPayload,
   type RoamingWipStatusEntry,
   type WorkspaceProjectId,
@@ -43,12 +46,16 @@ import { ProjectionThreadRepository } from "../persistence/Services/ProjectionTh
 import { ServerSettingsService } from "../serverSettings.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
-import { buildCandidatePaths, listTrackedCandidates } from "./VaultSync.ts";
+import { VcsDriver } from "../vcs/VcsDriver.ts";
+import { applyVaultBundle, buildCandidatePaths, listTrackedCandidates } from "./VaultSync.ts";
 import {
   captureWipSnapshot,
   resolveOid,
+  wipAppliedMarkerRefName,
   wipPushedMarkerRefName,
+  wipRefGlob,
   wipRefName,
+  writeWorktreeTree,
 } from "./WipSnapshots.ts";
 
 const WIP_INTERVAL = Duration.minutes(2);
@@ -387,6 +394,243 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   } as WipPassOutcome;
 });
 
+const decodeVaultBundleJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
+
+const committerUnix = (cwd: string, spec: string) =>
+  Effect.gen(function* () {
+    const git = yield* GitVcsDriver;
+    const result = yield* git.execute({
+      operation: "WipSnapshotReactor.committerUnix",
+      cwd,
+      args: ["show", "-s", "--format=%ct", spec],
+      allowNonZeroExit: true,
+    });
+    if (result.exitCode !== 0) {
+      return null;
+    }
+    const unix = Number(result.stdout.trim());
+    return Number.isFinite(unix) ? unix : null;
+  });
+
+export type WipApplyOutcome =
+  | { readonly _tag: "skipped" }
+  | { readonly _tag: "blocked"; readonly reason: string }
+  | {
+      readonly _tag: "applied";
+      readonly fromEnvironmentId: EnvironmentId;
+      readonly capturedAtIso: string;
+    };
+
+/**
+ * The delivery half of WIP sync (M3.5): fetch the peers' snapshots and
+ * fast-forward this checkout when that is provably safe. "Safe" = the
+ * worktree carries no local edits — it matches HEAD's tree (untouched
+ * checkout) or the tree of the snapshot we last auto-applied
+ * (refs/t3/wip-applied/<wsid>). Anything else is local work: never touched,
+ * surfaced as blocked (M5 owns the divergence flow). A snapshot older than
+ * HEAD or than the last-applied snapshot never applies (a peer's stale echo
+ * must not resurrect superseded state).
+ */
+export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyForTarget")(function* (
+  target: WipTarget,
+) {
+  const git = yield* GitVcsDriver;
+  const vcs = yield* VcsDriver;
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const blobStore = yield* RoamingBlobStore;
+  const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+  const environmentId = yield* serverEnvironment.getEnvironmentId;
+  const cwd = target.workspaceRoot;
+
+  if (!(yield* isGitWorktree(cwd))) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+  if (yield* inProgressOperationExists(cwd)) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+
+  const glob = yield* wipRefGlob(target.workspaceProjectId);
+  const ownRef = yield* wipRefName(target.workspaceProjectId, environmentId);
+  const appliedMarker = yield* wipAppliedMarkerRefName(target.workspaceProjectId);
+
+  // Freshen peer snapshots: origin refs when reachable, bundle blobs from
+  // the mirror always (both non-fatal — apply works from whatever arrived).
+  const remote = yield* primaryRemoteName(cwd);
+  if (remote !== null) {
+    yield* git.execute({
+      operation: "WipSnapshotReactor.fetchPeerWipRefs",
+      cwd,
+      args: ["fetch", remote, `+${glob}:${glob}`],
+      allowNonZeroExit: true,
+    });
+  }
+  const manifest = yield* blobStore.manifest().pipe(Effect.orElseSucceed(() => []));
+  for (const entry of manifest) {
+    if (
+      entry.kind !== "wip" ||
+      !entry.key.startsWith(`${target.workspaceProjectId}/`) ||
+      entry.key === `${target.workspaceProjectId}/${environmentId}`
+    ) {
+      continue;
+    }
+    const blob = yield* blobStore
+      .get({ kind: "wip", key: entry.key })
+      .pipe(Effect.orElseSucceed(() => null));
+    if (blob === null) {
+      continue;
+    }
+    const payload = yield* decodeWipPayloadJson(blob.payload).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    if (payload === null) {
+      continue;
+    }
+    // Skip the import when the local ref already has this exact commit.
+    if ((yield* resolveOid(cwd, payload.refName)) === payload.commitOid) {
+      continue;
+    }
+    const tempDir = yield* fs
+      .makeTempDirectory({ prefix: "t3-wip-apply-" })
+      .pipe(Effect.orElseSucceed(() => null));
+    if (tempDir === null) {
+      continue;
+    }
+    yield* Effect.gen(function* () {
+      const bundlePath = pathService.join(tempDir, "wip.bundle");
+      yield* fs.writeFile(bundlePath, Buffer.from(payload.bundleBase64, "base64"));
+      yield* git.execute({
+        operation: "WipSnapshotReactor.fetchPeerWipBundle",
+        cwd,
+        args: ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
+        allowNonZeroExit: true,
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("roaming wip: peer bundle import failed", { cause }),
+      ),
+      Effect.ensuring(fs.remove(tempDir, { recursive: true, force: true }).pipe(Effect.ignore)),
+    );
+  }
+
+  // Newest peer snapshot (own env excluded).
+  const listing = yield* git.execute({
+    operation: "WipSnapshotReactor.listPeerWipRefs",
+    cwd,
+    args: [
+      "for-each-ref",
+      "--format=%(refname) %(committerdate:unix) %(committerdate:iso-strict)",
+      glob.slice(0, -1),
+    ],
+    allowNonZeroExit: true,
+  });
+  const candidates =
+    listing.exitCode !== 0
+      ? []
+      : listing.stdout
+          .split("\n")
+          .map((line) => line.trim().split(" "))
+          .flatMap((parts) =>
+            parts.length === 3 && parts[0]!.length > 0 && parts[0] !== ownRef
+              ? [
+                  {
+                    refName: parts[0]!,
+                    unix: Number(parts[1]!),
+                    iso: parts[2]!,
+                  },
+                ]
+              : [],
+          );
+  if (candidates.length === 0) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+  const newest = [...candidates].sort((left, right) => right.unix - left.unix)[0]!;
+
+  const excludePaths = yield* vaultExcludePathsFor(target);
+  if (excludePaths === null) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+  const { treeOid: worktreeTree } = yield* writeWorktreeTree({
+    cwd,
+    vaultExcludePaths: excludePaths,
+  });
+  const newestTree = yield* resolveOid(cwd, `${newest.refName}^{tree}`);
+  if (newestTree === null || newestTree === worktreeTree) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+
+  // Local-edit safety: the worktree must be provably free of its own work.
+  const headTree = yield* resolveOid(cwd, "HEAD^{tree}");
+  const appliedTree = yield* resolveOid(cwd, `${appliedMarker}^{tree}`);
+  if (worktreeTree !== headTree && (appliedTree === null || worktreeTree !== appliedTree)) {
+    return {
+      _tag: "blocked",
+      reason: "local changes present; newer work from the other machine not applied",
+    } as WipApplyOutcome;
+  }
+
+  // Staleness: never resurrect state older than what this checkout has.
+  const newestUnix = newest.unix;
+  const headUnix = yield* committerUnix(cwd, "HEAD");
+  const appliedUnix = appliedTree === null ? null : yield* committerUnix(cwd, appliedMarker);
+  if (
+    (headUnix !== null && newestUnix <= headUnix) ||
+    (appliedUnix !== null && newestUnix <= appliedUnix)
+  ) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+
+  const checkpoints = vcs.checkpoints;
+  if (checkpoints === undefined) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+  const restored = yield* checkpoints
+    .restoreCheckpoint({ cwd, checkpointRef: CheckpointRef.make(newest.refName) })
+    .pipe(Effect.orElseSucceed(() => false));
+  if (!restored) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
+
+  // Restore's `git clean -fd` removes untracked non-ignored files that are
+  // not in the snapshot — which is exactly where vault include-overrides
+  // live. Re-apply the local vault copy so no secret is lost.
+  const vaultBlob = yield* blobStore
+    .get({ kind: "vault", key: target.workspaceProjectId })
+    .pipe(Effect.orElseSucceed(() => null));
+  if (vaultBlob !== null) {
+    const bundle = yield* decodeVaultBundleJson(vaultBlob.payload).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    if (bundle !== null) {
+      yield* applyVaultBundle({ workspaceRoot: cwd, bundle, overwrite: false }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("roaming wip: vault re-apply after auto-apply failed", { cause }),
+        ),
+      );
+    }
+  }
+
+  const newestCommit = yield* resolveOid(cwd, newest.refName);
+  if (newestCommit !== null) {
+    yield* git.execute({
+      operation: "WipSnapshotReactor.updateAppliedMarker",
+      cwd,
+      args: ["update-ref", appliedMarker, newestCommit],
+    });
+  }
+  const fromEnvironmentId = EnvironmentId.make(newest.refName.split("/").pop() ?? "unknown");
+  yield* Effect.logInfo("roaming wip: applied newer snapshot from peer", {
+    workspaceProjectId: target.workspaceProjectId,
+    fromEnvironmentId,
+    capturedAt: newest.iso,
+  });
+  return {
+    _tag: "applied",
+    fromEnvironmentId,
+    capturedAtIso: newest.iso,
+  } as WipApplyOutcome;
+});
+
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
@@ -402,11 +646,13 @@ const make = Effect.gen(function* () {
   const modes = yield* Ref.make(new Map<WorkspaceProjectId, WipTransportMode>());
   const updates = yield* PubSub.unbounded<RoamingWipStatusEntry>();
 
+  const vcs = yield* VcsDriver;
   const providePassDeps = <A, E>(
     effect: Effect.Effect<
       A,
       E,
       | GitVcsDriver
+      | VcsDriver
       | RoamingBlobStore
       | FileSystem.FileSystem
       | Path.Path
@@ -415,6 +661,7 @@ const make = Effect.gen(function* () {
   ) =>
     effect.pipe(
       Effect.provideService(GitVcsDriver, git),
+      Effect.provideService(VcsDriver, vcs),
       Effect.provideService(RoamingBlobStore, blobStore),
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, pathService),
@@ -467,14 +714,33 @@ const make = Effect.gen(function* () {
       }
       const mode =
         (yield* Ref.get(modes)).get(target.workspaceProjectId) ?? ("origin-refs" as const);
+      // Capture before apply: local edits are always snapshotted before the
+      // tree is ever considered for a peer fast-forward.
       const outcome = yield* providePassDeps(runWipPassForTarget(target, mode));
-      if (outcome._tag === "skipped") {
-        return;
+      if (outcome._tag === "done") {
+        yield* Ref.update(modes, (map) =>
+          new Map(map).set(target.workspaceProjectId, outcome.nextMode),
+        );
       }
-      yield* Ref.update(modes, (map) =>
-        new Map(map).set(target.workspaceProjectId, outcome.nextMode),
-      );
-      yield* publishEntry(outcome.entry);
+      const applied = yield* providePassDeps(runWipApplyForTarget(target));
+      const base =
+        outcome._tag === "done"
+          ? outcome.entry
+          : ((yield* Ref.get(statuses)).get(target.workspaceProjectId) ?? {
+              workspaceProjectId: target.workspaceProjectId,
+              mode,
+            });
+      const entry =
+        applied._tag === "applied"
+          ? {
+              ...base,
+              lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
+              lastAppliedFrom: applied.fromEnvironmentId,
+            }
+          : base;
+      if (outcome._tag === "done" || applied._tag === "applied") {
+        yield* publishEntry(entry);
+      }
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("roaming wip: snapshot pass failed", {
