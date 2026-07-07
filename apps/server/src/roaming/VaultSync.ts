@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import * as ServerConfig from "../config.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
@@ -103,66 +104,11 @@ const normalizeRelativePathOrFail = (rawPath: string) =>
       : Effect.succeed(normalized);
   });
 
-const patternMatches = (pattern: string, fileName: string): boolean => {
-  if (!pattern.includes("*")) {
-    return pattern === fileName;
-  }
-  const parts = pattern.split("*");
-  let offset = 0;
-  const first = parts[0] ?? "";
-  if (first.length > 0) {
-    if (!fileName.startsWith(first)) {
-      return false;
-    }
-    offset = first.length;
-  }
-  for (const part of parts.slice(1, -1)) {
-    if (part.length === 0) {
-      continue;
-    }
-    const index = fileName.indexOf(part, offset);
-    if (index === -1) {
-      return false;
-    }
-    offset = index + part.length;
-  }
-  const last = parts[parts.length - 1] ?? "";
-  return last.length === 0 || fileName.slice(offset).endsWith(last);
-};
-
 const fileIdentity = (entry: Pick<RoamingVaultFileEntry, "path" | "sha256" | "mode">): string =>
   `${entry.path}\0${entry.sha256}\0${entry.mode ?? ""}`;
 
 const decodeCurrentVaultBundle = (payload: string) =>
   decodeVaultBundleJson(payload).pipe(Effect.result);
-
-const readRegistryOverrides = (workspaceProjectId: WorkspaceProjectId) =>
-  Effect.gen(function* () {
-    const blobStore = yield* RoamingBlobStore;
-    const registry = yield* blobStore.get({ kind: "registry", key: workspaceProjectId });
-    if (registry === null) {
-      return { include: [], exclude: [] };
-    }
-    const decoded = yield* decodeRegistryPayloadJson(registry.payload).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("roaming vault: undecodable registry payload", {
-          workspaceProjectId,
-          cause,
-        }).pipe(Effect.as(null)),
-      ),
-    );
-    return decoded?.vaultOverrides ?? { include: [], exclude: [] };
-  });
-
-const readTopLevelPatternCandidates = (workspaceRoot: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const names = yield* fs.readDirectory(workspaceRoot);
-    return names
-      .filter((name) => DEFAULT_VAULT_PATTERNS.some((pattern) => patternMatches(pattern, name)))
-      .map((name) => normalizeRelativePath(name))
-      .filter((path): path is string => path !== null);
-  });
 
 type TrackedLookup =
   | { readonly _tag: "tracked"; readonly paths: ReadonlySet<string> }
@@ -216,22 +162,61 @@ export const listTrackedCandidates = (workspaceRoot: string, candidates: Readonl
   });
 
 export const T3SYNC_FILE_NAME = ".t3sync";
+export const GLOBAL_T3SYNC_FILE_NAME = "t3sync";
+
+const T3SYNC_TEMPLATE = `# Files that sync between YOUR machines only (never to a git remote).
+# Same syntax as .gitignore. This global file applies to every project;
+# delete a line to stop syncing it everywhere. A project can extend or veto
+# it with its own .t3sync in the repo root (e.g. ".idea/" to sync more,
+# "!.env" to keep this project's .env local).
+${DEFAULT_VAULT_PATTERNS.join("\n")}
+`;
 
 /**
- * Per-project sync manifest, gitignore syntax, in the repo root — the
- * user-facing way to say ".idea/ (gitignored or not) travels between my
- * machines". Matching runs through git's own exclude engine
- * (`ls-files -o -i --exclude-from`), so semantics are exactly .gitignore's:
- * directories, globs, negations. Output is repo-relative untracked files —
- * a pattern can never select anything outside the repo.
+ * The defaults are not hidden machinery: they live in ONE editable file in
+ * the app's own state dir (git's core.excludesFile model), written once and
+ * never regenerated. Repos are never touched — a per-project .t3sync is
+ * purely user-created.
+ */
+const ensureGlobalT3Sync = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const config = yield* ServerConfig.ServerConfig;
+  const globalPath = pathService.join(config.stateDir, GLOBAL_T3SYNC_FILE_NAME);
+  const exists = yield* fs.exists(globalPath).pipe(Effect.orElseSucceed(() => true));
+  if (!exists) {
+    yield* fs.makeDirectory(config.stateDir, { recursive: true }).pipe(
+      Effect.andThen(fs.writeFileString(globalPath, T3SYNC_TEMPLATE)),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("roaming vault: could not write global t3sync", { cause }),
+      ),
+    );
+  }
+  return globalPath;
+});
+
+/**
+ * Untracked files the sync manifests select, via git's own exclude engine
+ * (exact .gitignore semantics: directories, globs, `!` negation). The
+ * global file's patterns come first, the optional repo-root .t3sync second,
+ * so a project line — including a negation — wins over a global one.
+ * Output is repo-relative untracked paths; a pattern can never select
+ * anything outside the repo.
  */
 const readT3SyncCandidates = (workspaceRoot: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
-    const t3syncPath = pathService.join(workspaceRoot, T3SYNC_FILE_NAME);
-    const exists = yield* fs.exists(t3syncPath).pipe(Effect.orElseSucceed(() => false));
-    if (!exists) {
+    const globalPath = yield* ensureGlobalT3Sync;
+    const projectPath = pathService.join(workspaceRoot, T3SYNC_FILE_NAME);
+    const excludeFiles: string[] = [];
+    if (yield* fs.exists(globalPath).pipe(Effect.orElseSucceed(() => false))) {
+      excludeFiles.push(globalPath);
+    }
+    if (yield* fs.exists(projectPath).pipe(Effect.orElseSucceed(() => false))) {
+      excludeFiles.push(T3SYNC_FILE_NAME);
+    }
+    if (excludeFiles.length === 0) {
       return [];
     }
     const git = yield* GitVcsDriver;
@@ -239,7 +224,13 @@ const readT3SyncCandidates = (workspaceRoot: string) =>
       .execute({
         operation: "VaultSync.t3syncMatches",
         cwd: workspaceRoot,
-        args: ["ls-files", "-z", "-o", "-i", `--exclude-from=${T3SYNC_FILE_NAME}`],
+        args: [
+          "ls-files",
+          "-z",
+          "-o",
+          "-i",
+          ...excludeFiles.flatMap((file) => [`--exclude-from=${file}`]),
+        ],
         allowNonZeroExit: true,
       })
       .pipe(Effect.orElseSucceed(() => null));
@@ -255,25 +246,17 @@ const readT3SyncCandidates = (workspaceRoot: string) =>
 
 export const buildCandidatePaths = (
   workspaceRoot: string,
-  workspaceProjectId: WorkspaceProjectId,
+  _workspaceProjectId: WorkspaceProjectId,
 ) =>
   Effect.gen(function* () {
-    const patternCandidates = yield* readTopLevelPatternCandidates(workspaceRoot);
-    const t3syncCandidates = yield* readT3SyncCandidates(workspaceRoot);
-    const overrides = yield* readRegistryOverrides(workspaceProjectId);
-    const excluded = new Set(
-      overrides.exclude
-        .map((path) => normalizeRelativePath(path))
-        .filter((path): path is string => path !== null),
-    );
-    const candidates = new Set([...patternCandidates, ...t3syncCandidates]);
-    for (const include of overrides.include) {
-      const normalized = normalizeRelativePath(include);
-      if (normalized !== null) {
-        candidates.add(normalized);
-      }
-    }
-    return [...candidates].filter((path) => !excluded.has(path)).sort();
+    // The t3sync files are the single source of truth (M3.5, user
+    // decision): defaults live in the editable GLOBAL file (created once in
+    // the app's state dir — repos are never touched), a user-created
+    // repo-root .t3sync extends or vetoes them. Deleting a line is the
+    // whole exclusion mechanism; no hidden pattern list, no registry
+    // override.
+    const candidates = new Set(yield* readT3SyncCandidates(workspaceRoot));
+    return [...candidates].sort();
   });
 
 const statMode = (stat: unknown): number | undefined => {
@@ -490,11 +473,16 @@ const make = Effect.gen(function* () {
   const projectRepository = yield* ProjectionProjectRepository;
   const serverSettings = yield* ServerSettingsService;
   const watcherScopes = yield* Ref.make(new Map<string, Scope.Scope>());
+  const serverConfig = yield* ServerConfig.ServerConfig;
   const provideVaultDeps = <A, E>(
     effect: Effect.Effect<
       A,
       E,
-      RoamingBlobStore | FileSystem.FileSystem | Path.Path | GitVcsDriver
+      | RoamingBlobStore
+      | FileSystem.FileSystem
+      | Path.Path
+      | GitVcsDriver
+      | ServerConfig.ServerConfig
     >,
   ) =>
     effect.pipe(
@@ -502,6 +490,7 @@ const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, pathService),
       Effect.provideService(GitVcsDriver, git),
+      Effect.provideService(ServerConfig.ServerConfig, serverConfig),
     );
 
   const isEnabled = serverSettings.getSettings.pipe(
