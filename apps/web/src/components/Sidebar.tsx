@@ -142,6 +142,7 @@ import {
 import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import {
   Dialog,
   DialogDescription,
@@ -2882,11 +2883,13 @@ function useMaterialize() {
   const defaultBaseDirectory = usePrimarySettings((settings) => settings.addProjectBaseDirectory);
   const [pending, setPending] = useState<MaterializeTarget | null>(null);
   const [targetPath, setTargetPath] = useState("");
+  const [restoreWip, setRestoreWip] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const materialize = useCallback(
     (target: MaterializeTarget) => {
       setTargetPath(joinTargetPath(defaultBaseDirectory, target.dirName));
+      setRestoreWip(true);
       setPending(target);
     },
     [defaultBaseDirectory],
@@ -2902,6 +2905,7 @@ function useMaterialize() {
         const { materialization: result } = await materializeRoamingProject({
           workspaceProjectId: target.workspaceProjectId,
           targetPath: chosen,
+          restoreWip,
         });
         if (result.status === "failed") {
           toastManager.add({
@@ -2927,7 +2931,7 @@ function useMaterialize() {
         setBusy(false);
       }
     })();
-  }, [pending, targetPath]);
+  }, [pending, targetPath, restoreWip]);
 
   const dialog = (
     <Dialog
@@ -2952,6 +2956,16 @@ function useMaterialize() {
             spellCheck={false}
             disabled={busy}
           />
+          <label className="mt-3 flex cursor-pointer items-center gap-2">
+            <Checkbox
+              checked={restoreWip}
+              disabled={busy}
+              onCheckedChange={(checked) => setRestoreWip(checked === true)}
+            />
+            <span className="text-xs text-muted-foreground">
+              Include work in progress (uncommitted changes from the other machine)
+            </span>
+          </label>
         </DialogPanel>
         <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={() => setPending(null)}>

@@ -13,6 +13,7 @@ import type {
   OrchestrationProposedPlan,
   OrchestrationSession,
   OrchestrationThreadActivity,
+  RoamingWipStatusEntry,
   ScopedProjectRef,
   ScopedThreadRef,
   ServerConfig,
@@ -123,6 +124,18 @@ export function useRoamingProjects(): ReadonlyArray<EnvironmentRoamingProject> {
 export function useRoamingMaterializations(): ReadonlyArray<EnvironmentRoamingMaterialization> {
   return useAtomValue(environmentProjects.roamingMaterializationsAtom);
 }
+
+export function useEnvironmentRoamingWipStatus(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<RoamingWipStatusEntry> {
+  return useAtomValue(
+    environmentId === null
+      ? EMPTY_WIP_STATUS_ATOM
+      : environmentProjects.environmentRoamingWipStatusAtom(environmentId),
+  );
+}
+
+const EMPTY_WIP_STATUS_ATOM = Atom.make((): ReadonlyArray<RoamingWipStatusEntry> => []);
 
 export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useAtomValue(environmentServerConfigsAtom);
