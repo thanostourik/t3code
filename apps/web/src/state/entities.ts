@@ -10,6 +10,7 @@ import {
 } from "@t3tools/client-runtime/state/threads";
 import type { ScopedProjectRef, ScopedThreadRef, ServerConfig } from "@t3tools/contracts";
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { RoamingWipStatusEntry } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -81,6 +82,18 @@ export function useRoamingProjects(): ReadonlyArray<EnvironmentRoamingProject> {
 export function useRoamingMaterializations(): ReadonlyArray<EnvironmentRoamingMaterialization> {
   return useAtomValue(environmentProjects.roamingMaterializationsAtom);
 }
+
+export function useEnvironmentRoamingWipStatus(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<RoamingWipStatusEntry> {
+  return useAtomValue(
+    environmentId === null
+      ? EMPTY_WIP_STATUS_ATOM
+      : environmentProjects.environmentRoamingWipStatusAtom(environmentId),
+  );
+}
+
+const EMPTY_WIP_STATUS_ATOM = Atom.make((): ReadonlyArray<RoamingWipStatusEntry> => []);
 
 export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useAtomValue(environmentServerConfigsAtom);
