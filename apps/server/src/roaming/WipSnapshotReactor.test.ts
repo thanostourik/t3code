@@ -650,4 +650,69 @@ testLayer("WipSnapshotReactor", (it) => {
       );
     }),
   );
+
+  it.effect("based-on: peer deletions apply and stay recoverable; legacy snapshots block", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-basedon-del");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-basedon-del-" });
+      const { peerPath: desktopPath, localPath: laptopPath } = yield* initApplyFixture(root);
+
+      yield* fs.writeFileString(pathService.join(desktopPath, "doomed.txt"), "delete me\n");
+      const s1 = yield* withCommitterDate(
+        minutesFromNow(30),
+        Effect.gen(function* () {
+          const outcome = yield* runWipPassForTarget(target(wsid, desktopPath), "origin-refs");
+          assert.strictEqual(outcome._tag, "done");
+          return yield* resolveOid(desktopPath, yield* wipRefName(wsid, LOCAL_ENVIRONMENT_ID));
+        }),
+      );
+
+      const glob = `refs/t3/wip/${wsid}/*`;
+      yield* git(laptopPath, ["fetch", "origin", `+${glob}:${glob}`]);
+      const desktopRef = `refs/t3/wip/${wsid}/${LOCAL_ENVIRONMENT_ID}`;
+      yield* git(laptopPath, [
+        "restore",
+        "--source",
+        desktopRef,
+        "--worktree",
+        "--staged",
+        "--",
+        ".",
+      ]);
+      yield* git(laptopPath, ["reset", "-q", "--", "."]);
+      yield* git(laptopPath, ["update-ref", `refs/t3/wip-applied/${wsid}`, s1!]);
+
+      // The laptop DELETES the file and pushes.
+      yield* fs.remove(pathService.join(laptopPath, "doomed.txt"), { force: true });
+      yield* peerSnapshot(laptopPath, wsid, minutesFromNow(60));
+
+      const applied = yield* runWipApplyForTarget(target(wsid, desktopPath));
+      assert.strictEqual(applied._tag, "applied");
+      assert.isFalse(yield* fs.exists(pathService.join(desktopPath, "doomed.txt")));
+      // The deleted content stays recoverable from the based-on commit.
+      const recovered = yield* gitStdout(desktopPath, ["show", `${s1!}:doomed.txt`]);
+      assert.strictEqual(recovered, "delete me");
+    }),
+  );
+
+  it.effect("based-on: a snapshot without the trailer stays blocked on a dirty tree", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-basedon-legacy");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-basedon-leg-" });
+      const { peerPath: desktopPath, localPath: laptopPath } = yield* initApplyFixture(root);
+
+      yield* fs.writeFileString(pathService.join(desktopPath, "desktop-work.txt"), "desk\n");
+      // The laptop authors WITHOUT ever applying (no marker → no trailer).
+      yield* fs.writeFileString(pathService.join(laptopPath, "laptop-note.txt"), "note\n");
+      yield* peerSnapshot(laptopPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, desktopPath));
+      assert.strictEqual(outcome._tag, "blocked");
+      assert.isFalse(yield* fs.exists(pathService.join(desktopPath, "laptop-note.txt")));
+    }),
+  );
 });
