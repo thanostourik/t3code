@@ -1,6 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import {
+  DEFAULT_VAULT_PATTERNS,
   EnvironmentId,
   ROAMING_VAULT_BUNDLE_MAX_BYTES,
   RoamingBlobRecord,
@@ -17,8 +18,8 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
-import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServerConfig from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { GitVcsDriver, layer as GitVcsDriverLayer } from "../vcs/GitVcsDriver.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
@@ -126,48 +127,76 @@ const remoteRecord = (input: {
 };
 
 testLayer("VaultSync", (it) => {
-  it.effect(
-    "captures untracked default matches and include paths while excluding tracked and excluded files",
-    () =>
-      Effect.gen(function* () {
-        const workspaceProjectId = WorkspaceProjectId.make("wp-vault-capture");
-        const fs = yield* FileSystem.FileSystem;
-        const pathService = yield* Path.Path;
-        const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-capture-" });
-        yield* initGit(workspaceRoot);
-        yield* fs.writeFileString(pathService.join(workspaceRoot, ".env"), "SECRET=one\n");
-        yield* fs.writeFileString(
-          pathService.join(workspaceRoot, ".env.production"),
-          "SECRET=prod\n",
-        );
-        yield* fs.writeFileString(
-          pathService.join(workspaceRoot, ".env.example"),
-          "SECRET=example\n",
-        );
-        yield* fs.writeFileString(pathService.join(workspaceRoot, "app.local.json"), "{}\n");
-        yield* fs.makeDirectory(pathService.join(workspaceRoot, "nested"), { recursive: true });
-        yield* fs.writeFileString(
-          pathService.join(workspaceRoot, "nested", "secret.txt"),
-          "nested\n",
-        );
-        yield* git(workspaceRoot, ["add", ".env.example"]);
-        yield* writeRegistry({
-          workspaceProjectId,
-          workspaceRoot,
-          include: ["nested/secret.txt"],
-          exclude: [".env.production"],
-        });
+  it.effect("global t3sync holds the defaults; a project .t3sync extends and vetoes them", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-capture");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-capture-" });
+      yield* initGit(workspaceRoot);
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".env"), "SECRET=one\n");
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, ".env.example"),
+        "SECRET=example\n",
+      );
+      yield* fs.writeFileString(pathService.join(workspaceRoot, "app.local.json"), "{}\n");
+      // gitignore semantics reach into subdirectories (M3.5).
+      yield* fs.makeDirectory(pathService.join(workspaceRoot, "packages", "api"), {
+        recursive: true,
+      });
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, "packages", "api", ".env"),
+        "SECRET=nested\n",
+      );
+      yield* git(workspaceRoot, ["add", ".env.example"]);
+      yield* writeRegistry({ workspaceProjectId, workspaceRoot });
 
-        const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
-        assert.equal(result.status, "written");
+      const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(result.status, "written");
 
-        const bundle = yield* readVaultBundle(workspaceProjectId);
-        assert.deepEqual(bundle.files.map((file) => file.path).sort(), [
-          ".env",
-          "app.local.json",
-          "nested/secret.txt",
-        ]);
-      }),
+      // The defaults were written once into the GLOBAL file (the app's
+      // state dir — repos are never touched), visible and editable.
+      const globalPath = pathService.join(config.stateDir, "t3sync");
+      const globalContent = yield* fs.readFileString(globalPath);
+      for (const pattern of DEFAULT_VAULT_PATTERNS) {
+        assert.include(globalContent, pattern);
+      }
+      assert.isFalse(yield* fs.exists(pathService.join(workspaceRoot, ".t3sync")));
+
+      const bundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(bundle.files.map((file) => file.path).sort(), [
+        ".env",
+        "app.local.json",
+        "packages/api/.env",
+      ]);
+
+      // A project .t3sync vetoes a global line with gitignore negation.
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".t3sync"), "!.env\n");
+      const vetoed = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(vetoed.status, "written");
+      const vetoedBundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(
+        vetoedBundle.files.map((file) => file.path),
+        ["app.local.json"],
+      );
+
+      // Deleting a line from the GLOBAL file stops syncing it everywhere:
+      // drop *.local.* — app.local.json leaves the bundle, .env returns.
+      yield* fs.remove(pathService.join(workspaceRoot, ".t3sync"), { force: true });
+      yield* fs.writeFileString(globalPath, ".env\n");
+      const trimmed = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(trimmed.status, "written");
+      const trimmedBundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(trimmedBundle.files.map((file) => file.path).sort(), [
+        ".env",
+        "packages/api/.env",
+      ]);
+
+      // The suite shares one config dir: put the global defaults back for
+      // the tests that follow.
+      yield* fs.writeFileString(globalPath, globalContent);
+    }),
   );
 
   it.effect(".t3sync carries gitignored trees like .idea/ over the vault channel", () =>
