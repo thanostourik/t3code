@@ -904,22 +904,33 @@ const make = Effect.gen(function* () {
         );
       }
       const applied = yield* providePassDeps(runWipApplyForTarget(target));
+      const previous = (yield* Ref.get(statuses)).get(target.workspaceProjectId);
       const base =
         outcome._tag === "done"
           ? outcome.entry
-          : ((yield* Ref.get(statuses)).get(target.workspaceProjectId) ?? {
+          : (previous ?? {
               workspaceProjectId: target.workspaceProjectId,
               mode,
             });
-      const entry =
+      // blockedReason reflects THIS pass only: set on blocked, cleared on
+      // anything else (a stale "blocked" after the user commits would lie).
+      const { blockedReason: _stale, ...baseWithoutBlocked } = base;
+      const entry: RoamingWipStatusEntry =
         applied._tag === "applied"
           ? {
-              ...base,
+              ...baseWithoutBlocked,
               lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
               lastAppliedFrom: applied.fromEnvironmentId,
             }
-          : base;
-      if (outcome._tag === "done" || applied._tag === "applied") {
+          : applied._tag === "blocked"
+            ? { ...baseWithoutBlocked, blockedReason: applied.reason }
+            : baseWithoutBlocked;
+      if (
+        outcome._tag === "done" ||
+        applied._tag === "applied" ||
+        applied._tag === "blocked" ||
+        (previous !== undefined && previous.blockedReason !== entry.blockedReason)
+      ) {
         yield* publishEntry(entry);
       }
     }).pipe(
