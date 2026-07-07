@@ -225,8 +225,18 @@ testLayer("VaultSync", (it) => {
       );
       yield* fs.makeDirectory(pathService.join(workspaceRoot, ".cache"), { recursive: true });
       yield* fs.writeFileString(pathService.join(workspaceRoot, ".cache", "junk.bin"), "junk\n");
+      // Field bug 2026-07-07: an unanchored project pattern must NOT reach
+      // into dependency trees — the app-owned denylist is processed last.
+      yield* fs.makeDirectory(pathService.join(workspaceRoot, "node_modules", "pkg", ".idea"), {
+        recursive: true,
+      });
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, "node_modules", "pkg", ".idea", "junk.xml"),
+        "junk\n",
+      );
       // gitignore syntax, per project, in the repo root — like .gitignore.
-      yield* fs.writeFileString(pathService.join(workspaceRoot, ".t3sync"), ".idea/\n");
+      // Unanchored ".idea" (the obvious thing to write) matches any depth.
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".t3sync"), ".idea\n");
       yield* writeRegistry({ workspaceProjectId, workspaceRoot });
 
       const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
@@ -237,6 +247,8 @@ testLayer("VaultSync", (it) => {
       assert.include(paths, ".idea/workspace.xml");
       // Gitignored content NOT listed in .t3sync stays local.
       assert.notInclude(paths, ".cache/junk.bin");
+      // The denylist beats the user's unanchored pattern in node_modules.
+      assert.notInclude(paths, "node_modules/pkg/.idea/junk.xml");
     }),
   );
 
