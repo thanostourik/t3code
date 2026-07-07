@@ -758,10 +758,18 @@ const make = Effect.gen(function* () {
       const appliedMarker = yield* wipAppliedMarkerRefName(record.workspaceProjectId).pipe(
         Effect.mapError(internalError("applied marker name failed")),
       );
-      yield* gitExec(
+      const markerWrite = yield* gitExec(
         ["update-ref", appliedMarker, newest.commitOid],
         "roaming.materializer.wip-applied-marker",
       );
+      if (markerWrite.exitCode !== 0) {
+        // Fails safe (auto-apply just stays blocked for this checkout), but
+        // silently degrading delivery is worth a trace.
+        yield* Effect.logWarning("roaming materialize: applied-marker write failed", {
+          workspaceProjectId: record.workspaceProjectId,
+          stderr: markerWrite.stderr.trim().slice(0, 200),
+        });
+      }
       // A snapshot older than the clone's HEAD can legitimately win — the
       // age in the detail keeps that honest.
       return {
