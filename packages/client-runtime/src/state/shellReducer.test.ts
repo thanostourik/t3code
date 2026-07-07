@@ -138,6 +138,36 @@ describe("applyShellStreamEvent", () => {
     expect(completed.roamingMaterializations[0]?.status).toBe("completed");
   });
 
+  it("upserts roaming wip status entries regardless of sequence", () => {
+    const wipStatus = {
+      workspaceProjectId:
+        "wp-wip" as OrchestrationShellSnapshot["roamingWipStatus"][number]["workspaceProjectId"],
+      mode: "origin-refs" as const,
+      lastCapturedAt: "2026-07-07T00:00:00.000Z",
+    };
+    const withHighSequence: OrchestrationShellSnapshot = {
+      ...baseSnapshot,
+      snapshotSequence: 10,
+    };
+
+    const upserted = applyShellStreamEvent(withHighSequence, {
+      kind: "roaming-wip-status-updated",
+      sequence: 0,
+      wipStatus,
+    });
+    expect(upserted.roamingWipStatus).toEqual([wipStatus]);
+    expect(upserted.snapshotSequence).toBe(10);
+
+    const errored = applyShellStreamEvent(upserted, {
+      kind: "roaming-wip-status-updated",
+      sequence: 0,
+      wipStatus: { ...wipStatus, mode: "bundle" as const, lastError: "push failed" },
+    });
+    expect(errored.roamingWipStatus).toHaveLength(1);
+    expect(errored.roamingWipStatus[0]?.mode).toBe("bundle");
+    expect(errored.roamingWipStatus[0]?.lastError).toBe("push failed");
+  });
+
   it("ignores stale project upserts without mutating the snapshot", () => {
     const snapshotWithProject: OrchestrationShellSnapshot = {
       ...baseSnapshot,
