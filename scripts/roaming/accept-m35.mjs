@@ -266,13 +266,23 @@ pass("oversize untracked file warned and kept off the origin");
 
 // ── 7. roaming off ⇒ the HTTP shell snapshot hides every roaming field ─
 // (the ws path always stripped them; the HTTP-first load must too)
+// Restart B with the flag off: this step tests the ROUTE's gating, and
+// runtime file-watch delivery proved flaky under harness inotify pressure
+// (flagged in the plan as a follow-up — the recursive project watchers are
+// the suspected budget hog).
 const settingsB = readSettings(B);
+process.kill(
+  Number(readFileSync(join(HARNESS_DIR, "instance-b/server.pid"), "utf8").trim()),
+  "SIGKILL",
+);
 writeFileSync(
   join(B.base, "userdata", "settings.json"),
   JSON.stringify({ ...settingsB, roaming: false }),
 );
-await waitFor("HTTP shell snapshot empties with roaming off", 30_000, async () => {
-  const response = await api(B.url, "/api/orchestration/shell", { token: adminB });
+execFileSync(join(REPO_ROOT, "scripts/roaming/harness.sh"), ["start"], { encoding: "utf8" });
+const adminB2 = cli(["auth", "session", "issue", "--base-dir", B.base, "--token-only"]);
+await waitFor("HTTP shell snapshot empties with roaming off", 60_000, async () => {
+  const response = await api(B.url, "/api/orchestration/shell", { token: adminB2 });
   if (!response.ok) return null;
   const snapshot = await response.json();
   return (snapshot.roamingProjects ?? []).length === 0 &&

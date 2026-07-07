@@ -849,3 +849,30 @@ constraints:
   round-trips A→B while `git ls-tree` proves the origin's WIP refs hold
   neither `.idea/` nor `.env`; a 60 MiB untracked file surfaces a warning
   and never reaches the origin.
+
+---
+
+## M3.6 — Field round 2 (DONE 2026-07-07, PRs #43–#47)
+
+Second same-day field session, hours after M3.5. Findings and outcomes:
+
+1. Laptop→desktop never delivered: correct-but-invisible blocking (the
+   desktop always holds its own WIP). Fixed the right half with based-on
+   provenance (T3-Based-On trailer + pure-fast-forward allow path,
+   adversarially reviewed: self-gating on a locally-resolvable based-on
+   commit makes even peer deletions recoverable), and made the blocking
+   half VISIBLE (blockedReason + the project-row indicator).
+2. `.t3sync` additions delivered the bundle to the peer's blob store where
+   it sat forever — the vault channel had capture and transport but no
+   delivery, the same disease M3.5 cured for WIP. Vault apply-on-arrival
+   with the per-file applied-hash contract closed it; the update path
+   (changed secret reaching an unmodified peer copy) only works because
+   the applied record distinguishes "unmodified since MY apply" from
+   "locally edited".
+3. The user asked how Dropbox-class tools signal sync state; the indicator
+   is the deliberately minimal version (silent when healthy).
+
+Process notes: the session-restart pattern kept killing background
+acceptance runs mid-flight ("are you stuck again?") — the fix was
+launching the gauntlet as a detached setsid process with a log file,
+immune to app restarts. Worth keeping for all future long harness runs.
