@@ -139,6 +139,14 @@ export const ROAMING_VAULT_BUNDLE_MAX_BYTES = 2 * 1024 * 1024;
 /** Cap on the WIP bundle-fallback blob (compressed git bundle bytes). */
 export const ROAMING_WIP_BUNDLE_MAX_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Per-file cap for untracked files entering WIP snapshots. Anything larger
+ * is excluded from the snapshot with a surfaced warning — origin-refs mode
+ * pushes to the project's git host, which must never silently receive a
+ * dropped-in dataset (git hosts commonly refuse >100 MB blobs anyway).
+ */
+export const ROAMING_WIP_MAX_FILE_BYTES = 50 * 1024 * 1024;
+
 export const RoamingVaultOverrides = Schema.Struct({
   /** Repo-relative paths (posix separators), added to the default matches. */
   include: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),

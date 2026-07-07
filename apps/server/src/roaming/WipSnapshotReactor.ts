@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off
 /**
  * WipSnapshotReactor - continuous WIP snapshots for roaming projects.
  *
@@ -19,10 +20,13 @@ import {
   CheckpointRef,
   EnvironmentId,
   ROAMING_WIP_BUNDLE_MAX_BYTES,
+  ROAMING_WIP_MAX_FILE_BYTES,
   RoamingWipPayload,
   type RoamingWipStatusEntry,
   type WorkspaceProjectId,
 } from "@t3tools/contracts";
+import * as NodeFS from "node:fs";
+
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -33,9 +37,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
-import type * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -58,6 +64,42 @@ import {
 } from "./WipSnapshots.ts";
 
 const WIP_INTERVAL = Duration.minutes(2);
+const WATCH_DEBOUNCE = Duration.seconds(5);
+const SHUTDOWN_SNAPSHOT_TIMEOUT = Duration.seconds(10);
+
+const WATCH_NOISE = /(^|\/)(\.git|node_modules)(\/|$)/;
+
+/**
+ * Recursive filesystem events for a project root (the Dropbox model: watch,
+ * debounce, ship). Effect's FileSystem.watch is single-directory, so this
+ * wraps node's recursive fs.watch (Linux ≥ Node 20 / macOS); on platforms
+ * without recursive support the stream ends and the interval sweep remains
+ * the only trigger. .git and node_modules churn is filtered at the source.
+ */
+const watchTreeEvents = (root: string): Stream.Stream<string> =>
+  Stream.callback<string>((queue) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        try {
+          const watcher = NodeFS.watch(root, { recursive: true }, (_event, fileName) => {
+            const relative = fileName?.toString() ?? "";
+            if (!WATCH_NOISE.test(relative)) {
+              Queue.offerUnsafe(queue, relative);
+            }
+          });
+          watcher.on("error", () => Queue.endUnsafe(queue));
+          return watcher;
+        } catch {
+          Queue.endUnsafe(queue);
+          return null;
+        }
+      }),
+      (watcher) =>
+        Effect.sync(() => {
+          watcher?.close();
+        }),
+    ),
+  );
 
 export type WipTransportMode = RoamingWipStatusEntry["mode"];
 
@@ -125,6 +167,40 @@ const vaultExcludePathsFor = (target: WipTarget) =>
       return null;
     }
     return candidates.filter((path) => !tracked.paths.has(path));
+  });
+
+/**
+ * Untracked non-ignored files too large to ride a snapshot (they would land
+ * on the git host in origin mode). Excluded from capture, surfaced as a
+ * warning; the peer's clean-tree guard keeps its own copy safe.
+ */
+const oversizeUntrackedPaths = (cwd: string) =>
+  Effect.gen(function* () {
+    const git = yield* GitVcsDriver;
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const listing = yield* git.execute({
+      operation: "WipSnapshotReactor.listUntracked",
+      cwd,
+      args: ["ls-files", "-z", "-o", "--exclude-standard"],
+      allowNonZeroExit: true,
+    });
+    if (listing.exitCode !== 0) {
+      return [];
+    }
+    const oversize: Array<{ readonly path: string; readonly bytes: number }> = [];
+    for (const relativePath of listing.stdout.split("\0")) {
+      if (relativePath.length === 0) {
+        continue;
+      }
+      const stat = yield* fs
+        .stat(pathService.join(cwd, relativePath))
+        .pipe(Effect.orElseSucceed(() => null));
+      if (stat?.type === "File" && Number(stat.size) > ROAMING_WIP_MAX_FILE_BYTES) {
+        oversize.push({ path: relativePath, bytes: Number(stat.size) });
+      }
+    }
+    return oversize;
   });
 
 const decodeWipPayloadJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingWipPayload));
@@ -210,6 +286,16 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   // origin mode (written only after a successful push), the current wip
   // blob's tree in bundle mode (there is no marker there — without this the
   // bundle path would re-mirror up to 8 MiB every interval on an idle repo).
+  const oversize = yield* oversizeUntrackedPaths(cwd);
+  const captureExcludePaths = [...excludePaths, ...oversize.map((entry) => entry.path)];
+  const oversizeWarning =
+    oversize.length === 0
+      ? null
+      : `large files not synced: ${oversize
+          .slice(0, 3)
+          .map((entry) => `${entry.path} (${Math.round(entry.bytes / (1024 * 1024))} MB)`)
+          .join(", ")}${oversize.length > 3 ? ` and ${oversize.length - 3} more` : ""}`;
+
   const markerTree = yield* resolveOid(cwd, `${markerRef}^{tree}`);
   const shippedTree =
     mode === "bundle" ? yield* bundleTreeOid(target.workspaceProjectId, environmentId) : markerTree;
@@ -233,7 +319,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     cwd,
     workspaceProjectId: target.workspaceProjectId,
     environmentId,
-    vaultExcludePaths: excludePaths,
+    vaultExcludePaths: captureExcludePaths,
     skipIfTreeOid: shippedTree,
   });
   if (captured === null) {
@@ -244,6 +330,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   const entryBase = {
     workspaceProjectId: target.workspaceProjectId,
     lastCapturedAt: capturedAt,
+    ...(oversizeWarning === null ? {} : { lastError: oversizeWarning }),
   };
 
   const remote = yield* primaryRemoteName(cwd);
@@ -802,6 +889,50 @@ const make = Effect.gen(function* () {
     process: (_workspaceProjectId, target) => processTarget(target).pipe(Effect.asVoid),
   });
 
+  const watcherScopes = yield* Ref.make(new Map<WorkspaceProjectId, Scope.Scope>());
+
+  const closeWatcher = (workspaceProjectId: WorkspaceProjectId) =>
+    Ref.modify(watcherScopes, (scopes) => {
+      const scope = scopes.get(workspaceProjectId);
+      const next = new Map(scopes);
+      next.delete(workspaceProjectId);
+      return [scope, next] as const;
+    }).pipe(
+      Effect.flatMap((scope) =>
+        scope === undefined ? Effect.void : Scope.close(scope, Exit.void).pipe(Effect.asVoid),
+      ),
+    );
+
+  const closeAllWatchers = Ref.modify(
+    watcherScopes,
+    (scopes) => [[...scopes.values()], new Map<WorkspaceProjectId, Scope.Scope>()] as const,
+  ).pipe(
+    Effect.flatMap((scopes) =>
+      Effect.forEach(scopes, (scope) => Scope.close(scope, Exit.void), { discard: true }),
+    ),
+  );
+
+  // Watch → debounce → enqueue: capture latency drops from the interval tick
+  // to seconds after the last write (the interval stays as the fallback
+  // sweep). Swap scopes atomically — the VaultSync watcher lesson.
+  const installWatcher = (target: WipTarget) =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.make("sequential");
+      const previous = yield* Ref.modify(watcherScopes, (scopes) => {
+        const old = scopes.get(target.workspaceProjectId);
+        const next = new Map(scopes);
+        next.set(target.workspaceProjectId, scope);
+        return [old, next] as const;
+      });
+      if (previous !== undefined) {
+        yield* Scope.close(previous, Exit.void);
+      }
+      yield* Stream.runForEach(
+        watchTreeEvents(target.workspaceRoot).pipe(Stream.debounce(WATCH_DEBOUNCE)),
+        () => worker.enqueue(target.workspaceProjectId, target),
+      ).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
+    });
+
   const pruneStatuses = (targets: ReadonlyArray<WipTarget>) =>
     Effect.gen(function* () {
       const keep = new Set(targets.map((target) => target.workspaceProjectId));
@@ -823,11 +954,26 @@ const make = Effect.gen(function* () {
           ? listTargets.pipe(
               Effect.tap(pruneStatuses),
               Effect.flatMap((targets) =>
-                Effect.forEach(
-                  targets,
-                  (target) => worker.enqueue(target.workspaceProjectId, target),
-                  { discard: true },
-                ),
+                Effect.gen(function* () {
+                  const keep = new Set(targets.map((target) => target.workspaceProjectId));
+                  const watched = yield* Ref.get(watcherScopes);
+                  for (const workspaceProjectId of watched.keys()) {
+                    if (!keep.has(workspaceProjectId)) {
+                      yield* closeWatcher(workspaceProjectId);
+                    }
+                  }
+                  yield* Effect.forEach(
+                    targets,
+                    (target) =>
+                      Effect.gen(function* () {
+                        if (!watched.has(target.workspaceProjectId)) {
+                          yield* installWatcher(target);
+                        }
+                        yield* worker.enqueue(target.workspaceProjectId, target);
+                      }),
+                    { discard: true },
+                  );
+                }),
               ),
             )
           : Effect.void,
@@ -876,6 +1022,35 @@ const make = Effect.gen(function* () {
 
   const start: WipSnapshotReactor["Service"]["start"] = () =>
     Effect.gen(function* () {
+      // Graceful shutdown: one last bounded capture+ship per project — the
+      // close-the-laptop-and-leave case must not lose the final minutes.
+      yield* Effect.addFinalizer(() =>
+        isEnabled.pipe(
+          Effect.flatMap((enabled) =>
+            enabled
+              ? listTargets.pipe(
+                  Effect.flatMap((targets) =>
+                    Effect.forEach(
+                      targets,
+                      (target) =>
+                        Effect.gen(function* () {
+                          const mode =
+                            (yield* Ref.get(modes)).get(target.workspaceProjectId) ??
+                            ("origin-refs" as const);
+                          yield* providePassDeps(runWipPassForTarget(target, mode)).pipe(
+                            Effect.timeout(SHUTDOWN_SNAPSHOT_TIMEOUT),
+                          );
+                        }).pipe(Effect.ignore),
+                      { discard: true },
+                    ),
+                  ),
+                )
+              : Effect.void,
+          ),
+          Effect.catchCause(() => Effect.void),
+        ),
+      );
+      yield* Effect.addFinalizer(() => closeAllWatchers);
       // Interval trigger (also covers the startup scan).
       yield* Effect.forkScoped(
         Effect.forever(snapshotAll().pipe(Effect.andThen(Effect.sleep(WIP_INTERVAL)))),
@@ -887,7 +1062,7 @@ const make = Effect.gen(function* () {
           Stream.runForEach((settings) =>
             settings.roaming && settings.roamingWipSync
               ? snapshotAll()
-              : Ref.set(statuses, new Map()),
+              : Ref.set(statuses, new Map()).pipe(Effect.andThen(closeAllWatchers)),
           ),
           Effect.ignoreCause({ log: true }),
         ),
