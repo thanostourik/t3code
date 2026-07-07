@@ -39,24 +39,18 @@ machine's projects are visible but dead.
 > M0 harness: `accept-m3.mjs` (origin-refs path with A killed, bundle
 > fallback end-to-end, push failures surfaced, field-bug regression) plus
 > the canonical-workflow re-run (`accept-m2.5.mjs`). Materialize now =
-> clone + WIP snapshot + secret files + registration. **NEXT UP: M3.5
-> (sync completion — field-driven, inserted 2026-07-07 by user directive
-> after real two-machine use):** M3 shipped capture without delivery.
-> Scope: (1) AUTO-APPLY — each machine fetches the project's WIP refs and
-> applies a newer other-machine snapshot automatically when the local tree
-> is clean or exactly at the last-applied snapshot; a locally-edited tree
-> is NEVER touched (notice instead; diff-and-choose stays M5); (2) instant
-> capture via filesystem watch (~seconds, 2-min sweep as fallback) + final
-> snapshot on graceful shutdown; (3) `.t3sync` — per-project repo-root
-> file, gitignore syntax: listed gitignored paths (e.g. `.idea/`) travel
-> over the machine-to-machine channel; (4) origin-mode size guard for huge
-> untracked files; (5) settings-row consent is per-machine (field trap:
-> pre-M3 pairings must enable WIP on BOTH machines) — fix copy, propagate
-> properly. Field findings recorded in the history file (tracked `.idea`
-> travels via git regardless of .gitignore; no apply path existed outside
-> materialize). Then M4 (bootstrap recipes; analysis pass must scope
-> honest limits — v1 targets scriptable setups). M2.5 DONE 2026-07-06
-> (PRs #19–#29+).
+> clone + WIP snapshot + secret files + registration. **M3.5 (sync completion)
+> DONE 2026-07-07** — PRs #38–#42, driven by the same-night field session:
+> auto-apply delivery (edit-free checkouts fast-forward; local work is
+> never touched), filesystem-watch capture + freshness beacon (~1s A→B
+> end-to-end on the harness), graceful-shutdown snapshot, t3sync manifests
+> (global defaults file + per-project .t3sync, user decision — replaces
+> vaultOverrides and the hidden pattern list), origin-mode size guard.
+> Acceptance green: `accept-m35.mjs` + canonical re-run (`accept-m2.5.mjs`).
+> Constraints under [Landed constraints](#landed-constraints-m0m35).
+> **NEXT UP: M4 (bootstrap recipes)** — its analysis pass must scope
+> honest limits (v1 targets scriptable setups; capture-what-happened over
+> guaranteed-boot). M2.5 DONE 2026-07-06 (PRs #19–#29+).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -378,18 +372,32 @@ CRDT.
 
 ## Step 2 — Vault
 
-**Manifest (revised 2026-07-05):** secrets sync is a **global category
-toggle** in the sync-options step of the one pairing flow (pre-checked;
-see canonical workflow), applying a default
-pattern list (`.env`, `.env.*`, `*.local.*`, key/cert files) to every
-project's `vaultManifest` automatically — including projects created later.
-Per-project settings survive only as a rarely-used override: add a file the
-defaults miss, or exclude a matched file. Never sync all gitignored content;
-patterns only. Guard rails: a size cap on the vault bundle (a pattern
-accidentally matching something huge must not silently ship it), and the
-prompt-before-overwrite on apply below. When M7's cloud backend arrives, this
-consent is re-asked — secrets moving to a third place is a different question
-than secrets moving between the user's own two machines.
+**Manifest (revised 2026-07-07, M3.5 — user decision, supersedes the
+2026-07-05 wording):** secrets sync remains the **global category toggle**
+in the sync-options step of the one pairing flow (pre-checked; see canonical
+workflow). What travels is defined by **two editable files with exact
+.gitignore semantics — no hidden pattern list, no registry override**
+(git's `core.excludesFile` model):
+- **Global `<stateDir>/t3sync`** — written ONCE, pre-populated with the
+  defaults (`.env`, `.env.*`, `*.local.*`, key/cert files), then never
+  regenerated. Deleting a line stops that pattern syncing everywhere.
+  Repos are never touched by the app.
+- **Repo-root `.t3sync`** — optional, purely user-created, per project like
+  `.gitignore`. Extends the global file (`.idea/` to sync a gitignored
+  tree) or vetoes it (`!.env` keeps this project's `.env` local) — project
+  patterns are processed after global ones, so they win.
+Matching runs through git's own exclude engine (`ls-files -o -i
+--exclude-from` global-then-project), so directories, globs, and negation
+behave exactly like `.gitignore`, including nested paths (monorepo
+`packages/*/.env` now matches — the old defaults were top-level-only).
+The M2 `vaultOverrides` registry mechanism is retired (schema field
+remains, no longer consumed — it never had a way to be edited).
+Never sync all gitignored content; patterns only. Guard rails: a size cap
+on the vault bundle (a pattern accidentally matching something huge must
+not silently ship it), and the prompt-before-overwrite on apply below.
+When M7's cloud backend arrives, this consent is re-asked — secrets moving
+to a third place is a different question than secrets moving between the
+user's own two machines.
 
 **Capture:** `roaming/VaultSync.ts` reactor: `FileSystem.watch` on allowlisted
 paths (same debounce pattern as `ServerSettingsService`), coalesced per project
@@ -653,7 +661,7 @@ load-bearing assumptions are cheap to verify before building on them.
 | **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options step of the one pairing flow. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. Canonical workflow re-run. |
 | **M7 — Cloud store backend (gated)** | E2E encryption (key-management one-pager written and reviewed first — root key, recovery code, per-project data keys; this is the entry gate) + a cloud `RoamingBlobStore` implementation: private git store repo, or T3 relay if the waitlist has cleared by then. Extends D3 records with encryption fields. Must re-ask the secrets-sync consent before any cloud backend activates. | Small state reaches a fresh machine with zero online overlap with any other machine; a test asserts the cloud side holds ciphertext only. |
 
-## Landed constraints (M0–M3)
+## Landed constraints (M0–M3.5)
 
 Full analysis/results narratives live in
 [21-roaming-history.md](21-roaming-history.md); git history and the PRs hold
@@ -719,16 +727,18 @@ narrative moves to the history file — this document stays current-state.
 
 - Vault bundle = JSON `{ schemaVersion, capturedAt, files: [{ path, mode,
   sha256, contentBase64 }] }`; cap = total decoded bytes
-  (`ROAMING_VAULT_BUNDLE_MAX_BYTES`, 2 MiB, enforced from `stat` before any
-  read); oversize captures are skipped with a surfaced warning, never
-  truncated.
-- Effective vault set = `DEFAULT_VAULT_PATTERNS` (top-level files only)
-  + include − exclude (`vaultOverrides`: explicit relative paths, not
-  globs). A file is captured only if pattern-matched AND untracked
-  (`git ls-files`; `check-ignore` is the wrong tool — it flags committed
-  lookalikes). Fail-closed: a genuine ls-files failure skips capture.
-  Symlinks are never captured; apply refuses symlinked targets/parents
-  outside the workspace root and writes new files with their mode up front.
+  (`ROAMING_VAULT_BUNDLE_MAX_BYTES`, 16 MiB since M3.5 — the bundle also
+  carries `.t3sync`-selected trees — enforced from `stat` before any read);
+  oversize captures are skipped with a surfaced warning, never truncated.
+- Effective vault set (REVISED M3.5, supersedes the M2 rule): the global
+  `<stateDir>/t3sync` file (defaults written into it once) plus the
+  optional repo-root `.t3sync`, matched by git's own exclude engine —
+  `vaultOverrides` and the hidden top-level pattern scan are retired. A
+  file is captured only if manifest-matched AND untracked (`git ls-files`;
+  `check-ignore` is the wrong tool — it flags committed lookalikes).
+  Fail-closed: a genuine ls-files failure skips capture. Symlinks are never
+  captured; apply refuses symlinked targets/parents outside the workspace
+  root and writes new files with their mode up front.
 - `roamingSecretsSync` = per-machine capture consent (pairing-time
   propagation rule under M2.5 below).
 - Materialize = synchronous `POST /api/roaming/materialize` + resumable
@@ -736,7 +746,9 @@ narrative moves to the history file — this document stays current-state.
   clone, apply-vault, restore-wip (recorded-as-skipped until M3),
   register-project, bootstrap (skipped until M4). Failed runs return the
   failed record over HTTP 200; resume continues from the failed step; a
-  completed record short-circuits even with a different targetPath.
+  completed record short-circuits even with a different targetPath
+  (REVISED M3: only while the targetPath still holds a git checkout AND
+  the registered project is live — see M3 constraints).
   apply-vault never overwrites an existing differing file (notice instead);
   interactive overwrite belongs to the on-demand "pull vault files" path.
   Live progress = the step machine's own PubSub merged at the shell
@@ -878,6 +890,55 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
 - Acceptance: `accept-m3.mjs` (three-project matrix: origin-refs with A
   killed, bundle fallback end-to-end, push-failure surfacing, field-bug
   regression) + the canonical-workflow re-run.
+
+### Sync completion (M3.5, PRs #38–#42)
+
+- **Auto-apply (delivery):** a peer's newer snapshot fast-forwards a
+  checkout ONLY when it provably carries no local edits — its
+  vault-subtracted worktree tree equals HEAD's tree or the
+  `refs/t3/wip-applied/<wsid>` marker's tree (stamped by every auto-apply
+  and by materialize restore-wip). Anything else is blocked, never touched
+  (M5 owns divergence). The judgment is re-verified against a fresh
+  worktree tree in the last instant before the destructive restore (TOCTOU
+  guard); locally-present vault files are preserved across the restore from
+  the WORKTREE's copies, never from a possibly-stale blob. A snapshot older
+  than HEAD or the applied marker never applies (no stale-echo
+  resurrection; timestamps compare with `<=`, so ties skip).
+- **Freshness beacon:** origin-mode pushes ALSO write an empty-bundle wip
+  blob (metadata only — refName/commitOid/treeOid, `bundleBase64: ""`);
+  the mirror pushes on every blob write, and peers run the project's pass
+  on any arriving wip blob — end-to-end delivery is seconds, not the
+  2-minute tick. Importers skip empty-bundle payloads (the origin fetch is
+  their transport). This supersedes M3's "origin-refs mode ships no blob".
+- **Instant capture:** recursive filesystem watch per enrolled root
+  (node `fs.watch` wrapped as a stream; `.git`/`node_modules`/build-dir
+  noise filtered at source; 5s debounce; dead watchers self-evict so scans
+  re-install them). The 2-minute interval is the fallback sweep — also the
+  only trigger under sustained sub-5s write storms (debounce never goes
+  quiet) and on platforms without recursive watch. Graceful shutdown runs
+  one final bounded capture+ship per project (10s cap, 4-wide).
+- **Size guard:** untracked files over `ROAMING_WIP_MAX_FILE_BYTES`
+  (50 MiB) are excluded from snapshots with a surfaced warning that
+  survives real push errors (origin mode previously had NO cap).
+- **t3sync manifests (user decision, supersedes vaultOverrides):** global
+  `<stateDir>/t3sync` written once with the defaults + optional repo-root
+  `.t3sync` (user-created only — the app never writes into repos), matched
+  by git's exclude engine, project lines win (incl. `!` negation). Vault
+  cap 16 MiB. Full statement under Step 2's Manifest paragraph.
+- **Consent trap (field):** the per-environment settings row writes
+  `roamingWipSync` on ITS machine only (copy now says so); the one-decision
+  propagation runs only in the pairing handshake. Machines paired before
+  M3 must enable the row on BOTH machines (or re-pair). The
+  paired-into machine still has no settings UI for this — flagged for a
+  future Authorized-clients sync row.
+- Accepted risks: peer clock skew can defeat the stale-echo timestamp
+  guard (only ever affects edit-free checkouts; recoverable via refs); the
+  laptop's first post-apply capture echoes an identical-tree snapshot once
+  (settles via tree-equality skips).
+- Acceptance: `accept-m35.mjs` (1-second A→B delivery onto a clean
+  checkout, no-clobber of a locally-edited checkout, `.t3sync` `.idea/`
+  round-trip with origin hygiene, oversize warning) + the
+  canonical-workflow re-run.
 
 ## Execution process
 
