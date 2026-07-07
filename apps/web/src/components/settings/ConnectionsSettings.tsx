@@ -1739,6 +1739,7 @@ function EnvironmentSyncControls(props: {
               />
               <span className="text-xs text-muted-foreground">
                 Work in progress follows you as hidden snapshots on each project's git remote
+                (applies to this machine's projects — enable it on both machines)
               </span>
             </label>
             {wipSync && wipStatus.some((entry) => entry.lastError !== undefined) ? (
