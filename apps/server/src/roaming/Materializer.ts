@@ -676,6 +676,11 @@ const make = Effect.gen(function* () {
             imported = addNotice(imported, `undecodable work-in-progress blob: ${ref.key}`);
             continue;
           }
+          // Origin-mode freshness beacons carry no pack — the origin fetch
+          // above is their transport.
+          if (payload.bundleBase64.length === 0) {
+            continue;
+          }
           const tempDir = yield* fs
             .makeTempDirectory({ prefix: "t3-wip-restore-" })
             .pipe(Effect.mapError(internalError("temp dir for wip bundle failed")));
