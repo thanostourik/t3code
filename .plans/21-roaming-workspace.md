@@ -29,16 +29,21 @@ the one pairing flow (plus ordinary settings rows for changing your mind
 later); pairing must never leave the user in a state where the other
 machine's projects are visible but dead.
 
-> **Status:** M2.5 (unified pairing) DONE 2026-07-06 — original build PRs
-> #19–#24, then a field-hardening round (PRs #26–#29+) driven by real
-> two-machine use that reshaped the product model: sync = pause not codes,
-> ONE secrets decision per pairing, ONE device row, Materialize enabled-iff-
-> workable with on-demand blob fetch + host-key auto-trust + folder prompt,
-> revoke→dead-row flip, handshake self-revoke, user-label inheritance. All
-> verified on the real desktop by the user and on the M0 harness
-> (`accept-m2.5.mjs` + browser walks). Materialize today = clone + secret
-> files; uncommitted-work sync is **M3 (WIP snapshots)** — not built and
-> NEXT UP. Then M4 (bootstrap recipes). Renumbered 2026-07-06 (below).
+> **Status:** M3 (WIP snapshots) DONE 2026-07-07 — PRs #32–#37: analysis
+> pass (independently reviewed; bundle spike flipped WIP commits to
+> parent=HEAD), contracts, WipSnapshotReactor (capture + origin-refs push +
+> bundle fallback + status surfacing), materialize restore-wip (+ the
+> 2026-07-07 field bug: stale completed materialization records now
+> revalidate), UI (Work in progress row in the one pairing flow, settings
+> row, push-failure surfacing, materialize toggle). Acceptance green on the
+> M0 harness: `accept-m3.mjs` (origin-refs path with A killed, bundle
+> fallback end-to-end, push failures surfaced, field-bug regression) plus
+> the canonical-workflow re-run (`accept-m2.5.mjs`). Materialize now =
+> clone + WIP snapshot + secret files + registration. **NEXT UP: M4
+> (bootstrap recipes)** — its analysis pass must scope honest limits (v1
+> targets scriptable setups; capture-what-happened over guaranteed-boot).
+> M2.5 (unified pairing) DONE 2026-07-06 (PRs #19–#29+; field-hardening
+> narrative in the history file).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -455,9 +460,8 @@ free).
 
 ## Step 5 — Continuous WIP snapshots
 
-*(Rewritten by the M3 analysis pass, 2026-07-06 — deviations from the original
-step text are folded in; the original assumptions and why they moved are noted
-inline.)*
+*(As built in M3; the analysis-pass narrative that shaped this section is in
+the history file.)*
 
 **Capture:** the temp-index recipe (`GIT_INDEX_FILE` + `read-tree HEAD` /
 `add -A` / `write-tree` / `commit-tree` / `update-ref`) is reimplemented in
@@ -538,16 +542,12 @@ row — it does not switch itself on.
 merge-point pattern as `roamingMaterializations`) carries per-project
 `{ mode, lastCapturedAt, lastPushedAt, lastError }` for the UI.
 
-**Accepted risks (M3 analysis review):** a cloned state dir (two machines
-sharing one persisted environmentId) makes both write the same WIP ref and
-lease-adopt each other's pushes in a ping-pong — same class as the accepted
-initiator-side environmentId clobber; a re-install minting a new
-environmentId orphans the old machine's WIP ref on the origin (bounded: one
-stale ref per abandoned environmentId, prunable by hand). Implementation
-note: the pre-M3 code carries swapped milestone labels from the renumbering
-(`Materializer.ts` restore-wip skip says "M4", bootstrap says "M3", and the
-contracts step comment says "M4 lands WIP snapshots") — the restore-wip PR
-must fix all three.
+**Accepted risks:** a cloned state dir (two machines sharing one persisted
+environmentId) makes both write the same WIP ref and lease-adopt each
+other's pushes in a ping-pong — same class as the accepted initiator-side
+environmentId clobber; a re-install minting a new environmentId orphans the
+old machine's WIP ref on the origin (bounded: one stale ref per abandoned
+environmentId, prunable by hand).
 
 **Interference guards** (the riskiest point in this step — the same worktree is
 touched by turn checkpoints, user git commands, and provider runs): capture is
@@ -639,7 +639,7 @@ load-bearing assumptions are cheap to verify before building on them.
 | **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options step of the one pairing flow. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. Canonical workflow re-run. |
 | **M7 — Cloud store backend (gated)** | E2E encryption (key-management one-pager written and reviewed first — root key, recovery code, per-project data keys; this is the entry gate) + a cloud `RoamingBlobStore` implementation: private git store repo, or T3 relay if the waitlist has cleared by then. Extends D3 records with encryption fields. Must re-ask the secrets-sync consent before any cloud backend activates. | Small state reaches a fresh machine with zero online overlap with any other machine; a test asserts the cloud side holds ciphertext only. |
 
-## Landed constraints (M0–M2.5)
+## Landed constraints (M0–M3)
 
 Full analysis/results narratives live in
 [21-roaming-history.md](21-roaming-history.md); git history and the PRs hold
@@ -804,6 +804,66 @@ clobber; first-pairing settings TOCTOU.
 Acceptance: `accept-m2.5.mjs` (transport chain) + the canonical-workflow
 browser walk + `round3` field-sequence walk (standard-then-upgrade pairing,
 live-row materialize, revoke→offline flip), all green on the M0 harness.
+
+### WIP snapshots (M3, PRs #32–#37)
+
+- Capture = the temp-index recipe reimplemented in `roaming/WipSnapshots.ts`
+  (NOT the driver op): WIP commits carry **parent=HEAD** (thin bundles are
+  ancestry-based — spiked; also M5's common ancestor) and return
+  `{ commitOid, treeOid }`. The effective vault set is subtracted from the
+  temp index before `write-tree` (vault content is P2P-only; only untracked
+  candidates — removing a tracked path would make restore delete it);
+  fail-closed when git can't distinguish tracked/untracked. Ref components
+  validated `[A-Za-z0-9._-]`.
+- The WIP ref mirrors the worktree TREE even when clean (a stale dirty
+  snapshot must never shadow committed work). No-op baseline = last SHIPPED
+  tree: marker ref `refs/t3/wip-pushed/<wsid>/<envid>` in origin mode
+  (written only after a successful push — never by bundle mode, or a mode
+  flip would push with a never-pushed lease), the wip blob's `treeOid` in
+  bundle mode.
+- Push = `--force-with-lease` with the marker as lease (empty = expect
+  absent), adopt-remote-and-retry-once on lease failure. Permission-shaped
+  stderr classifies BEFORE lease-shaped (git prints lease-shaped lines on
+  denials too). Permission → bundle mode, in-memory only, re-probed each
+  boot; other failures stay origin mode and surface.
+- Bundle fallback: `git bundle create <ref> --not --remotes=<remote>` →
+  blob `kind=wip`, payload `{ schemaVersion, capturedAt, refName, commitOid,
+  treeOid, bundleBase64 }`, capped by `ROAMING_WIP_BUNDLE_MAX_BYTES`
+  (contracts constant, 8 MiB); oversize skipped with a surfaced warning.
+- `roamingWipSync` defaults false — WIP reaches the project's ORIGIN HOST,
+  unlike vault data, so the pre-checked pairing-dialog row is the consent
+  (one decision, applied to both machines like Secret files). Machines
+  paired before M3 opt in via the ordinary settings row. Reactor gates
+  `roaming && roamingWipSync` per pass; statuses clear on disable.
+- Reactor triggers: 2-min interval (covers startup), settings enable,
+  `thread.turn-diff-completed`; keyed-coalesced per project; skips while
+  MERGE/REBASE/CHERRY_PICK markers exist; thread worktrees excluded by
+  construction (they live under `<baseDir>/worktrees/`, outside roots).
+- `roamingWipStatus` (per-project `{ mode, lastCapturedAt, lastPushedAt,
+  lastError }`) is reactor state merged at BOTH shell surfaces — the ws
+  subscribe point and the HTTP `/api/orchestration/shell` route (the
+  HTTP-first shell load would otherwise miss it); flag-off = empty.
+- Materialize: restore-wip runs BEFORE apply-vault; `restoreWip` request
+  flag defaults ON (pre-checked checkbox in the materialize prompt);
+  sources = origin `refs/t3/wip/<wsid>/*` (explicit fetch) then wip blobs
+  (with one on-demand mirror pull); newest committer date across
+  environments wins; skip-not-fail on dirty target / equal tree / nothing
+  found / disabled; staged-vs-unstaged is flattened on restore (checkpoint
+  semantics).
+- A completed materialization record short-circuits ONLY while its
+  targetPath still holds a git checkout AND the registered project is live;
+  otherwise materialize resets to a fresh run (2026-07-07 field bug: the
+  unconditional short-circuit returned success while materializing
+  nothing).
+- Retention: 20 local rolling history refs per (project, machine); the
+  origin holds only the newest snapshot.
+- Accepted risks: cloned-state-dir environmentId collision (WIP ref
+  ping-pong); re-install orphans one origin ref per abandoned
+  environmentId; a manual CLI commit leaves a stale dirty snapshot for up
+  to one interval tick (restore-side age notice keeps it honest).
+- Acceptance: `accept-m3.mjs` (three-project matrix: origin-refs with A
+  killed, bundle fallback end-to-end, push-failure surfacing, field-bug
+  regression) + the canonical-workflow re-run.
 
 ## Execution process
 
