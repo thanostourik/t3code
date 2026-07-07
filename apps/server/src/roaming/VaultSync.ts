@@ -173,11 +173,20 @@ const T3SYNC_TEMPLATE = `# Files that sync between YOUR machines only (never to 
 # delete a line to stop syncing it everywhere. A project can extend or veto
 # it with its own .t3sync in the repo root (e.g. ".idea/" to sync more,
 # "!.env" to keep this project's .env local).
+# Dependency and build trees (node_modules, vendor, dist, build, target,
+# .venv, __pycache__) are ALWAYS excluded — patterns here or in a project
+# .t3sync never reach into them.
 ${DEFAULT_VAULT_PATTERNS.join("\n")}
-# Dependency/build trees are full of throwaway certs and keys that would
-# otherwise match the patterns above (this is a denylist — extend it if
-# your tooling drops matches somewhere else).
-!node_modules/**
+`;
+
+/**
+ * App-owned denylist, processed LAST so it wins over any user pattern —
+ * field bug 2026-07-07: a project .t3sync line ".idea" is evaluated after
+ * the global file, so a template-resident "!node_modules/**" lost to it
+ * and a random node_modules/<pkg>/.idea got synced. Rewritten on every
+ * pass (never user-edited) so updates propagate.
+ */
+const T3SYNC_NOISE = `!node_modules/**
 !vendor/**
 !dist/**
 !build/**
@@ -185,6 +194,7 @@ ${DEFAULT_VAULT_PATTERNS.join("\n")}
 !.venv/**
 !__pycache__/**
 `;
+export const NOISE_T3SYNC_FILE_NAME = "t3sync-noise";
 
 /**
  * The defaults are not hidden machinery: they live in ONE editable file in
@@ -210,7 +220,16 @@ const ensureGlobalT3Sync = Effect.gen(function* () {
       ),
     );
   }
-  return globalPath;
+  // The noise denylist is app-owned: always rewritten to the current
+  // constant so it cannot drift or be edited into a leak.
+  const noisePath = pathService.join(config.stateDir, NOISE_T3SYNC_FILE_NAME);
+  yield* fs.makeDirectory(config.stateDir, { recursive: true }).pipe(
+    Effect.andThen(fs.writeFileString(noisePath, T3SYNC_NOISE)),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("roaming vault: could not write t3sync noise file", { cause }),
+    ),
+  );
+  return { globalPath, noisePath };
 });
 
 /**
@@ -225,7 +244,7 @@ const readT3SyncCandidates = (workspaceRoot: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
-    const globalPath = yield* ensureGlobalT3Sync;
+    const { globalPath, noisePath } = yield* ensureGlobalT3Sync;
     const projectPath = pathService.join(workspaceRoot, T3SYNC_FILE_NAME);
     const excludeFiles: string[] = [];
     if (yield* fs.exists(globalPath).pipe(Effect.orElseSucceed(() => false))) {
@@ -236,6 +255,11 @@ const readT3SyncCandidates = (workspaceRoot: string) =>
     }
     if (excludeFiles.length === 0) {
       return [];
+    }
+    // ALWAYS last: later patterns win in git's exclude engine, and the
+    // dependency-tree denylist must beat any user pattern.
+    if (yield* fs.exists(noisePath).pipe(Effect.orElseSucceed(() => false))) {
+      excludeFiles.push(noisePath);
     }
     const git = yield* GitVcsDriver;
     const result = yield* git
