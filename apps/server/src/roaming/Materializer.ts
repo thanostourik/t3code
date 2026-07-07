@@ -28,6 +28,7 @@ import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -37,7 +38,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
-import { applyVaultBundle } from "./VaultSync.ts";
+import { deliverVaultBundle } from "./VaultSync.ts";
 import { wipAppliedMarkerRefName, wipRefGlob } from "./WipSnapshots.ts";
 
 // restore-wip runs BEFORE apply-vault: its cleanliness check and the
@@ -230,6 +231,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+  const serverConfig = yield* ServerConfig.ServerConfig;
   const settings = yield* ServerSettingsService;
   const blobStore = yield* RoamingBlobStore;
   const peerMirror = yield* PeerMirror;
@@ -550,13 +552,16 @@ const make = Effect.gen(function* () {
           detail: "empty vault bundle",
         };
       }
-      const applied = yield* applyVaultBundle({
+      // The recording variant: later vault deliveries may update files this
+      // materialize wrote, as long as the user has not edited them since.
+      const applied = yield* deliverVaultBundle({
+        workspaceProjectId: record.workspaceProjectId,
         workspaceRoot: record.targetPath,
         bundle,
-        overwrite: false,
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
+        Effect.provideService(ServerConfig.ServerConfig, serverConfig),
         Effect.mapError(internalError("vault apply failed")),
       );
       if (applied.skipped.length > 0) {
@@ -567,7 +572,7 @@ const make = Effect.gen(function* () {
       }
       return {
         record: next,
-        detail: `applied ${applied.applied.length} secret file(s)`,
+        detail: `applied ${applied.written.length} secret file(s)`,
       };
     });
 
