@@ -23,7 +23,7 @@ import * as ServerConfig from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { GitVcsDriver, layer as GitVcsDriverLayer } from "../vcs/GitVcsDriver.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
-import { applyVaultBundle, captureVaultForProject } from "./VaultSync.ts";
+import { applyVaultBundle, captureVaultForProject, deliverVaultBundle } from "./VaultSync.ts";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("env-local");
 const REMOTE_ENVIRONMENT_ID = EnvironmentId.make("env-remote");
@@ -237,6 +237,63 @@ testLayer("VaultSync", (it) => {
       assert.include(paths, ".idea/workspace.xml");
       // Gitignored content NOT listed in .t3sync stays local.
       assert.notInclude(paths, ".cache/junk.bin");
+    }),
+  );
+
+  it.effect("delivery writes, updates untouched files, never overwrites local edits", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-deliver");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-deliver-" });
+
+      const bundleOf = (files: ReadonlyArray<readonly [string, string]>) => ({
+        schemaVersion: 1,
+        capturedAt: "2026-07-07T00:00:00.000Z",
+        files: files.map(([path, content]) => ({
+          path,
+          sha256: NodeCrypto.createHash("sha256").update(content).digest("hex"),
+          contentBase64: Buffer.from(content).toString("base64"),
+        })),
+      });
+
+      // Arrival on a checkout that never had the files: both are written.
+      const first = yield* deliverVaultBundle({
+        workspaceProjectId,
+        workspaceRoot,
+        bundle: bundleOf([
+          [".env", "SECRET=v1\n"],
+          [".idea/workspace.xml", "<project v='1'/>\n"],
+        ]),
+      });
+      assert.deepEqual(first.written.sort(), [".env", ".idea/workspace.xml"]);
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(workspaceRoot, ".env")),
+        "SECRET=v1\n",
+      );
+
+      // The user edits .env locally; .idea stays as delivered.
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".env"), "SECRET=mine\n");
+
+      const second = yield* deliverVaultBundle({
+        workspaceProjectId,
+        workspaceRoot,
+        bundle: bundleOf([
+          [".env", "SECRET=v2\n"],
+          [".idea/workspace.xml", "<project v='2'/>\n"],
+        ]),
+      });
+      // Untouched-since-apply file updates; the local edit is never clobbered.
+      assert.deepEqual(second.written, [".idea/workspace.xml"]);
+      assert.deepEqual(second.skipped, [".env"]);
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(workspaceRoot, ".env")),
+        "SECRET=mine\n",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(workspaceRoot, ".idea", "workspace.xml")),
+        "<project v='2'/>\n",
+      );
     }),
   );
 
