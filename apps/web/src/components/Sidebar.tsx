@@ -132,6 +132,7 @@ import {
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
   useThreadShells,
+  useEnvironmentRoamingWipStatus,
   useRoamingProjects,
   useRoamingMaterializations,
 } from "../state/entities";
@@ -2236,6 +2237,58 @@ const joinTargetPath = (baseDirectory: string, dirName: string): string => {
  * path is a one-off `targetPath` for THIS materialize — the default folder
  * setting is never modified from here.
  */
+/**
+ * Per-project sync health (M3.6): silent while everything is fine, a dot +
+ * tooltip when the user should know something — recent activity, a blocked
+ * apply (changes on both machines), or an error. Data is the wip status the
+ * server already streams; no new concepts, no "roaming" wording.
+ */
+function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undefined }) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const wipStatus = useEnvironmentRoamingWipStatus(primaryEnvironmentId);
+  const entry = props.workspaceProjectId
+    ? wipStatus.find((candidate) => candidate.workspaceProjectId === props.workspaceProjectId)
+    : undefined;
+  if (!entry) return null;
+
+  const recentMs = 2 * 60_000;
+  const now = Date.now();
+  const recentlyActive =
+    (entry.lastPushedAt && now - Date.parse(entry.lastPushedAt) < recentMs) ||
+    (entry.lastAppliedAt && now - Date.parse(entry.lastAppliedAt) < recentMs);
+
+  let dotClass: string | null = null;
+  let label: string | null = null;
+  if (entry.lastError) {
+    dotClass = "bg-destructive";
+    label = `Sync problem: ${entry.lastError}`;
+  } else if (entry.blockedReason) {
+    dotClass = "bg-amber-500";
+    label =
+      "Sync waiting: this machine and the other one both have changes — commit or discard on one side to continue";
+  } else if (recentlyActive) {
+    dotClass = "bg-emerald-500";
+    label = entry.lastAppliedAt
+      ? `Synced — received ${formatRelativeTimeLabel(entry.lastAppliedAt)}`
+      : `Synced — sent ${formatRelativeTimeLabel(entry.lastPushedAt ?? "")}`;
+  }
+  if (dotClass === null || label === null) return null;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            aria-label={label}
+            className={`inline-flex size-2 shrink-0 rounded-full ${dotClass}`}
+          />
+        }
+      />
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
 function useMaterialize() {
   const defaultBaseDirectory = usePrimarySettings((settings) => settings.addProjectBaseDirectory);
   const [pending, setPending] = useState<MaterializeTarget | null>(null);
@@ -4848,6 +4901,7 @@ export default function Sidebar() {
                               <FolderIcon className="size-4 shrink-0" />
                             )}
                             <span className="min-w-0 flex-1 truncate text-sm">{item.label}</span>
+                            {project ? <ProjectSyncIndicator workspaceProjectId={project.memberProjects.find((member) => member.workspaceProjectId != null)?.workspaceProjectId} /> : null}
                             {project ? <MaterializeProjectButton project={project} /> : null}
                             {project ? (
                               <Button
