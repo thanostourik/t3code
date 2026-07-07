@@ -97,8 +97,6 @@ export function useEnvironmentRoamingWipStatus(
   );
 }
 
-const EMPTY_WIP_STATUS_ATOM = Atom.make((): ReadonlyArray<RoamingWipStatusEntry> => []);
-
 export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useAtomValue(environmentServerConfigsAtom);
 }
