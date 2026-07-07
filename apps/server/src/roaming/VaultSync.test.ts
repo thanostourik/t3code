@@ -225,9 +225,6 @@ testLayer("VaultSync", (it) => {
       );
       yield* fs.makeDirectory(pathService.join(workspaceRoot, ".cache"), { recursive: true });
       yield* fs.writeFileString(pathService.join(workspaceRoot, ".cache", "junk.bin"), "junk\n");
-      // Field bug 2026-07-07: an unanchored project pattern must NOT reach
-      // into dependency trees — the global file's `!node_modules/**`
-      // exclusion is subtracted after the include pass, so it wins.
       yield* fs.makeDirectory(pathService.join(workspaceRoot, "node_modules", "pkg", ".idea"), {
         recursive: true,
       });
@@ -235,9 +232,11 @@ testLayer("VaultSync", (it) => {
         pathService.join(workspaceRoot, "node_modules", "pkg", ".idea", "junk.xml"),
         "junk\n",
       );
-      // gitignore syntax, per project, in the repo root — like .gitignore.
-      // Unanchored ".idea" (the obvious thing to write) matches any depth.
-      yield* fs.writeFileString(pathService.join(workspaceRoot, ".t3sync"), ".idea\n");
+      // Pure .gitignore: a project line is read AFTER the global file, so it
+      // overrides the global `!node_modules/**`. `/.idea` scopes to the repo
+      // root (the gitignore way to avoid the node_modules copy); a bare
+      // `.idea` would match at any depth, exactly like .gitignore.
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".t3sync"), "/.idea\n");
       yield* writeRegistry({ workspaceProjectId, workspaceRoot });
 
       const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
@@ -248,8 +247,42 @@ testLayer("VaultSync", (it) => {
       assert.include(paths, ".idea/workspace.xml");
       // Gitignored content NOT listed in .t3sync stays local.
       assert.notInclude(paths, ".cache/junk.bin");
-      // The denylist beats the user's unanchored pattern in node_modules.
+      // Root-anchored `/.idea` does not reach into node_modules.
       assert.notInclude(paths, "node_modules/pkg/.idea/junk.xml");
+    }),
+  );
+
+  it.effect("pure gitignore: a project line overrides a global `!` exclusion", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-override");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-override-" });
+      yield* initGit(workspaceRoot);
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".gitignore"), "node_modules/\n");
+      yield* git(workspaceRoot, ["add", ".gitignore"]);
+      yield* git(workspaceRoot, ["commit", "-m", "ignore node_modules"]);
+      // A tool config the user genuinely wants synced, living under a tree
+      // the global file excludes by default.
+      yield* fs.makeDirectory(pathService.join(workspaceRoot, "node_modules", "tool"), {
+        recursive: true,
+      });
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, "node_modules", "tool", "config.json"),
+        "{}\n",
+      );
+      // The project re-includes it — read after the global `!node_modules`,
+      // so it wins. Per-project override works, no special-casing.
+      yield* fs.writeFileString(
+        pathService.join(workspaceRoot, ".t3sync"),
+        "node_modules/tool/config.json\n",
+      );
+      yield* writeRegistry({ workspaceProjectId, workspaceRoot });
+
+      const result = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(result.status, "written");
+      const paths = (yield* readVaultBundle(workspaceProjectId)).files.map((file) => file.path);
+      assert.include(paths, "node_modules/tool/config.json");
     }),
   );
 
