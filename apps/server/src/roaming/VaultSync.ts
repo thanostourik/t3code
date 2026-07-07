@@ -25,6 +25,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
@@ -65,6 +66,9 @@ const decodeRegistryPayloadJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RoamingRegistryPayload),
 );
 const decodeVaultBundleJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
+const AppliedRecordJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
+const decodeAppliedRecord = Schema.decodeUnknownEffect(AppliedRecordJson);
+const encodeAppliedRecord = Schema.encodeEffect(AppliedRecordJson);
 const encodeVaultBundleJson = Schema.encodeEffect(Schema.fromJsonString(RoamingVaultBundle));
 
 const normalizeRelativePath = (rawPath: string): string | null => {
@@ -345,6 +349,123 @@ function sameVaultFileSet(
   return leftIds.every((value, index) => value === rightIds[index]);
 }
 
+// ── Delivery (M3.6): vault blobs apply on arrival, not only at materialize ─
+
+/**
+ * Per-file record of what THIS machine last applied from the mirrored vault
+ * (sha256 by repo-relative path), kept under <stateDir>/vault-applied/. It
+ * is what lets delivery UPDATE a file the user has not touched since our
+ * last apply while never overwriting genuine local edits.
+ */
+const appliedRecordPath = (workspaceProjectId: WorkspaceProjectId) =>
+  Effect.gen(function* () {
+    const pathService = yield* Path.Path;
+    const config = yield* ServerConfig.ServerConfig;
+    return pathService.join(config.stateDir, "vault-applied", `${workspaceProjectId}.json`);
+  });
+
+const readAppliedRecord = (workspaceProjectId: WorkspaceProjectId) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const recordPath = yield* appliedRecordPath(workspaceProjectId);
+    const raw = yield* fs.readFileString(recordPath).pipe(Effect.orElseSucceed(() => null));
+    if (raw === null) {
+      return {} as Record<string, string>;
+    }
+    return yield* decodeAppliedRecord(raw).pipe(
+      Effect.orElseSucceed(() => ({}) as Record<string, string>),
+    );
+  });
+
+const writeAppliedRecord = (
+  workspaceProjectId: WorkspaceProjectId,
+  record: Record<string, string>,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const recordPath = yield* appliedRecordPath(workspaceProjectId);
+    const payload = yield* encodeAppliedRecord(record).pipe(Effect.orElseSucceed(() => null));
+    if (payload === null) {
+      return;
+    }
+    yield* fs.makeDirectory(pathService.dirname(recordPath), { recursive: true }).pipe(
+      Effect.andThen(fs.writeFileString(recordPath, payload)),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("roaming vault: applied-record write failed", { cause }),
+      ),
+    );
+  });
+
+/**
+ * Apply an arrived vault bundle to a live checkout. Per file: missing →
+ * write; identical to incoming → align the record; identical to what WE
+ * last applied (user untouched since) → update; anything else is a local
+ * edit — never overwritten, surfaced as skipped. Files the peer dropped
+ * are NOT deleted locally (v1: the overwritten mirrored bundle may hold
+ * the only other copy).
+ */
+export const deliverVaultBundle = Effect.fn("VaultSync.deliverVaultBundle")(function* (input: {
+  readonly workspaceProjectId: WorkspaceProjectId;
+  readonly workspaceRoot: string;
+  readonly bundle: RoamingVaultBundle;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const applied = yield* readAppliedRecord(input.workspaceProjectId);
+  const next: Record<string, string> = { ...applied };
+  const written: string[] = [];
+  const skipped: string[] = [];
+
+  for (const entry of input.bundle.files) {
+    const relativePath = yield* normalizeRelativePathOrFail(entry.path);
+    const absolutePath = pathService.resolve(input.workspaceRoot, relativePath);
+    const relativeToRoot = pathService.relative(input.workspaceRoot, absolutePath);
+    if (
+      relativeToRoot === ".." ||
+      relativeToRoot.startsWith(`..${pathService.sep}`) ||
+      pathService.isAbsolute(relativeToRoot)
+    ) {
+      return yield* new VaultPathEscapeError({ path: entry.path });
+    }
+    const existing = yield* fs.readFile(absolutePath).pipe(Effect.orElseSucceed(() => null));
+    const existingHash =
+      existing === null ? null : NodeCrypto.createHash("sha256").update(existing).digest("hex");
+
+    if (existingHash === entry.sha256) {
+      next[relativePath] = entry.sha256;
+      continue;
+    }
+    if (existingHash !== null && existingHash !== applied[relativePath]) {
+      // Local edit since our last apply — the user's copy wins.
+      skipped.push(relativePath);
+      continue;
+    }
+    const singleFile = { ...input.bundle, files: [entry] };
+    const result = yield* applyVaultBundle({
+      workspaceRoot: input.workspaceRoot,
+      bundle: singleFile,
+      overwrite: existingHash !== null,
+    });
+    if (result.applied.length > 0) {
+      next[relativePath] = entry.sha256;
+      written.push(relativePath);
+    } else {
+      skipped.push(relativePath);
+    }
+  }
+
+  yield* writeAppliedRecord(input.workspaceProjectId, next);
+  if (written.length > 0 || skipped.length > 0) {
+    yield* Effect.logInfo("roaming vault: delivered bundle", {
+      workspaceProjectId: input.workspaceProjectId,
+      written,
+      skipped,
+    });
+  }
+  return { written, skipped };
+});
+
 export const captureVaultForProject = Effect.fn("VaultSync.captureVaultForProject")(function* (
   target: VaultTarget,
 ) {
@@ -488,6 +609,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsService;
   const watcherScopes = yield* Ref.make(new Map<string, Scope.Scope>());
   const serverConfig = yield* ServerConfig.ServerConfig;
+  const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const provideVaultDeps = <A, E>(
     effect: Effect.Effect<
       A,
@@ -673,6 +795,44 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  // Delivery half (M3.6): an arrived vault bundle applies to the linked
+  // checkout instead of waiting for a materialize that already happened.
+  // Gated on `roaming` only — the CAPTURING machine's consent decided what
+  // is in the bundle; the receiver merely lands its own mirrored data.
+  const deliverArrivedVault = (workspaceProjectId: WorkspaceProjectId) =>
+    Effect.gen(function* () {
+      const settings = yield* serverSettings.getSettings;
+      if (!settings.roaming) {
+        return;
+      }
+      const ownEnvironmentId = yield* serverEnvironment.getEnvironmentId;
+      const target = yield* findTarget(workspaceProjectId);
+      if (target === null) {
+        return;
+      }
+      const blob = yield* blobStore.get({ kind: "vault", key: workspaceProjectId });
+      if (blob === null || blob.authorEnvironmentId === ownEnvironmentId) {
+        return;
+      }
+      const bundle = yield* decodeVaultBundleJson(blob.payload).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      if (bundle === null) {
+        return;
+      }
+      yield* provideVaultDeps(
+        deliverVaultBundle({
+          workspaceProjectId,
+          workspaceRoot: target.workspaceRoot,
+          bundle,
+        }),
+      );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("roaming vault: delivery failed", { workspaceProjectId, cause }),
+      ),
+    );
+
   const start: VaultSync["Service"]["start"] = () =>
     Effect.gen(function* () {
       yield* Effect.addFinalizer(() => closeAllWatchers);
@@ -680,6 +840,17 @@ const make = Effect.gen(function* () {
       if (yield* Ref.get(enabledRef)) {
         yield* rescanAll();
       }
+      // Startup catch-up: bundles that arrived while this machine was off.
+      yield* Effect.forkScoped(
+        listTargets.pipe(
+          Effect.flatMap((targets) =>
+            Effect.forEach(targets, (target) => deliverArrivedVault(target.workspaceProjectId), {
+              discard: true,
+            }),
+          ),
+          Effect.ignoreCause({ log: true }),
+        ),
+      );
 
       yield* Effect.forkScoped(
         serverSettings.streamChanges.pipe(
@@ -704,7 +875,11 @@ const make = Effect.gen(function* () {
           return yield* Effect.forever(
             PubSub.take(changes).pipe(
               Effect.flatMap((record) =>
-                record.kind === "registry" ? rescanProject(record.workspaceProjectId) : Effect.void,
+                record.kind === "registry"
+                  ? rescanProject(record.workspaceProjectId)
+                  : record.kind === "vault"
+                    ? deliverArrivedVault(record.workspaceProjectId)
+                    : Effect.void,
               ),
             ),
           );
