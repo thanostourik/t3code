@@ -67,7 +67,7 @@ const WIP_INTERVAL = Duration.minutes(2);
 const WATCH_DEBOUNCE = Duration.seconds(5);
 const SHUTDOWN_SNAPSHOT_TIMEOUT = Duration.seconds(10);
 
-const WATCH_NOISE = /(^|\/)(\.git|node_modules)(\/|$)/;
+const WATCH_NOISE = /(^|\/)(\.git|node_modules|dist|build|target|out|\.venv|__pycache__)(\/|$)/;
 
 /**
  * Recursive filesystem events for a project root (the Dropbox model: watch,
@@ -295,6 +295,8 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
           .slice(0, 3)
           .map((entry) => `${entry.path} (${Math.round(entry.bytes / (1024 * 1024))} MB)`)
           .join(", ")}${oversize.length > 3 ? ` and ${oversize.length - 3} more` : ""}`;
+  const withOversize = (message: string) =>
+    oversizeWarning === null ? message : `${message}; ${oversizeWarning}`;
 
   const markerTree = yield* resolveOid(cwd, `${markerRef}^{tree}`);
   const shippedTree =
@@ -338,7 +340,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     return {
       _tag: "done",
       nextMode: mode,
-      entry: { ...entryBase, mode, lastError: "no git remote configured" },
+      entry: { ...entryBase, mode, lastError: withOversize("no git remote configured") },
     } as WipPassOutcome;
   }
 
@@ -359,7 +361,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         return {
           ...entryBase,
           mode: "bundle",
-          lastError: `bundle create failed: ${bundled.stderr.trim().slice(0, 200)}`,
+          lastError: withOversize(`bundle create failed: ${bundled.stderr.trim().slice(0, 200)}`),
         } satisfies RoamingWipStatusEntry;
       }
       const stat = yield* fs.stat(bundlePath);
@@ -372,7 +374,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         return {
           ...entryBase,
           mode: "bundle",
-          lastError: "wip bundle exceeds size cap",
+          lastError: withOversize("wip bundle exceeds size cap"),
         } satisfies RoamingWipStatusEntry;
       }
       // The origin→bundle flip captures before knowing the blob baseline:
@@ -475,7 +477,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     entry: {
       ...entryBase,
       mode: "origin-refs",
-      lastError: `push failed: ${pushResult.stderr.trim().slice(0, 200)}`,
+      lastError: withOversize(`push failed: ${pushResult.stderr.trim().slice(0, 200)}`),
     },
   } as WipPassOutcome;
 });
@@ -930,7 +932,22 @@ const make = Effect.gen(function* () {
       yield* Stream.runForEach(
         watchTreeEvents(target.workspaceRoot).pipe(Stream.debounce(WATCH_DEBOUNCE)),
         () => worker.enqueue(target.workspaceProjectId, target),
-      ).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
+      ).pipe(
+        Effect.ignoreCause({ log: true }),
+        // A watcher whose stream ends (error, unsupported platform) evicts
+        // itself so the next scan re-installs instead of trusting a corpse.
+        Effect.ensuring(
+          Ref.update(watcherScopes, (scopes) => {
+            if (scopes.get(target.workspaceProjectId) !== scope) {
+              return scopes;
+            }
+            const next = new Map(scopes);
+            next.delete(target.workspaceProjectId);
+            return next;
+          }),
+        ),
+        Effect.forkIn(scope),
+      );
     });
 
   const pruneStatuses = (targets: ReadonlyArray<WipTarget>) =>
@@ -1041,7 +1058,10 @@ const make = Effect.gen(function* () {
                             Effect.timeout(SHUTDOWN_SNAPSHOT_TIMEOUT),
                           );
                         }).pipe(Effect.ignore),
-                      { discard: true },
+                      // Concurrent: N projects must not stack N×10s of
+                      // shutdown delay — SIGKILL arrives first and the tail
+                      // of the list would lose its final snapshot.
+                      { concurrency: 4, discard: true },
                     ),
                   ),
                 )
