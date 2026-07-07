@@ -56,6 +56,7 @@ import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { buildCandidatePaths, listTrackedCandidates } from "./VaultSync.ts";
 import {
   captureWipSnapshot,
+  readBasedOn,
   resolveOid,
   wipAppliedMarkerRefName,
   wipPushedMarkerRefName,
@@ -675,14 +676,25 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     return { _tag: "skipped" } as WipApplyOutcome;
   }
 
-  // Local-edit safety: the worktree must be provably free of its own work.
+  // Local-edit safety: the worktree must be provably free of its own work —
+  // OR (M3.6) the incoming snapshot must have been BUILT ON exactly this
+  // worktree state: its T3-Based-On snapshot's tree equals the current
+  // tree, i.e. the peer materialized/applied this machine's work, edited
+  // on top, and this machine has not moved since. That is a pure
+  // fast-forward (the incoming tree contains everything here), which is
+  // what lets laptop edits flow back to a desktop still holding the same
+  // uncommitted work. Edited-since stays blocked (M5 owns divergence).
   const headTree = yield* resolveOid(cwd, "HEAD^{tree}");
   const appliedTree = yield* resolveOid(cwd, `${appliedMarker}^{tree}`);
   if (worktreeTree !== headTree && (appliedTree === null || worktreeTree !== appliedTree)) {
-    return {
-      _tag: "blocked",
-      reason: "local changes present; newer work from the other machine not applied",
-    } as WipApplyOutcome;
+    const basedOn = yield* readBasedOn(cwd, newest.refName);
+    const basedOnTree = basedOn === null ? null : yield* resolveOid(cwd, `${basedOn}^{tree}`);
+    if (basedOnTree === null || basedOnTree !== worktreeTree) {
+      return {
+        _tag: "blocked",
+        reason: "local changes present; newer work from the other machine not applied",
+      } as WipApplyOutcome;
+    }
   }
 
   // Staleness: never resurrect state older than what this checkout has.
