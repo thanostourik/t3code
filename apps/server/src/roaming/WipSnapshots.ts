@@ -61,6 +61,15 @@ export const wipHistoryRefPrefix = (
 export const wipRefGlob = (workspaceProjectId: WorkspaceProjectId) =>
   refSafe(workspaceProjectId).pipe(Effect.map((id) => `refs/t3/wip/${id}/*`));
 
+/**
+ * Local-only marker: the snapshot auto-apply last fast-forwarded this
+ * checkout to. A worktree that still matches this tree has no local edits
+ * of its own, so a newer peer snapshot may apply without ever risking a
+ * silent merge.
+ */
+export const wipAppliedMarkerRefName = (workspaceProjectId: WorkspaceProjectId) =>
+  refSafe(workspaceProjectId).pipe(Effect.map((id) => `refs/t3/wip-applied/${id}`));
+
 const COMMIT_ENV_IDENTITY = {
   GIT_AUTHOR_NAME: "T3 Code",
   GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
@@ -149,14 +158,19 @@ const writeHistorySlot = (cwd: string, historyPrefix: string, commitOid: string)
     });
   });
 
-export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(function* (
-  input: CaptureWipInput,
-) {
+/**
+ * The worktree's tree OID in WIP-normalized space (vault set subtracted),
+ * computed on a throwaway temp index — no refs move, nothing is committed.
+ * This is the value every WIP comparison (no-op detection, auto-apply
+ * safety) is defined over.
+ */
+export const writeWorktreeTree = Effect.fn("WipSnapshots.writeWorktreeTree")(function* (input: {
+  readonly cwd: string;
+  readonly vaultExcludePaths: ReadonlyArray<string>;
+}) {
   const git = yield* GitVcsDriver;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const refName = yield* wipRefName(input.workspaceProjectId, input.environmentId);
-  const historyPrefix = yield* wipHistoryRefPrefix(input.workspaceProjectId, input.environmentId);
 
   const commonDirResult = yield* git.execute({
     operation: "WipSnapshots.resolveGitCommonDir",
@@ -213,32 +227,45 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
       args: ["write-tree"],
       env: commitEnv,
     });
-    const treeOid = writeTreeResult.stdout.trim();
-    if (input.skipIfTreeOid != null && treeOid === input.skipIfTreeOid) {
-      return null;
-    }
-
-    const commitTreeResult = yield* git.execute({
-      operation: "WipSnapshots.commitTree",
-      cwd: input.cwd,
-      args: [
-        "commit-tree",
-        treeOid,
-        ...(headOid !== null ? ["-p", headOid] : []),
-        "-m",
-        "t3 wip snapshot",
-      ],
-      env: commitEnv,
-    });
-    const commitOid = commitTreeResult.stdout.trim();
-
-    yield* git.execute({
-      operation: "WipSnapshots.updateWipRef",
-      cwd: input.cwd,
-      args: ["update-ref", refName, commitOid],
-    });
-    yield* writeHistorySlot(input.cwd, historyPrefix, commitOid);
-
-    return { commitOid, treeOid, refName } satisfies CaptureWipResult;
+    return { treeOid: writeTreeResult.stdout.trim(), headOid };
   }).pipe(Effect.ensuring(cleanupTempIndex));
+});
+
+export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(function* (
+  input: CaptureWipInput,
+) {
+  const git = yield* GitVcsDriver;
+  const refName = yield* wipRefName(input.workspaceProjectId, input.environmentId);
+  const historyPrefix = yield* wipHistoryRefPrefix(input.workspaceProjectId, input.environmentId);
+
+  const { treeOid, headOid } = yield* writeWorktreeTree({
+    cwd: input.cwd,
+    vaultExcludePaths: input.vaultExcludePaths,
+  });
+  if (input.skipIfTreeOid != null && treeOid === input.skipIfTreeOid) {
+    return null;
+  }
+
+  const commitTreeResult = yield* git.execute({
+    operation: "WipSnapshots.commitTree",
+    cwd: input.cwd,
+    args: [
+      "commit-tree",
+      treeOid,
+      ...(headOid !== null ? ["-p", headOid] : []),
+      "-m",
+      "t3 wip snapshot",
+    ],
+    env: { ...process.env, ...COMMIT_ENV_IDENTITY },
+  });
+  const commitOid = commitTreeResult.stdout.trim();
+
+  yield* git.execute({
+    operation: "WipSnapshots.updateWipRef",
+    cwd: input.cwd,
+    args: ["update-ref", refName, commitOid],
+  });
+  yield* writeHistorySlot(input.cwd, historyPrefix, commitOid);
+
+  return { commitOid, treeOid, refName } satisfies CaptureWipResult;
 });
