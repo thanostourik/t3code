@@ -700,3 +700,80 @@ Deliberately left for later, stated to the user: uncommitted/unstaged work
 does not sync — that is milestone M4 (WIP snapshots), not built; today's
 materialize is clone + secret files. The desktop's own duplicate
 authorized-client rows are upstream behavior, left alone by decision.
+
+---
+
+## M3 — WIP snapshots (DONE 2026-07-07, PRs #32–#37)
+
+### Analysis pass (2026-07-06, PR #32)
+
+Codex (gpt-5.5) read the codebase; deviations from the plan text, verified
+and independently reviewed (opus), all folded into the doc before code:
+
+1. `captureCheckpoint`'s ref name was already parameterized — but capture
+   was still reimplemented in `roaming/` because checkpoint commits are
+   parentless and a spike showed `git bundle --not --remotes=origin` emits
+   FAT whole-tree bundles for parentless commits (bundle thinning is
+   commit-ancestry-based). With parent=HEAD the same bundle was 385 bytes
+   with HEAD as a satisfied prerequisite. Parents also give M5 divergence
+   its common ancestor.
+2. The planned "shared semaphore with CheckpointStore" was dropped: no such
+   lock exists to share, capture is worktree-read-only (temp index), and
+   the only mutating op (restore) runs on fresh clones at materialize time.
+3. No global dirty-transition stream or idle/pre-sleep hooks exist;
+   triggers became turn-diff-completed + interval + settings-enable.
+4. Consent deviation: WIP content reaches the ORIGIN HOST (unlike vault
+   data, which never leaves the user's machines) — so `roamingWipSync`
+   defaults false and the pre-checked pairing row is the consent.
+5. The review round added: vault-set subtraction from WIP capture (an
+   include override can name a non-gitignored file; vault content is
+   P2P-only by design), restore-wip reordered before apply-vault (its
+   cleanliness check runs on the pristine clone), and the WIP-ref-mirrors-
+   the-tree-even-when-clean rule (a stale dirty snapshot on the origin
+   would otherwise resurrect committed work as phantom dirt on restore).
+
+### Build (PRs #33–#36)
+
+Contracts (#33, codex-implemented from spec, reviewed line-by-line);
+WipSnapshotReactor + WipSnapshots (#34, authored in-session after two
+consecutive codex hangs — high-effort opus review found the bundle-mode
+blob churn (fixed: shipped-tree no-op baseline), permission-before-lease
+classification, and stale-status clearing); Materializer restore-wip +
+completed-record revalidation (#35, review verdict merge-as-is — traced
+the duplicate-project concern to a non-issue since registerProject keys on
+the stable workspaceProjectId); UI (#36 — pairing row, settings row,
+push-failure list, materialize checkbox; review confirmed no canonical-
+workflow violations).
+
+### Field bug fixed en route (2026-07-07, user report)
+
+Materialize → delete project from the app → delete files → materialize
+again returned a success toast while doing nothing: the completed
+`roaming_materializations` record short-circuited unconditionally (an M2
+"accepted" constraint that real use disproved); only wiping `~/.t3-fork`
+recovered. Fix in #35: completed records revalidate (targetPath has .git
+AND linked project live) before short-circuiting. Regression-tested at
+unit and harness level.
+
+### Acceptance (2026-07-07)
+
+`accept-m2.5.mjs` (canonical workflow: pair once → live remote thread on
+the peer → kill peer → materialize with secrets) re-ran green on the new
+code. `accept-m3.mjs`, three projects on a fresh harness:
+
+- P1 (healthy origin): dirty tree + untracked file captured within one
+  interval tick, pushed as `refs/t3/wip/<wsid>/<envid>` with parent=HEAD,
+  `.env` EXCLUDED from the snapshot tree; A SIGKILLed; materialize on B
+  restored the dirty tree from the origin's hidden refs and the `.env`
+  from the vault.
+- P2 (pre-receive deny hook): first push flipped the project to bundle
+  mode; the wip blob mirrored to B; materialize on B (A still dead)
+  restored from the bundle.
+- P3 (origin removed after setup): push failure surfaced as
+  `roamingWipStatus.lastError` over the HTTP shell snapshot (that route
+  gained the reactor merge in #37 — the ws-only merge would have missed
+  the HTTP-first shell load).
+- Field-bug regression: deleting the materialized files and re-running
+  materialize re-cloned and re-restored for real.
+
+All nine checks passed (M3-EXIT:0).
