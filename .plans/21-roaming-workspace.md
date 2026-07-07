@@ -39,11 +39,24 @@ machine's projects are visible but dead.
 > M0 harness: `accept-m3.mjs` (origin-refs path with A killed, bundle
 > fallback end-to-end, push failures surfaced, field-bug regression) plus
 > the canonical-workflow re-run (`accept-m2.5.mjs`). Materialize now =
-> clone + WIP snapshot + secret files + registration. **NEXT UP: M4
-> (bootstrap recipes)** — its analysis pass must scope honest limits (v1
-> targets scriptable setups; capture-what-happened over guaranteed-boot).
-> M2.5 (unified pairing) DONE 2026-07-06 (PRs #19–#29+; field-hardening
-> narrative in the history file).
+> clone + WIP snapshot + secret files + registration. **NEXT UP: M3.5
+> (sync completion — field-driven, inserted 2026-07-07 by user directive
+> after real two-machine use):** M3 shipped capture without delivery.
+> Scope: (1) AUTO-APPLY — each machine fetches the project's WIP refs and
+> applies a newer other-machine snapshot automatically when the local tree
+> is clean or exactly at the last-applied snapshot; a locally-edited tree
+> is NEVER touched (notice instead; diff-and-choose stays M5); (2) instant
+> capture via filesystem watch (~seconds, 2-min sweep as fallback) + final
+> snapshot on graceful shutdown; (3) `.t3sync` — per-project repo-root
+> file, gitignore syntax: listed gitignored paths (e.g. `.idea/`) travel
+> over the machine-to-machine channel; (4) origin-mode size guard for huge
+> untracked files; (5) settings-row consent is per-machine (field trap:
+> pre-M3 pairings must enable WIP on BOTH machines) — fix copy, propagate
+> properly. Field findings recorded in the history file (tracked `.idea`
+> travels via git regardless of .gitignore; no apply path existed outside
+> materialize). Then M4 (bootstrap recipes; analysis pass must scope
+> honest limits — v1 targets scriptable setups). M2.5 DONE 2026-07-06
+> (PRs #19–#29+).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -634,6 +647,7 @@ load-bearing assumptions are cheap to verify before building on them.
 | **M2 — Vault + materialize + product-model UI** *(shipped with a deviation: pairing was built as a standalone "Machine sync" flow, so the live-remote state never became reachable — see the history file; corrected in M2.5)* | Steps 2 + 3, plus the 2026-07-05 product model: pairing sync-options dialog (opt-in + secrets toggle), automatic registration of all projects on pairing/creation, and the merged single project list (local / live-remote / offline-available states) replacing M1's sidebar section. | One action takes instance B from empty to a registered checkout with vault files applied while A is offline (using B's mirrored copy); a concurrent vault edit on both sides surfaces as a conflict, not a merge; the desktop's projects appear in the laptop's single project list with no separate section, and materializing a project without synced secrets succeeds with an honest "no secret files synced" notice. |
 | **M2.5 — Unified pairing (corrective)** | Fold M2's standalone "Machine sync" pairing into the existing pairing/thin-client flow, per the canonical workflow: one pairing code establishes the live remote attach (client session + saved remote environment) AND the machine-to-machine mirror credential in the same handshake; the sync-options step renders inside that flow; delete the separate Machine sync section and pair dialog (the secrets toggle survives as an ordinary settings row). The handshake sits behind one peer-introduction seam (manual URL+code today; T3 Cloud/relay discovery later — see decisions log) so cloud pairing lands as a new producer, not a redesign. | A single pairing action on real or harness instances makes the peer's projects appear **live** in the one list — opening one runs a conversation on the peer — with registry and vault mirrored silently behind it; killing the peer flips the same rows to offline + Materialize; at no point does the UI show a second pairing flow or any "sync"/"roaming" concept. The canonical workflow (steps 1–4) demonstrated end to end. |
 | **M3 — WIP snapshots** | Step 5 (capture + transport; restore already lands inside materialize). Adds the "Work in progress" row to the sync-options step of the one pairing flow (default on, subject to the controlled-origin guard). | Dirty tree on instance A appears on instance B via materialize with A's process killed (origin-refs path); push failures surfaced in UI; bundle fallback covered by a harness test. Canonical workflow re-run. |
+| **M3.5 — Sync completion (field-driven)** | Delivery + freshness for step 5, per the 2026-07-07 field session: auto-apply of newer other-machine snapshots onto clean/strictly-behind checkouts (applied-marker ref `refs/t3/wip-applied/<wsid>`; locally-edited trees are never touched — notice only); filesystem-watch capture (seconds, not minutes; 2-min sweep as fallback); graceful-shutdown snapshot; `.t3sync` per-project include file (gitignore syntax) carrying gitignored paths like `.idea/` over the machine-to-machine channel; origin-mode size guard; per-machine consent copy/propagation fix. | Create a file on machine A → it appears on machine B's clean checkout within seconds, no user action; a locally-edited checkout on B is never overwritten and surfaces a notice; `.idea/` listed in `.t3sync` round-trips A→B while staying out of the origin; an oversized untracked file is skipped with a surfaced notice, never pushed. Canonical workflow re-run. |
 | **M4 — Bootstrap recipes** | Step 4. | First materialize triggers an agent setup thread that writes a recipe; second materialize replays it; a broken recipe escalates to an agent turn. Canonical workflow re-run. |
 | **M5 — Takeover + divergence** | Step 6. | Takeover applies newest snapshot and moves the lease; two-sided dirty divergence shows the diff-and-choose screen; the losing side remains recoverable as a ref. Canonical workflow re-run. |
 | **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options step of the one pairing flow. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. Canonical workflow re-run. |
