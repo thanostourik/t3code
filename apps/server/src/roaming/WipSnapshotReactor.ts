@@ -19,7 +19,6 @@ import {
   CheckpointRef,
   EnvironmentId,
   ROAMING_WIP_BUNDLE_MAX_BYTES,
-  RoamingVaultBundle,
   RoamingWipPayload,
   type RoamingWipStatusEntry,
   type WorkspaceProjectId,
@@ -47,7 +46,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
-import { applyVaultBundle, buildCandidatePaths, listTrackedCandidates } from "./VaultSync.ts";
+import { buildCandidatePaths, listTrackedCandidates } from "./VaultSync.ts";
 import {
   captureWipSnapshot,
   resolveOid,
@@ -394,8 +393,6 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   } as WipPassOutcome;
 });
 
-const decodeVaultBundleJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
-
 const committerUnix = (cwd: string, spec: string) =>
   Effect.gen(function* () {
     const git = yield* GitVcsDriver;
@@ -584,30 +581,80 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   if (checkpoints === undefined) {
     return { _tag: "skipped" } as WipApplyOutcome;
   }
+
+  // Vault files are invisible to the edit-free guard (the tree comparison
+  // is vault-subtracted) and restore's `git clean -fd` deletes untracked
+  // NON-ignored ones. Preserve the worktree's OWN copies across the
+  // restore — never a mirrored blob, which can lag behind a local edit.
+  const preservedVault: Array<{
+    readonly path: string;
+    readonly content: Uint8Array;
+    readonly mode: number | undefined;
+  }> = [];
+  for (const relativePath of excludePaths) {
+    const absolutePath = pathService.join(cwd, relativePath);
+    const stat = yield* fs.stat(absolutePath).pipe(Effect.orElseSucceed(() => null));
+    if (stat?.type !== "File") {
+      continue;
+    }
+    const content = yield* fs.readFile(absolutePath).pipe(Effect.orElseSucceed(() => null));
+    if (content === null) {
+      continue;
+    }
+    const mode = (stat as { readonly mode?: unknown }).mode;
+    preservedVault.push({
+      path: relativePath,
+      content,
+      mode: typeof mode === "number" ? mode & 0o777 : undefined,
+    });
+  }
+
+  // TOCTOU guard: the edit-free judgment above is several subprocesses old.
+  // Re-verify the worktree is still exactly the judged tree in the last
+  // instant before the destructive restore; a save that landed in between
+  // turns this pass into a block, not an overwrite.
+  const recheck = yield* writeWorktreeTree({ cwd, vaultExcludePaths: excludePaths });
+  if (recheck.treeOid !== worktreeTree) {
+    return {
+      _tag: "blocked",
+      reason: "concurrent local edits detected; newer work not applied",
+    } as WipApplyOutcome;
+  }
+
   const restored = yield* checkpoints
     .restoreCheckpoint({ cwd, checkpointRef: CheckpointRef.make(newest.refName) })
-    .pipe(Effect.orElseSucceed(() => false));
+    .pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("roaming wip: snapshot restore failed", {
+          workspaceProjectId: target.workspaceProjectId,
+          cause,
+        }).pipe(Effect.as(false)),
+      ),
+    );
   if (!restored) {
     return { _tag: "skipped" } as WipApplyOutcome;
   }
 
-  // Restore's `git clean -fd` removes untracked non-ignored files that are
-  // not in the snapshot — which is exactly where vault include-overrides
-  // live. Re-apply the local vault copy so no secret is lost.
-  const vaultBlob = yield* blobStore
-    .get({ kind: "vault", key: target.workspaceProjectId })
-    .pipe(Effect.orElseSucceed(() => null));
-  if (vaultBlob !== null) {
-    const bundle = yield* decodeVaultBundleJson(vaultBlob.payload).pipe(
-      Effect.orElseSucceed(() => null),
-    );
-    if (bundle !== null) {
-      yield* applyVaultBundle({ workspaceRoot: cwd, bundle, overwrite: false }).pipe(
+  for (const preserved of preservedVault) {
+    const absolutePath = pathService.join(cwd, preserved.path);
+    const stillThere = yield* fs.exists(absolutePath).pipe(Effect.orElseSucceed(() => true));
+    if (stillThere) {
+      continue;
+    }
+    yield* fs
+      .writeFile(
+        absolutePath,
+        preserved.content,
+        preserved.mode === undefined ? {} : { mode: preserved.mode },
+      )
+      .pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("roaming wip: vault re-apply after auto-apply failed", { cause }),
+          Effect.logWarning("roaming wip: vault file preservation failed", {
+            path: preserved.path,
+            cause,
+          }),
         ),
       );
-    }
   }
 
   const newestCommit = yield* resolveOid(cwd, newest.refName);
