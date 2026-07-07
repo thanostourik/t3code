@@ -38,7 +38,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { applyVaultBundle } from "./VaultSync.ts";
-import { wipRefGlob } from "./WipSnapshots.ts";
+import { wipAppliedMarkerRefName, wipRefGlob } from "./WipSnapshots.ts";
 
 // restore-wip runs BEFORE apply-vault: its cleanliness check and the
 // checkpoint restore's `git clean` then operate on the pristine clone instead
@@ -751,6 +751,24 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(internalError("work-in-progress restore failed")));
       if (!restored) {
         return { status: "skipped", detail: "work-in-progress ref vanished", record: next };
+      }
+      // Record what this checkout was fast-forwarded to: the auto-apply
+      // reactor treats a worktree matching this marker as edit-free, so
+      // newer peer snapshots keep flowing in after materialize.
+      const appliedMarker = yield* wipAppliedMarkerRefName(record.workspaceProjectId).pipe(
+        Effect.mapError(internalError("applied marker name failed")),
+      );
+      const markerWrite = yield* gitExec(
+        ["update-ref", appliedMarker, newest.commitOid],
+        "roaming.materializer.wip-applied-marker",
+      );
+      if (markerWrite.exitCode !== 0) {
+        // Fails safe (auto-apply just stays blocked for this checkout), but
+        // silently degrading delivery is worth a trace.
+        yield* Effect.logWarning("roaming materialize: applied-marker write failed", {
+          workspaceProjectId: record.workspaceProjectId,
+          stderr: markerWrite.stderr.trim().slice(0, 200),
+        });
       }
       // A snapshot older than the clone's HEAD can legitimately win — the
       // age in the detail keeps that honest.
