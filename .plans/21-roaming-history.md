@@ -810,3 +810,42 @@ guard. Capture latency: the 2-min interval was the analysis-pass
 simplification; the user directed Dropbox-class freshness now, so the
 originally-planned watch-based trigger lands in M3.5 (VaultSync's
 FileSystem.watch + debounce is the in-repo precedent).
+
+---
+
+## M3.5 — Sync completion (DONE 2026-07-07, PRs #38–#42, same-night field session)
+
+Inserted hours after M3 closed, when real two-machine use showed capture
+without delivery isn't sync. Narrative highlights beyond the landed
+constraints:
+
+- **Auto-apply** went through a high-effort adversarial review that found
+  two silent data-loss windows before merge: a TOCTOU between the
+  edit-free judgment and the destructive restore (closed by re-verifying
+  the worktree tree immediately before restore), and locally-edited
+  vault-manifest files being invisible to the vault-subtracted guard,
+  deleted by `clean -fd`, then resurrected from a possibly-stale mirrored
+  blob (closed by preserving the WORKTREE's own copies across the
+  restore). Both have regression tests.
+- **The t3sync design went through three user-driven iterations in one
+  sitting**: (1) per-project include file only → (2) "defaults
+  pre-populated into every project's .t3sync" — rejected by the user's own
+  probing: the app would write files into every repo unprompted →
+  (3) OPTION A, git's core.excludesFile model: one global editable
+  defaults file in the app's state dir + optional user-created repo-root
+  .t3sync with veto power. The registry vaultOverrides mechanism — M2
+  plumbing that never got an editing surface — was retired the same
+  moment. Process note: iteration (2) was implemented before the user had
+  agreed to it; he had explicitly said "answer, don't implement". The
+  option-A rework cost an extra round. Ask, then build.
+- **Freshness beacon**: the origin-refs path had no peer notification
+  (bundle mode got one for free via blob writes), capping delivery at the
+  2-minute tick. An empty-bundle wip blob per successful push rides the
+  existing mirror write-trigger; measured A→B delivery on the harness:
+  ~1 second.
+- Acceptance (`accept-m35.mjs`, all green + canonical re-run): 1s
+  delivery onto a clean checkout; a locally-edited checkout survives 45s
+  of delivery pressure untouched; gitignored `.idea/` listed in .t3sync
+  round-trips A→B while `git ls-tree` proves the origin's WIP refs hold
+  neither `.idea/` nor `.env`; a 60 MiB untracked file surfaces a warning
+  and never reaches the origin.
