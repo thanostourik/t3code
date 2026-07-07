@@ -23,6 +23,10 @@ import { Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "./projects";
+
+const EMPTY_WIP_STATUS_ATOM = Atom.make((): ReadonlyArray<RoamingWipStatusEntry> => []).pipe(
+  Atom.withLabel("web-wip-status:empty"),
+);
 import type {
   EnvironmentRoamingMaterialization,
   EnvironmentRoamingProject,
