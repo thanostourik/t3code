@@ -48,6 +48,14 @@ machine's projects are visible but dead.
 > vaultOverrides and the hidden pattern list), origin-mode size guard.
 > Acceptance green: `accept-m35.mjs` + canonical re-run (`accept-m2.5.mjs`).
 > Constraints under [Landed constraints](#landed-constraints-m0m35).
+> **M3.6 (field round 2) DONE 2026-07-07** — PRs #43–#47, same-day field
+> findings: HTTP shell snapshot respects the roaming flag; vault bundles
+> deliver on arrival to live checkouts (missing/unmodified/locally-edited
+> per-file contract, applied-hash record); based-on fast-forward (edits
+> made on the materialized machine flow back to the still-unchanged dirty
+> author via T3-Based-On provenance; divergence stays blocked for M5);
+> blockedReason + per-project sync indicator in the one list. Acceptance:
+> `accept-m36.mjs` + `accept-m35.mjs` + canonical re-run, all green.
 > **NEXT UP: M4 (bootstrap recipes)** — its analysis pass must scope
 > honest limits (v1 targets scriptable setups; capture-what-happened over
 > guaranteed-boot). M2.5 DONE 2026-07-06 (PRs #19–#29+).
@@ -940,6 +948,50 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   checkout, no-clobber of a locally-edited checkout, `.t3sync` `.idea/`
   round-trip with origin hygiene, oversize warning) + the
   canonical-workflow re-run.
+
+### Field round 2 (M3.6, PRs #43–#47)
+
+- HTTP `GET /api/orchestration/shell` strips ALL roaming fields when the
+  roaming setting is off, mirroring the ws path (closes the M2.5
+  reconciliation gap; `accept-m35.mjs` carries the invariant step).
+- **Vault delivery:** vault blobs apply on arrival (blob-arrival trigger +
+  startup catch-up) to the linked checkout. Per file: missing → write;
+  equal to incoming → align; equal to what WE last applied (per-file
+  sha256 record under `<stateDir>/vault-applied/<wsid>.json`) → update;
+  anything else is a local edit — never overwritten. Peer-dropped files
+  are NOT deleted locally (v1: the overwritten bundle may hold the only
+  other copy). Materialize's apply-vault uses the same recording variant
+  so its files stay updatable. Receiver gate = `roaming` only (the
+  capturing machine's consent decided the bundle's contents).
+- **Based-on fast-forward:** snapshot commits carry a `T3-Based-On`
+  trailer (the applied-marker commit at capture). Apply allows an incoming
+  snapshot whose based-on TREE equals the current worktree tree — the peer
+  built on exactly this state, so the incoming tree is a superset and
+  nothing local is unique. Self-gating: the based-on commit must resolve
+  locally (deleted content stays recoverable from it); missing/legacy
+  trailer, or any local movement since, stays blocked (M5 owns
+  divergence). The TOCTOU recheck covers this path like the others.
+- **Visibility:** `blockedReason` on the wip status entry, published when
+  an apply is held back and cleared when the state resolves; the project
+  list shows a per-project dot — red (error) / amber (blocked, with
+  plain-language guidance) / brief green (recent send/receive) / nothing
+  when idle. No new concepts, no roaming wording.
+- Applied marker is project-scoped (not per-peer): fine at 2 machines,
+  revisit if a third machine ever joins (marker thrash, not a safety
+  issue — the tree-equality checks govern safety regardless).
+- Acceptance: `accept-m36.mjs` (post-materialize vault delivery, secret
+  update + no-clobber, based-on backflow onto a dirty-but-unchanged
+  author, divergence blocked + surfaced) + `accept-m35.mjs` + canonical.
+- **Flagged follow-ups (observed during M3.6 acceptance, not fixed):**
+  (1) A→B delivery latency varies 1s–56s across identical-code runs — the
+  beacon fast path sometimes loses to the periodic pass; worst case stays
+  bounded by the 60s mirror interval. Needs instrumentation before
+  optimizing. (2) Under harness load the settings file-watcher stopped
+  delivering external-edit reloads (no errors logged) — suspected inotify
+  instance exhaustion from the recursive per-project watchers; the
+  acceptance step was made restart-based, but watcher budgeting deserves a
+  real look (it could starve settings/skills watching on user machines
+  with many projects).
 
 ## Execution process
 
