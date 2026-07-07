@@ -166,6 +166,7 @@ const makeLayer = (input: {
       ),
       Layer.provideMerge(serverEnvironmentStub),
       Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mat-test-" })),
       Layer.provideMerge(
         Layer.mock(VcsDriver)({
           capabilities: {
