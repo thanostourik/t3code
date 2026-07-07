@@ -4,6 +4,7 @@ import type {
   OrchestrationShellSnapshot,
   ProjectId,
   RoamingMaterializationRecord,
+  RoamingWipStatusEntry,
   RoamingProjectShell,
   ScopedProjectRef,
 } from "@t3tools/contracts";
@@ -16,6 +17,7 @@ import { arrayElementsEqual, parseProjectKey, projectKey, projectRefsEqual } fro
 
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = Object.freeze([]);
 const EMPTY_ROAMING_PROJECTS: ReadonlyArray<RoamingProjectShell> = Object.freeze([]);
+const EMPTY_ROAMING_WIP_STATUS: ReadonlyArray<RoamingWipStatusEntry> = Object.freeze([]);
 const EMPTY_ROAMING_MATERIALIZATIONS: ReadonlyArray<RoamingMaterializationRecord> = Object.freeze(
   [],
 );
@@ -159,6 +161,13 @@ export function createEnvironmentProjectAtoms(input: {
     return previousRoamingMaterializations;
   }).pipe(Atom.withLabel("environment-roaming-materialization-list"));
 
+  const environmentRoamingWipStatusAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make(
+      (get): ReadonlyArray<RoamingWipStatusEntry> =>
+        get(input.snapshotAtom(environmentId))?.roamingWipStatus ?? EMPTY_ROAMING_WIP_STATUS,
+    ).pipe(Atom.withLabel(`environment-roaming-wip-status:${environmentId}`)),
+  );
+
   return {
     environmentProjectsAtom,
     environmentProjectIndexAtom,
@@ -170,6 +179,7 @@ export function createEnvironmentProjectAtoms(input: {
     roamingProjectsAtom,
     environmentRoamingMaterializationsAtom,
     roamingMaterializationsAtom,
+    environmentRoamingWipStatusAtom,
   };
 }
 
