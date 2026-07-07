@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import { EnvironmentId, RoamingWipPayload, WorkspaceProjectId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -12,9 +13,10 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { GitVcsDriver, layer as GitVcsDriverLayer } from "../vcs/GitVcsDriver.ts";
+import { GitVcsDriver, layer as GitVcsDriverLayer, vcsLayer } from "../vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
-import { runWipPassForTarget, type WipTarget } from "./WipSnapshotReactor.ts";
+import { runWipApplyForTarget, runWipPassForTarget, type WipTarget } from "./WipSnapshotReactor.ts";
 import {
   captureWipSnapshot,
   resolveOid,
@@ -38,7 +40,11 @@ const supportLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 const testLayer = it.layer(
-  Layer.mergeAll(roamingBlobStoreLayer, GitVcsDriverLayer).pipe(Layer.provideMerge(supportLayer)),
+  Layer.mergeAll(
+    roamingBlobStoreLayer,
+    GitVcsDriverLayer,
+    vcsLayer.pipe(Layer.provide(VcsProcess.layer)),
+  ).pipe(Layer.provideMerge(supportLayer)),
 );
 
 const git = (cwd: string, args: readonly string[]) =>
@@ -61,7 +67,7 @@ const initRepoWithOrigin = Effect.fn(function* (root: string) {
   const workPath = pathService.join(root, "work");
   yield* fs.makeDirectory(originPath, { recursive: true });
   yield* fs.makeDirectory(workPath, { recursive: true });
-  yield* git(originPath, ["init", "--bare"]);
+  yield* git(originPath, ["init", "--bare", "-b", "main"]);
   yield* git(workPath, ["init", "-b", "main"]);
   yield* git(workPath, ["config", "user.email", "wip@example.test"]);
   yield* git(workPath, ["config", "user.name", "Wip Test"]);
@@ -78,6 +84,66 @@ const target = (workspaceProjectId: WorkspaceProjectId, workPath: string): WipTa
   workspaceRoot: workPath,
   localProjectId: "project-wip",
 });
+
+const PEER_ENVIRONMENT_ID = EnvironmentId.make("env-wip-peer");
+
+const withCommitterDate = <A, E, R>(iso: string, effect: Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.GIT_COMMITTER_DATE;
+      process.env.GIT_COMMITTER_DATE = iso;
+      process.env.GIT_AUTHOR_DATE = iso;
+      return previous;
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) {
+          delete process.env.GIT_COMMITTER_DATE;
+        } else {
+          process.env.GIT_COMMITTER_DATE = previous;
+        }
+        delete process.env.GIT_AUTHOR_DATE;
+        return undefined;
+      }),
+  );
+
+// Real wall clock on purpose: git stamps commits with system time, so the
+// staleness guards compare against real dates, not the frozen TestClock.
+const minutesFromNow = (minutes: number) =>
+  DateTime.formatIso(DateTime.add(DateTime.nowUnsafe(), { minutes }));
+
+/** Bare origin, a peer clone that authors snapshots, a local clone that applies. */
+const initApplyFixture = Effect.fn(function* (root: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const { originPath, workPath: peerPath } = yield* initRepoWithOrigin(root);
+  yield* fs.writeFileString(pathService.join(peerPath, ".gitignore"), ".env\n");
+  yield* git(peerPath, ["add", "."]);
+  yield* git(peerPath, ["commit", "-m", "ignore rules"]);
+  yield* git(peerPath, ["push", "origin", "main"]);
+  const localPath = pathService.join(root, "local");
+  yield* git(root, ["clone", originPath, localPath]);
+  yield* git(localPath, ["config", "user.email", "wip@example.test"]);
+  yield* git(localPath, ["config", "user.name", "Wip Test"]);
+  return { originPath, peerPath, localPath };
+});
+
+const peerSnapshot = (peerPath: string, wsid: WorkspaceProjectId, dateIso: string) =>
+  withCommitterDate(
+    dateIso,
+    Effect.gen(function* () {
+      const captured = yield* captureWipSnapshot({
+        cwd: peerPath,
+        workspaceProjectId: wsid,
+        environmentId: PEER_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(captured);
+      yield* git(peerPath, ["push", "origin", `+${captured!.refName}:${captured!.refName}`]);
+      return captured!;
+    }),
+  );
 
 testLayer("WipSnapshotReactor", (it) => {
   it.effect("captures a dirty tree with parent=HEAD, excluding vault paths", () =>
@@ -356,6 +422,118 @@ testLayer("WipSnapshotReactor", (it) => {
       assert.strictEqual(outcome._tag, "skipped");
       const refName = yield* wipRefName(wsid, LOCAL_ENVIRONMENT_ID);
       assert.isNull(yield* resolveOid(workPath, refName));
+    }),
+  );
+
+  it.effect("auto-applies a newer peer snapshot onto a pristine clone", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-pristine");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-a-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "peer work\n");
+      yield* fs.writeFileString(pathService.join(peerPath, "peer-note.txt"), "from peer\n");
+      const snapshot = yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      yield* fs.writeFileString(pathService.join(localPath, ".env"), "SECRET=local\n");
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(
+        outcome._tag === "applied" && outcome.fromEnvironmentId,
+        PEER_ENVIRONMENT_ID,
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+        "peer work\n",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "peer-note.txt")),
+        "from peer\n",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, ".env")),
+        "SECRET=local\n",
+      );
+      const marker = yield* resolveOid(localPath, `refs/t3/wip-applied/${wsid}`);
+      assert.strictEqual(marker, snapshot.commitOid);
+
+      // Echo safety: nothing newer -> the very next pass is a no-op.
+      const again = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(again._tag, "skipped");
+    }),
+  );
+
+  it.effect("fast-forwards a strictly-behind checkout, blocks on local edits", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-ff");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-b-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "v1\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      const first = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(first._tag, "applied");
+
+      // No local edits since the apply: a newer snapshot fast-forwards.
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "v2\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(120));
+      const second = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(second._tag, "applied");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+        "v2\n",
+      );
+
+      // Local edits: never touched again, surfaced as blocked.
+      yield* fs.writeFileString(pathService.join(localPath, "local-own.txt"), "mine\n");
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "v3\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(180));
+      const third = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(third._tag, "blocked");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+        "v2\n",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "local-own.txt")),
+        "mine\n",
+      );
+    }),
+  );
+
+  it.effect("never resurrects state older than the local HEAD", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-stale");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-c-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "old wip\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      const applied = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(applied._tag, "applied");
+
+      // The user lands the work as a commit NEWER than the peer snapshot:
+      // the checkout is clean again, but the old snapshot must not return.
+      yield* fs.writeFileString(pathService.join(localPath, "tracked.txt"), "landed\n");
+      yield* withCommitterDate(
+        minutesFromNow(120),
+        Effect.gen(function* () {
+          yield* git(localPath, ["add", "."]);
+          yield* git(localPath, ["commit", "-m", "landed"]);
+        }),
+      );
+      const after = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(after._tag, "skipped");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+        "landed\n",
+      );
     }),
   );
 });
