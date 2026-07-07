@@ -44,6 +44,7 @@ import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -456,6 +457,30 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
       cwd,
       args: ["update-ref", markerRef, captured.commitOid],
     });
+    // Freshness beacon: an empty-bundle wip blob rides the mirror (which
+    // pushes on every local blob write), so the peer learns "fetch my
+    // origin ref" within seconds instead of on its next interval tick.
+    yield* Effect.gen(function* () {
+      const blobStore = yield* RoamingBlobStore;
+      const payload = yield* encodeWipPayloadJson({
+        schemaVersion: 1,
+        capturedAt,
+        refName: captured.refName,
+        commitOid: captured.commitOid,
+        treeOid: captured.treeOid,
+        bundleBase64: "",
+      });
+      yield* blobStore.writeLocal({
+        kind: "wip",
+        key: `${target.workspaceProjectId}/${environmentId}`,
+        workspaceProjectId: target.workspaceProjectId,
+        payload,
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("roaming wip: freshness beacon write failed", { cause }),
+      ),
+    );
     return {
       _tag: "done",
       nextMode: "origin-refs",
@@ -572,8 +597,13 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     if (payload === null) {
       continue;
     }
-    // Skip the import when the local ref already has this exact commit.
-    if ((yield* resolveOid(cwd, payload.refName)) === payload.commitOid) {
+    // Beacons carry no pack (origin mode); the origin fetch above is the
+    // transport there. Skip the import when the local ref already has this
+    // exact commit.
+    if (
+      payload.bundleBase64.length === 0 ||
+      (yield* resolveOid(cwd, payload.refName)) === payload.commitOid
+    ) {
       continue;
     }
     const tempDir = yield* fs
@@ -783,6 +813,7 @@ const make = Effect.gen(function* () {
   const updates = yield* PubSub.unbounded<RoamingWipStatusEntry>();
 
   const vcs = yield* VcsDriver;
+  const serverConfig = yield* ServerConfig.ServerConfig;
   const providePassDeps = <A, E>(
     effect: Effect.Effect<
       A,
@@ -793,6 +824,7 @@ const make = Effect.gen(function* () {
       | FileSystem.FileSystem
       | Path.Path
       | ServerEnvironment.ServerEnvironment
+      | ServerConfig.ServerConfig
     >,
   ) =>
     effect.pipe(
@@ -802,6 +834,7 @@ const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, pathService),
       Effect.provideService(ServerEnvironment.ServerEnvironment, serverEnvironment),
+      Effect.provideService(ServerConfig.ServerConfig, serverConfig),
     );
 
   const isEnabled = serverSettings.getSettings.pipe(
@@ -1086,6 +1119,26 @@ const make = Effect.gen(function* () {
           ),
           Effect.ignoreCause({ log: true }),
         ),
+      );
+      // A peer's wip blob (bundle or beacon) arriving over the mirror means
+      // fresh work exists NOW — run that project's pass instead of waiting
+      // for the interval.
+      yield* Effect.forkScoped(
+        Effect.gen(function* () {
+          const ownEnvironmentId = yield* serverEnvironment.getEnvironmentId;
+          const changes = yield* blobStore.subscribeChanges;
+          return yield* Effect.forever(
+            PubSub.take(changes).pipe(
+              Effect.flatMap((record) =>
+                record.kind === "wip" &&
+                !record.key.endsWith(`/${ownEnvironmentId}`) &&
+                record.authorEnvironmentId !== ownEnvironmentId
+                  ? snapshotProject(record.workspaceProjectId)
+                  : Effect.void,
+              ),
+            ),
+          );
+        }),
       );
       // Turn completion: snapshot just that project, post-checkpoint.
       yield* Effect.forkScoped(
