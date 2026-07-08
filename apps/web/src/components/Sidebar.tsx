@@ -130,7 +130,7 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { formatRelativeTimeLabel } from "../timestampFormat";
+import { formatElapsedDurationLabel, formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { Kbd } from "./ui/kbd";
 import {
@@ -3004,42 +3004,85 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
   const entry = props.workspaceProjectId
     ? wipStatus.find((candidate) => candidate.workspaceProjectId === props.workspaceProjectId)
     : undefined;
+
+  // Re-render on a clock so "Syncing…" clears and "Synced 3m" stays fresh even
+  // when no new status arrives. 1s while activity is recent, 20s once idle.
+  const lastActivityIso = entry?.lastAppliedAt ?? entry?.lastPushedAt;
+  const [now, setNow] = useState(() => Date.now());
+  const syncingWindowMs = 6_000;
+  const recentlyActive =
+    lastActivityIso !== undefined && now - Date.parse(lastActivityIso) < syncingWindowMs;
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), recentlyActive ? 1_000 : 20_000);
+    return () => window.clearInterval(interval);
+  }, [recentlyActive]);
+
   if (!entry) return null;
 
-  const recentMs = 2 * 60_000;
-  const now = Date.now();
-  const recentlyActive =
-    (entry.lastPushedAt && now - Date.parse(entry.lastPushedAt) < recentMs) ||
-    (entry.lastAppliedAt && now - Date.parse(entry.lastAppliedAt) < recentMs);
-
-  let dotClass: string | null = null;
-  let label: string | null = null;
+  // A persistent pill so "sync is on and healthy" is always visible — not a
+  // dot that vanishes after two minutes. States, most-urgent first:
+  //   error → red · blocked → amber · in-flight → spinner · idle → green.
+  type Pill = { icon: "spinner" | "dot"; dotClass: string; text: string; tip: string };
+  let pill: Pill;
   if (entry.lastError) {
-    dotClass = "bg-destructive";
-    label = `Sync problem: ${entry.lastError}`;
+    pill = {
+      icon: "dot",
+      dotClass: "bg-destructive",
+      text: "Sync error",
+      tip: `Sync problem: ${entry.lastError}`,
+    };
   } else if (entry.blockedReason) {
-    dotClass = "bg-amber-500";
-    label =
-      "Sync waiting: this machine and the other one both have changes — commit or discard on one side to continue";
+    pill = {
+      icon: "dot",
+      dotClass: "bg-amber-500",
+      text: "Waiting",
+      tip: "Sync waiting: this machine and the other one both changed the same files — commit or discard on one side to continue",
+    };
   } else if (recentlyActive) {
-    dotClass = "bg-emerald-500";
-    label = entry.lastAppliedAt
-      ? `Synced — received ${formatRelativeTimeLabel(entry.lastAppliedAt)}`
-      : `Synced — sent ${formatRelativeTimeLabel(entry.lastPushedAt ?? "")}`;
+    pill = {
+      icon: "spinner",
+      dotClass: "",
+      text: "Syncing…",
+      tip: entry.lastAppliedAt
+        ? `Receiving changes from your other machine (${formatRelativeTimeLabel(entry.lastAppliedAt)})`
+        : "Sending your changes to your other machine",
+    };
+  } else if (lastActivityIso !== undefined) {
+    pill = {
+      icon: "dot",
+      dotClass: "bg-emerald-500",
+      text: `Synced ${formatElapsedDurationLabel(lastActivityIso, now)}`,
+      tip: entry.lastAppliedAt
+        ? `Synced — received ${formatRelativeTimeLabel(entry.lastAppliedAt)}`
+        : `Synced — sent ${formatRelativeTimeLabel(entry.lastPushedAt ?? "")}`,
+    };
+  } else {
+    pill = {
+      icon: "dot",
+      dotClass: "bg-muted-foreground/50",
+      text: "Sync on",
+      tip: "Sync is on for this project — no changes yet",
+    };
   }
-  if (dotClass === null || label === null) return null;
 
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <span
-            aria-label={label}
-            className={`inline-flex size-2 shrink-0 rounded-full ${dotClass}`}
-          />
+            aria-label={pill.tip}
+            className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
+          >
+            {pill.icon === "spinner" ? (
+              <LoaderIcon className="size-2.5 shrink-0 animate-spin" />
+            ) : (
+              <span className={`size-2 shrink-0 rounded-full ${pill.dotClass}`} />
+            )}
+            <span className="whitespace-nowrap">{pill.text}</span>
+          </span>
         }
       />
-      <TooltipPopup side="top">{label}</TooltipPopup>
+      <TooltipPopup side="top">{pill.tip}</TooltipPopup>
     </Tooltip>
   );
 }
