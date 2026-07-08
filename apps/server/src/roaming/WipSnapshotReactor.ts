@@ -793,14 +793,16 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     }
 
     if (peerOid === null) {
-      // The peer's newest snapshot lacks this file. We do NOT delete it (v1),
-      // matching the vault channel's deliberate policy (VaultSync
-      // deliverVaultBundle: "Files the peer dropped are NOT deleted locally").
-      // A single snapshot cannot distinguish a genuine forward deletion from a
-      // stale/out-of-order snapshot resurfacing as "newest" — deleting on that
-      // signal produced the .t3sync flap (file removed, then re-added by the
-      // next fresh snapshot, forever). Leaving the file is always safe: worst
-      // case a real deletion doesn't propagate until M5 owns divergence.
+      // Peer deleted a file we hadn't touched: remove it locally.
+      yield* fs.remove(absolutePath, { force: true }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("roaming wip: could not remove peer-deleted file", {
+            path: relativePath,
+            cause,
+          }),
+        ),
+      );
+      applied.push(relativePath);
       continue;
     }
     if (ourOid === null && (yield* collidesOnDisk(relativePath))) {
