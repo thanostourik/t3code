@@ -617,6 +617,40 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect("per-file: deleting a locally-created file is not re-added by the peer's copy", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-del-origin");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-del-origin-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // Desktop (local) CREATES F and ships it: its pushed marker records F,
+      // but its APPLIED marker never does (F is local-origin, never applied
+      // from a peer). This asymmetry is what made the delete flap.
+      yield* fs.writeFileString(pathService.join(localPath, "F.txt"), "hello\n");
+      const localSnap = yield* captureWipSnapshot({
+        cwd: localPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(localSnap);
+      const pushedMarker = yield* wipPushedMarkerRefName(wsid, LOCAL_ENVIRONMENT_ID);
+      yield* git(localPath, ["update-ref", pushedMarker, localSnap!.commitOid]);
+
+      // Laptop (peer) has F too and snapshots with it.
+      yield* fs.writeFileString(pathService.join(peerPath, "F.txt"), "hello\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      // Desktop deletes F. The peer's snapshot still carries F, but WE deleted
+      // it — it must NOT be resurrected.
+      yield* fs.remove(pathService.join(localPath, "F.txt"), { force: true });
+      yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.isFalse(yield* fs.exists(pathService.join(localPath, "F.txt")));
+    }),
+  );
+
   it.effect("never resurrects state older than the local HEAD", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-apply-stale");
