@@ -745,6 +745,26 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
         Effect.orElseSucceed(() => null),
       );
 
+  // hash-object returns null for an ABSENT path but ALSO for a directory (or a
+  // path blocked by a file at a leading component). So a null ourOid does not
+  // prove the path is free — a `git restore` onto it would silently clobber
+  // that local structure (e.g. peer adds file `foo`, we have an untracked dir
+  // `foo/` of unsaved work). Before creating a path we believe is absent,
+  // confirm nothing local occupies it or any parent component.
+  const collidesOnDisk = (relativePath: string) =>
+    Effect.gen(function* () {
+      const parts = relativePath.split("/");
+      let prefix = cwd;
+      for (let i = 0; i < parts.length; i++) {
+        prefix = pathService.join(prefix, parts[i]!);
+        const info = yield* fs.stat(prefix).pipe(Effect.orElseSucceed(() => null));
+        if (info === null) return false; // nothing here (or below) — safe to create
+        if (i === parts.length - 1) return true; // target path already occupied
+        if (info.type !== "Directory") return true; // a file blocks our path
+      }
+      return false;
+    });
+
   const applied: string[] = [];
   const conflicts: string[] = [];
   for (const change of changes) {
@@ -783,6 +803,10 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
         ),
       );
       applied.push(relativePath);
+      continue;
+    }
+    if (ourOid === null && (yield* collidesOnDisk(relativePath))) {
+      conflicts.push(relativePath); // local dir/file sits on this path — keep ours
       continue;
     }
     // Write the peer's version (any tracked/untracked path; preserves mode)
