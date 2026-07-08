@@ -557,6 +557,13 @@ export type WipApplyOutcome =
  */
 export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyForTarget")(function* (
   target: WipTarget,
+  // The commit WE last shipped for this project (pushed-marker), captured
+  // BEFORE this pass's capture clobbers it. It records files THIS machine
+  // authored and synced outward — which the applied marker never does. Used
+  // as the local-change base so deleting a locally-created file is seen as
+  // our deletion, not "untouched" (which re-added it — the delete flap).
+  // Omitted (tests / direct callers): read the current pushed marker.
+  shippedBaseOid?: string | null,
 ) {
   const git = yield* GitVcsDriver;
   const fs = yield* FileSystem.FileSystem;
@@ -717,6 +724,16 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   // last sync (even if that content itself came from a prior peer apply).
   const base =
     (yield* resolveOid(cwd, appliedMarker)) ?? (yield* resolveOid(cwd, "HEAD")) ?? EMPTY_TREE_OID;
+  // Our last-shipped snapshot: knows about files we authored (the applied
+  // marker doesn't). Passed in from the reactor as the PRE-capture value;
+  // direct callers get the current pushed marker.
+  const shippedBase =
+    shippedBaseOid !== undefined
+      ? shippedBaseOid
+      : yield* resolveOid(
+          cwd,
+          yield* wipPushedMarkerRefName(target.workspaceProjectId, environmentId),
+        );
   const diff = yield* git.execute({
     operation: "WipSnapshotReactor.peerDiff",
     cwd,
@@ -780,7 +797,12 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     }
     const absolutePath = pathService.join(cwd, relativePath);
     const peerOid = yield* resolveOid(cwd, `${newest.refName}:${relativePath}`); // null = deleted by peer
-    const baseOid = yield* resolveOid(cwd, `${base}:${relativePath}`); // last-synced version
+    // Last-synced version: the applied-marker's copy, else what WE last shipped
+    // (shippedBase). The fallback is what stops a locally-created file we then
+    // deleted from looking "untouched" and being re-added from the peer.
+    const baseOid =
+      (yield* resolveOid(cwd, `${base}:${relativePath}`)) ??
+      (shippedBase === null ? null : yield* resolveOid(cwd, `${shippedBase}:${relativePath}`));
     const ourOid = yield* hashWorking(relativePath); // null = absent locally
 
     if (ourOid !== null && ourOid === peerOid) {
@@ -788,7 +810,14 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     }
     const localUntouched = ourOid === baseOid; // both null (absent both) counts as untouched
     if (!localUntouched) {
-      conflicts.push(relativePath); // we changed this file too — keep ours, surface it
+      // WE changed this file since the last sync (edited or deleted it). If the
+      // peer still holds exactly the synced version (peerOid === baseOid) they
+      // did NOT touch it — our change wins silently and our next capture
+      // propagates it (this is a clean local delete, not a conflict). Only a
+      // genuine both-sides change is surfaced as a conflict.
+      if (peerOid !== baseOid) {
+        conflicts.push(relativePath);
+      }
       continue;
     }
 
@@ -883,6 +912,7 @@ const make = Effect.gen(function* () {
   const threadRepository = yield* ProjectionThreadRepository;
   const serverSettings = yield* ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+  const environmentId = yield* serverEnvironment.getEnvironmentId;
   const orchestrationEngine = yield* OrchestrationEngineService;
 
   const statuses = yield* Ref.make(new Map<WorkspaceProjectId, RoamingWipStatusEntry>());
@@ -960,6 +990,14 @@ const make = Effect.gen(function* () {
       }
       const mode =
         (yield* Ref.get(modes)).get(target.workspaceProjectId) ?? ("origin-refs" as const);
+      // The commit we last shipped, read BEFORE capture overwrites the pushed
+      // marker with this pass's snapshot — so apply can tell a locally-created
+      // file we just deleted from a genuinely new peer file (the delete flap).
+      const shippedBaseOid = yield* providePassDeps(
+        wipPushedMarkerRefName(target.workspaceProjectId, environmentId).pipe(
+          Effect.flatMap((ref) => resolveOid(target.workspaceRoot, ref)),
+        ),
+      );
       // Capture before apply: local edits are always snapshotted before the
       // tree is ever considered for a peer fast-forward.
       const outcome = yield* providePassDeps(runWipPassForTarget(target, mode));
@@ -968,7 +1006,7 @@ const make = Effect.gen(function* () {
           new Map(map).set(target.workspaceProjectId, outcome.nextMode),
         );
       }
-      const applied = yield* providePassDeps(runWipApplyForTarget(target));
+      const applied = yield* providePassDeps(runWipApplyForTarget(target, shippedBaseOid));
       const previous = (yield* Ref.get(statuses)).get(target.workspaceProjectId);
       const base =
         outcome._tag === "done"
