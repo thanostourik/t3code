@@ -1926,6 +1926,27 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   // an invisible button). The click resolves what it can and otherwise
   // explains itself.
   const roamingEntries = useRoamingProjects();
+  // The sync indicator keys off the roaming workspaceProjectId. A member's own
+  // workspaceProjectId is often null on a materialized project, so fall back to
+  // the roaming registry by repository — the same resolution the materialize
+  // button uses. Without this the indicator's prop was undefined and it never
+  // rendered.
+  const syncWorkspaceProjectId = useMemo(() => {
+    const fromMember = project.memberProjects.find(
+      (member) => member.workspaceProjectId != null,
+    )?.workspaceProjectId;
+    if (fromMember != null) return fromMember;
+    const repositoryKeys = new Set(
+      project.memberProjects.flatMap((member) =>
+        member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
+      ),
+    );
+    return (
+      roamingEntries.find((candidate) =>
+        repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
+      )?.roamingProject.workspaceProjectId ?? null
+    );
+  }, [project.memberProjects, roamingEntries]);
   const { materialize, dialog: materializeDialog } = useMaterialize();
   const showMaterialize =
     project.environmentPresence === "remote-only" && !project.allRemoteMembersAreDesktopLocal;
@@ -2324,12 +2345,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             <span className="truncate text-xs font-medium text-foreground/90">
               {project.displayName}
             </span>
-            <ProjectSyncIndicator
-              workspaceProjectId={
-                project.memberProjects.find((member) => member.workspaceProjectId != null)
-                  ?.workspaceProjectId
-              }
-            />
+            <ProjectSyncIndicator workspaceProjectId={syncWorkspaceProjectId} />
             {project.groupedProjectCount > 1 ? (
               <span className="shrink-0 text-[10px] text-muted-foreground/60">
                 {project.groupedProjectCount} projects
