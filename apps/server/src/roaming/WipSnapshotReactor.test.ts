@@ -532,7 +532,7 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
-  it.effect("per-file: a peer deletion of an untouched file applies", () =>
+  it.effect("per-file: a peer deletion is NOT propagated (v1, matches vault)", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-apply-del");
       const fs = yield* FileSystem.FileSystem;
@@ -540,7 +540,7 @@ testLayer("WipSnapshotReactor", (it) => {
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-del-" });
       const { peerPath, localPath } = yield* initApplyFixture(root);
 
-      // A committed file both sides share; the peer deletes it.
+      // A committed file both sides share; the peer deletes it in its snapshot.
       yield* fs.writeFileString(pathService.join(peerPath, "shared.txt"), "keep\n");
       yield* git(peerPath, ["add", "shared.txt"]);
       yield* git(peerPath, ["commit", "-m", "add shared"]);
@@ -551,9 +551,12 @@ testLayer("WipSnapshotReactor", (it) => {
       yield* fs.remove(pathService.join(peerPath, "shared.txt"), { force: true });
       yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
 
+      // A snapshot that merely LACKS a file cannot be distinguished from a
+      // stale/out-of-order snapshot resurfacing as "newest" — deleting on that
+      // signal caused the .t3sync flap. So the local copy is kept, not removed.
       const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
-      assert.strictEqual(outcome._tag, "applied");
-      assert.isFalse(yield* fs.exists(pathService.join(localPath, "shared.txt")));
+      assert.strictEqual(outcome._tag, "skipped");
+      assert.isTrue(yield* fs.exists(pathService.join(localPath, "shared.txt")));
     }),
   );
 
