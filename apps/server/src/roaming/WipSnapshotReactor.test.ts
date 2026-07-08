@@ -557,6 +557,66 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect("per-file: a peer-added file never clobbers a local dir at that path", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-collide-dir");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-collide-dir-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // Peer adds a regular FILE `foo`. Locally, `foo` is an untracked DIRECTORY
+      // full of unsaved work. hash-object of a dir returns null (looks "absent"),
+      // so a naive apply would `git restore` the file straight over it.
+      yield* fs.writeFileString(pathService.join(peerPath, "foo"), "peer file\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      yield* fs.makeDirectory(pathService.join(localPath, "foo"), { recursive: true });
+      yield* fs.writeFileString(
+        pathService.join(localPath, "foo", "work.txt"),
+        "PRECIOUS UNSAVED WORK\n",
+      );
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied-with-conflicts");
+      assert.deepEqual(outcome._tag === "applied-with-conflicts" ? [...outcome.conflicts] : [], [
+        "foo",
+      ]);
+      // The local directory and its unsaved work survive intact.
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "foo", "work.txt")),
+        "PRECIOUS UNSAVED WORK\n",
+      );
+    }),
+  );
+
+  it.effect("per-file: a peer-added nested path never clobbers a local file at a parent", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-collide-file");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-collide-file-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // Peer adds nested path `x/a`. Locally `x` is an untracked FILE of unsaved
+      // work. hash-object of `x/a` returns null (x isn't a dir), so a naive apply
+      // would replace the local file `x` with a directory.
+      yield* fs.makeDirectory(pathService.join(peerPath, "x"), { recursive: true });
+      yield* fs.writeFileString(pathService.join(peerPath, "x", "a"), "peer nested\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      yield* fs.writeFileString(pathService.join(localPath, "x"), "PRECIOUS LOCAL FILE\n");
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied-with-conflicts");
+      assert.deepEqual(outcome._tag === "applied-with-conflicts" ? [...outcome.conflicts] : [], [
+        "x/a",
+      ]);
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "x")),
+        "PRECIOUS LOCAL FILE\n",
+      );
+    }),
+  );
+
   it.effect("never resurrects state older than the local HEAD", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-apply-stale");
