@@ -17,7 +17,6 @@
  * origin/bundle mode per project is a Ref re-probed each process start.
  */
 import {
-  CheckpointRef,
   EnvironmentId,
   ROAMING_WIP_BUNDLE_MAX_BYTES,
   ROAMING_WIP_MAX_FILE_BYTES,
@@ -56,7 +55,6 @@ import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { buildCandidatePaths, listTrackedCandidates } from "./VaultSync.ts";
 import {
   captureWipSnapshot,
-  readBasedOn,
   resolveOid,
   wipAppliedMarkerRefName,
   wipPushedMarkerRefName,
@@ -529,6 +527,9 @@ const committerUnix = (cwd: string, spec: string) =>
     return Number.isFinite(unix) ? unix : null;
   });
 
+/** Git's canonical empty-tree object — the diff base when a snapshot has no parent. */
+const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 export type WipApplyOutcome =
   | { readonly _tag: "skipped" }
   | { readonly _tag: "blocked"; readonly reason: string }
@@ -536,23 +537,28 @@ export type WipApplyOutcome =
       readonly _tag: "applied";
       readonly fromEnvironmentId: EnvironmentId;
       readonly capturedAtIso: string;
+    }
+  | {
+      readonly _tag: "applied-with-conflicts";
+      readonly fromEnvironmentId: EnvironmentId;
+      readonly capturedAtIso: string;
+      readonly conflicts: ReadonlyArray<string>;
     };
 
 /**
- * The delivery half of WIP sync (M3.5): fetch the peers' snapshots and
- * fast-forward this checkout when that is provably safe. "Safe" = the
- * worktree carries no local edits — it matches HEAD's tree (untouched
- * checkout) or the tree of the snapshot we last auto-applied
- * (refs/t3/wip-applied/<wsid>). Anything else is local work: never touched,
- * surfaced as blocked (M5 owns the divergence flow). A snapshot older than
- * HEAD or than the last-applied snapshot never applies (a peer's stale echo
- * must not resurrect superseded state).
+ * The delivery half of WIP sync. PER-FILE merge (M3.7): apply the files a
+ * peer changed relative to the shared base, but only where THIS machine has
+ * not modified that same file — so a new/updated file lands even while local
+ * edits exist on other files, and both machines can be worked on at once. A
+ * file both sides changed is left as ours and surfaced as a conflict; the
+ * peer's tree is never restored wholesale, local work is never overwritten.
+ * A snapshot older than HEAD or the applied marker never applies (no stale
+ * echo). Same safety contract as the vault delivery.
  */
 export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyForTarget")(function* (
   target: WipTarget,
 ) {
   const git = yield* GitVcsDriver;
-  const vcs = yield* VcsDriver;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const blobStore = yield* RoamingBlobStore;
@@ -681,31 +687,14 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     return { _tag: "skipped" } as WipApplyOutcome;
   }
 
-  // Local-edit safety: the worktree must be provably free of its own work —
-  // OR (M3.6) the incoming snapshot must have been BUILT ON exactly this
-  // worktree state: its T3-Based-On snapshot's tree equals the current
-  // tree, i.e. the peer materialized/applied this machine's work, edited
-  // on top, and this machine has not moved since. That is a pure
-  // fast-forward (the incoming tree contains everything here), which is
-  // what lets laptop edits flow back to a desktop still holding the same
-  // uncommitted work. Edited-since stays blocked (M5 owns divergence).
-  const headTree = yield* resolveOid(cwd, "HEAD^{tree}");
-  const appliedTree = yield* resolveOid(cwd, `${appliedMarker}^{tree}`);
-  if (worktreeTree !== headTree && (appliedTree === null || worktreeTree !== appliedTree)) {
-    const basedOn = yield* readBasedOn(cwd, newest.refName);
-    const basedOnTree = basedOn === null ? null : yield* resolveOid(cwd, `${basedOn}^{tree}`);
-    if (basedOnTree === null || basedOnTree !== worktreeTree) {
-      return {
-        _tag: "blocked",
-        reason: "local changes present; newer work from the other machine not applied",
-      } as WipApplyOutcome;
-    }
-  }
-
-  // Staleness: never resurrect state older than what this checkout has.
+  // Staleness: never resurrect state older than what this checkout has
+  // (an offline peer's stale echo must not undo a commit made here since).
   const newestUnix = newest.unix;
   const headUnix = yield* committerUnix(cwd, "HEAD");
-  const appliedUnix = appliedTree === null ? null : yield* committerUnix(cwd, appliedMarker);
+  const appliedUnix =
+    (yield* resolveOid(cwd, appliedMarker)) === null
+      ? null
+      : yield* committerUnix(cwd, appliedMarker);
   if (
     (headUnix !== null && newestUnix <= headUnix) ||
     (appliedUnix !== null && newestUnix <= appliedUnix)
@@ -713,99 +702,146 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     return { _tag: "skipped" } as WipApplyOutcome;
   }
 
-  const checkpoints = vcs.checkpoints;
-  if (checkpoints === undefined) {
+  // PER-FILE MERGE (M3.7 — replaces the whole-tree restore that blocked on
+  // ANY local edit, so nothing ever crossed when both machines were being
+  // worked on). Apply exactly the files the peer changed relative to its
+  // own HEAD (= the shared base while neither side has committed), and only
+  // where THIS machine has not modified that same file. A new/updated file
+  // lands even while local edits exist on OTHER files; a file both sides
+  // changed is left as ours and surfaced as a conflict. Same safety
+  // contract as the vault delivery that already works both ways.
+  // Base = the state we last synced FROM the peer (the applied marker), else
+  // our own HEAD, else the empty tree. Both "which files the peer changed"
+  // and "did WE touch this file" are measured against it — so a file whose
+  // current content equals the base is one we have not modified since the
+  // last sync (even if that content itself came from a prior peer apply).
+  const base =
+    (yield* resolveOid(cwd, appliedMarker)) ?? (yield* resolveOid(cwd, "HEAD")) ?? EMPTY_TREE_OID;
+  const diff = yield* git.execute({
+    operation: "WipSnapshotReactor.peerDiff",
+    cwd,
+    args: ["diff", "--name-status", "-z", "--no-renames", base, newest.refName],
+    allowNonZeroExit: true,
+  });
+  if (diff.exitCode !== 0) {
     return { _tag: "skipped" } as WipApplyOutcome;
   }
-
-  // Vault files are invisible to the edit-free guard (the tree comparison
-  // is vault-subtracted) and restore's `git clean -fd` deletes untracked
-  // NON-ignored ones. Preserve the worktree's OWN copies across the
-  // restore — never a mirrored blob, which can lag behind a local edit.
-  const preservedVault: Array<{
-    readonly path: string;
-    readonly content: Uint8Array;
-    readonly mode: number | undefined;
-  }> = [];
-  for (const relativePath of excludePaths) {
-    const absolutePath = pathService.join(cwd, relativePath);
-    const stat = yield* fs.stat(absolutePath).pipe(Effect.orElseSucceed(() => null));
-    if (stat?.type !== "File") {
-      continue;
-    }
-    const content = yield* fs.readFile(absolutePath).pipe(Effect.orElseSucceed(() => null));
-    if (content === null) {
-      continue;
-    }
-    const mode = (stat as { readonly mode?: unknown }).mode;
-    preservedVault.push({
-      path: relativePath,
-      content,
-      mode: typeof mode === "number" ? mode & 0o777 : undefined,
-    });
+  const fields = diff.stdout.split("\0").filter((f) => f.length > 0);
+  const changes: Array<{ readonly status: string; readonly path: string }> = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    changes.push({ status: fields[i]![0]!, path: fields[i + 1]! });
   }
 
-  // TOCTOU guard: the edit-free judgment above is several subprocesses old.
-  // Re-verify the worktree is still exactly the judged tree in the last
-  // instant before the destructive restore; a save that landed in between
-  // turns this pass into a block, not an overwrite.
-  const recheck = yield* writeWorktreeTree({ cwd, vaultExcludePaths: excludePaths });
-  if (recheck.treeOid !== worktreeTree) {
-    return {
-      _tag: "blocked",
-      reason: "concurrent local edits detected; newer work not applied",
-    } as WipApplyOutcome;
-  }
-
-  const restored = yield* checkpoints
-    .restoreCheckpoint({ cwd, checkpointRef: CheckpointRef.make(newest.refName) })
-    .pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("roaming wip: snapshot restore failed", {
-          workspaceProjectId: target.workspaceProjectId,
-          cause,
-        }).pipe(Effect.as(false)),
-      ),
-    );
-  if (!restored) {
-    return { _tag: "skipped" } as WipApplyOutcome;
-  }
-
-  for (const preserved of preservedVault) {
-    const absolutePath = pathService.join(cwd, preserved.path);
-    const stillThere = yield* fs.exists(absolutePath).pipe(Effect.orElseSucceed(() => true));
-    if (stillThere) {
-      continue;
-    }
-    yield* fs
-      .writeFile(
-        absolutePath,
-        preserved.content,
-        preserved.mode === undefined ? {} : { mode: preserved.mode },
-      )
+  const hashWorking = (relativePath: string) =>
+    git
+      .execute({
+        operation: "WipSnapshotReactor.hashWorking",
+        cwd,
+        args: ["hash-object", "--", relativePath],
+        allowNonZeroExit: true,
+      })
       .pipe(
+        Effect.map((r) => (r.exitCode === 0 ? r.stdout.trim() || null : null)),
+        Effect.orElseSucceed(() => null),
+      );
+
+  const applied: string[] = [];
+  const conflicts: string[] = [];
+  for (const change of changes) {
+    const relativePath = change.path;
+    // git diff paths are repo-relative and slash-normalized; reject anything
+    // that could escape the worktree before it reaches the filesystem.
+    if (
+      relativePath.length === 0 ||
+      relativePath.startsWith("/") ||
+      relativePath.split("/").includes("..")
+    ) {
+      continue;
+    }
+    const absolutePath = pathService.join(cwd, relativePath);
+    const peerOid = yield* resolveOid(cwd, `${newest.refName}:${relativePath}`); // null = deleted by peer
+    const baseOid = yield* resolveOid(cwd, `${base}:${relativePath}`); // last-synced version
+    const ourOid = yield* hashWorking(relativePath); // null = absent locally
+
+    if (ourOid !== null && ourOid === peerOid) {
+      continue; // already have the peer's version
+    }
+    const localUntouched = ourOid === baseOid; // both null (absent both) counts as untouched
+    if (!localUntouched) {
+      conflicts.push(relativePath); // we changed this file too — keep ours, surface it
+      continue;
+    }
+
+    if (peerOid === null) {
+      // Peer deleted a file we hadn't touched: remove it locally.
+      yield* fs.remove(absolutePath, { force: true }).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("roaming wip: vault file preservation failed", {
-            path: preserved.path,
+          Effect.logWarning("roaming wip: could not remove peer-deleted file", {
+            path: relativePath,
             cause,
           }),
         ),
       );
+      applied.push(relativePath);
+      continue;
+    }
+    // Write the peer's version (any tracked/untracked path; preserves mode)
+    // straight from the snapshot tree — no index or clean side effects.
+    const wrote = yield* git
+      .execute({
+        operation: "WipSnapshotReactor.restorePath",
+        cwd,
+        args: ["restore", `--source=${newest.refName}`, "--worktree", "--", relativePath],
+        allowNonZeroExit: true,
+      })
+      .pipe(
+        Effect.map((r) => r.exitCode === 0),
+        Effect.orElseSucceed(() => false),
+      );
+    if (wrote) {
+      applied.push(relativePath);
+    } else {
+      conflicts.push(relativePath);
+    }
   }
 
-  const newestCommit = yield* resolveOid(cwd, newest.refName);
-  if (newestCommit !== null) {
-    yield* git.execute({
-      operation: "WipSnapshotReactor.updateAppliedMarker",
-      cwd,
-      args: ["update-ref", appliedMarker, newestCommit],
-    });
+  if (applied.length === 0 && conflicts.length === 0) {
+    return { _tag: "skipped" } as WipApplyOutcome;
   }
+
+  // Advance the applied marker only on a fully-clean apply — with conflicts
+  // this checkout is not at the peer snapshot, and the marker must keep
+  // reflecting a state we actually hold (staleness/no-op detection).
+  if (conflicts.length === 0) {
+    const newestCommit = yield* resolveOid(cwd, newest.refName);
+    if (newestCommit !== null) {
+      yield* git.execute({
+        operation: "WipSnapshotReactor.updateAppliedMarker",
+        cwd,
+        args: ["update-ref", appliedMarker, newestCommit],
+      });
+    }
+  }
+
   const fromEnvironmentId = EnvironmentId.make(newest.refName.split("/").pop() ?? "unknown");
-  yield* Effect.logInfo("roaming wip: applied newer snapshot from peer", {
+  if (conflicts.length > 0) {
+    yield* Effect.logInfo("roaming wip: applied peer changes with conflicts held back", {
+      workspaceProjectId: target.workspaceProjectId,
+      fromEnvironmentId,
+      applied: applied.length,
+      conflicts,
+    });
+    return {
+      _tag: "applied-with-conflicts",
+      fromEnvironmentId,
+      capturedAtIso: newest.iso,
+      conflicts,
+    } as WipApplyOutcome;
+  }
+  yield* Effect.logInfo("roaming wip: applied peer changes per-file", {
     workspaceProjectId: target.workspaceProjectId,
     fromEnvironmentId,
-    capturedAt: newest.iso,
+    applied: applied.length,
   });
   return {
     _tag: "applied",
@@ -924,19 +960,28 @@ const make = Effect.gen(function* () {
         outcome._tag === "skipped" && outcome.warning !== undefined
           ? { ...baseWithoutBlocked, lastError: outcome.warning }
           : baseWithoutBlocked;
+      const nowIso = yield* Effect.map(DateTime.now, DateTime.formatIso);
       const entry: RoamingWipStatusEntry =
         applied._tag === "applied"
-          ? {
-              ...withWarning,
-              lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
-              lastAppliedFrom: applied.fromEnvironmentId,
-            }
-          : applied._tag === "blocked"
-            ? { ...withWarning, blockedReason: applied.reason }
-            : withWarning;
+          ? { ...withWarning, lastAppliedAt: nowIso, lastAppliedFrom: applied.fromEnvironmentId }
+          : applied._tag === "applied-with-conflicts"
+            ? {
+                ...withWarning,
+                lastAppliedAt: nowIso,
+                lastAppliedFrom: applied.fromEnvironmentId,
+                blockedReason: `changed on both machines, kept yours: ${applied.conflicts
+                  .slice(0, 3)
+                  .join(
+                    ", ",
+                  )}${applied.conflicts.length > 3 ? ` and ${applied.conflicts.length - 3} more` : ""}`,
+              }
+            : applied._tag === "blocked"
+              ? { ...withWarning, blockedReason: applied.reason }
+              : withWarning;
       if (
         outcome._tag === "done" ||
         applied._tag === "applied" ||
+        applied._tag === "applied-with-conflicts" ||
         applied._tag === "blocked" ||
         (outcome._tag === "skipped" && outcome.warning !== undefined) ||
         (previous !== undefined && previous.blockedReason !== entry.blockedReason)
