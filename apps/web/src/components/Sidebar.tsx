@@ -2125,6 +2125,23 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
  */
 function MaterializeProjectButton({ project }: { project: SidebarProjectSnapshot }) {
   const roamingEntries = useRoamingProjects();
+  const syncWorkspaceProjectId = useMemo(() => {
+    const fromMember = project.memberProjects.find(
+      (member) => member.workspaceProjectId != null,
+    )?.workspaceProjectId;
+    if (fromMember != null) return fromMember;
+    const repositoryKeys = new Set(
+      project.memberProjects.flatMap((member) =>
+        member.repositoryIdentity ? [member.repositoryIdentity.canonicalKey] : [],
+      ),
+    );
+    return (
+      roamingEntries.find((candidate) =>
+        repositoryKeys.has(candidate.roamingProject.repository.canonicalKey),
+      )?.roamingProject.workspaceProjectId ?? null
+    );
+  }, [project.memberProjects, roamingEntries]);
+
   const { materialize, dialog: materializeDialog } = useMaterialize();
   const showMaterialize =
     project.environmentPresence === "remote-only" && !project.allRemoteMembersAreDesktopLocal;
@@ -2183,8 +2200,8 @@ function MaterializeProjectButton({ project }: { project: SidebarProjectSnapshot
     [project, roamingEntries, materialize],
   );
 
-  if (!showMaterialize) return null;
-  return <>{materializeDialog}<Button size="icon-xs" variant="ghost-muted" aria-label={`Materialize ${project.displayName} on this machine`} title={materializeBlockedReason ?? "Materialize on this machine"} disabled={materializeBlockedReason !== null} onClick={handleMaterializeClick}><FolderPlusIcon className="size-3.5" /></Button></>;
+  if (!showMaterialize) return <ProjectSyncIndicator workspaceProjectId={syncWorkspaceProjectId} />;
+  return <><ProjectSyncIndicator workspaceProjectId={syncWorkspaceProjectId} />{materializeDialog}<Button size="icon-xs" variant="ghost-muted" aria-label={`Materialize ${project.displayName} on this machine`} title={materializeBlockedReason ?? "Materialize on this machine"} disabled={materializeBlockedReason !== null} onClick={handleMaterializeClick}><FolderPlusIcon className="size-3.5" /></Button></>;
 }
 
 // Peer sync state, lightly cached across rows. Standard-scoped sessions
@@ -4944,7 +4961,6 @@ export default function Sidebar() {
                               <FolderIcon className="size-4 shrink-0" />
                             )}
                             <span className="min-w-0 flex-1 truncate text-sm">{item.label}</span>
-                            {project ? <ProjectSyncIndicator workspaceProjectId={project.memberProjects.find((member) => member.workspaceProjectId != null)?.workspaceProjectId} /> : null}
                             {project ? <MaterializeProjectButton project={project} /> : null}
                             {project ? (
                               <Button
