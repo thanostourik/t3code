@@ -470,9 +470,9 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
-  it.effect("fast-forwards a strictly-behind checkout, blocks on local edits", () =>
+  it.effect("per-file: peer changes to other files apply while local edits are kept", () =>
     Effect.gen(function* () {
-      const wsid = WorkspaceProjectId.make("wp-apply-ff");
+      const wsid = WorkspaceProjectId.make("wp-apply-perfile");
       const fs = yield* FileSystem.FileSystem;
       const pathService = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-b-" });
@@ -482,8 +482,15 @@ testLayer("WipSnapshotReactor", (it) => {
       yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
       const first = yield* runWipApplyForTarget(target(wsid, localPath));
       assert.strictEqual(first._tag, "applied");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+        "v1\n",
+      );
 
-      // No local edits since the apply: a newer snapshot fast-forwards.
+      // THE USER'S CASE: the local checkout now has its OWN uncommitted edit
+      // to a different file; the peer changes tracked.txt. Per-file merge
+      // applies the peer's tracked.txt AND leaves the local edit untouched.
+      yield* fs.writeFileString(pathService.join(localPath, "local-own.txt"), "mine\n");
       yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "v2\n");
       yield* peerSnapshot(peerPath, wsid, minutesFromNow(120));
       const second = yield* runWipApplyForTarget(target(wsid, localPath));
@@ -492,21 +499,61 @@ testLayer("WipSnapshotReactor", (it) => {
         yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
         "v2\n",
       );
-
-      // Local edits: never touched again, surfaced as blocked.
-      yield* fs.writeFileString(pathService.join(localPath, "local-own.txt"), "mine\n");
-      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "v3\n");
-      yield* peerSnapshot(peerPath, wsid, minutesFromNow(180));
-      const third = yield* runWipApplyForTarget(target(wsid, localPath));
-      assert.strictEqual(third._tag, "blocked");
-      assert.strictEqual(
-        yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
-        "v2\n",
-      );
       assert.strictEqual(
         yield* fs.readFileString(pathService.join(localPath, "local-own.txt")),
         "mine\n",
       );
+    }),
+  );
+
+  it.effect("per-file: a same-file conflict keeps the local copy and is surfaced", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-conflict");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-conflict-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // Both machines edit the SAME file differently, from the shared base.
+      yield* fs.writeFileString(pathService.join(localPath, "shared.txt"), "LOCAL\n");
+      yield* fs.writeFileString(pathService.join(peerPath, "shared.txt"), "PEER\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied-with-conflicts");
+      assert.deepEqual(outcome._tag === "applied-with-conflicts" ? [...outcome.conflicts] : [], [
+        "shared.txt",
+      ]);
+      // The local copy is never overwritten by the peer's version.
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "shared.txt")),
+        "LOCAL\n",
+      );
+    }),
+  );
+
+  it.effect("per-file: a peer deletion of an untouched file applies", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-del");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-del-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // A committed file both sides share; the peer deletes it.
+      yield* fs.writeFileString(pathService.join(peerPath, "shared.txt"), "keep\n");
+      yield* git(peerPath, ["add", "shared.txt"]);
+      yield* git(peerPath, ["commit", "-m", "add shared"]);
+      yield* git(peerPath, ["push", "origin", "main"]);
+      yield* git(localPath, ["pull", "origin", "main"]);
+      assert.isTrue(yield* fs.exists(pathService.join(localPath, "shared.txt")));
+
+      yield* fs.remove(pathService.join(peerPath, "shared.txt"), { force: true });
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.isFalse(yield* fs.exists(pathService.join(localPath, "shared.txt")));
     }),
   );
 
@@ -576,143 +623,6 @@ testLayer("WipSnapshotReactor", (it) => {
         yield* fs.readFileString(pathService.join(localPath, "service.key.txt")),
         "USER-EDIT\n",
       );
-    }),
-  );
-
-  it.effect("based-on: laptop edits flow back to the still-unchanged dirty desktop", () =>
-    Effect.gen(function* () {
-      const wsid = WorkspaceProjectId.make("wp-apply-basedon");
-      const fs = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-basedon-" });
-      // Roles: the fixture's WORK repo is the "desktop" (this machine, dirty
-      // author); the clone is the "laptop" authoring under the peer env id.
-      const { peerPath: desktopPath, localPath: laptopPath } = yield* initApplyFixture(root);
-
-      yield* fs.writeFileString(pathService.join(desktopPath, "desktop-work.txt"), "desk\n");
-      const s1 = yield* withCommitterDate(
-        minutesFromNow(30),
-        Effect.gen(function* () {
-          const outcome = yield* runWipPassForTarget(target(wsid, desktopPath), "origin-refs");
-          assert.strictEqual(outcome._tag, "done");
-          const refName = yield* wipRefName(wsid, LOCAL_ENVIRONMENT_ID);
-          return yield* resolveOid(desktopPath, refName);
-        }),
-      );
-      assert.isNotNull(s1);
-
-      // The laptop materializes the desktop's work: fetch, restore, marker.
-      const glob = `refs/t3/wip/${wsid}/*`;
-      yield* git(laptopPath, ["fetch", "origin", `+${glob}:${glob}`]);
-      const desktopRef = `refs/t3/wip/${wsid}/${LOCAL_ENVIRONMENT_ID}`;
-      yield* git(laptopPath, [
-        "restore",
-        "--source",
-        desktopRef,
-        "--worktree",
-        "--staged",
-        "--",
-        ".",
-      ]);
-      yield* git(laptopPath, ["reset", "-q", "--", "."]);
-      yield* git(laptopPath, ["update-ref", `refs/t3/wip-applied/${wsid}`, s1!]);
-
-      // Laptop edits ON TOP and pushes: the snapshot carries T3-Based-On S1.
-      yield* fs.writeFileString(pathService.join(laptopPath, "laptop-note.txt"), "note\n");
-      yield* peerSnapshot(laptopPath, wsid, minutesFromNow(60));
-
-      // Desktop: still dirty with the SAME work → pure fast-forward applies.
-      const applied = yield* runWipApplyForTarget(target(wsid, desktopPath));
-      assert.strictEqual(applied._tag, "applied");
-      assert.strictEqual(
-        yield* fs.readFileString(pathService.join(desktopPath, "laptop-note.txt")),
-        "note\n",
-      );
-      assert.strictEqual(
-        yield* fs.readFileString(pathService.join(desktopPath, "desktop-work.txt")),
-        "desk\n",
-      );
-
-      // Desktop edits AFTER the laptop based itself on S1: true divergence,
-      // the next laptop snapshot must be blocked.
-      yield* fs.writeFileString(pathService.join(desktopPath, "desktop-more.txt"), "more\n");
-      yield* fs.writeFileString(pathService.join(laptopPath, "laptop-note.txt"), "note v2\n");
-      yield* peerSnapshot(laptopPath, wsid, minutesFromNow(90));
-      const blocked = yield* runWipApplyForTarget(target(wsid, desktopPath));
-      assert.strictEqual(blocked._tag, "blocked");
-      assert.strictEqual(
-        yield* fs.readFileString(pathService.join(desktopPath, "laptop-note.txt")),
-        "note\n",
-      );
-      assert.strictEqual(
-        yield* fs.readFileString(pathService.join(desktopPath, "desktop-more.txt")),
-        "more\n",
-      );
-    }),
-  );
-
-  it.effect("based-on: peer deletions apply and stay recoverable; legacy snapshots block", () =>
-    Effect.gen(function* () {
-      const wsid = WorkspaceProjectId.make("wp-apply-basedon-del");
-      const fs = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-basedon-del-" });
-      const { peerPath: desktopPath, localPath: laptopPath } = yield* initApplyFixture(root);
-
-      yield* fs.writeFileString(pathService.join(desktopPath, "doomed.txt"), "delete me\n");
-      const s1 = yield* withCommitterDate(
-        minutesFromNow(30),
-        Effect.gen(function* () {
-          const outcome = yield* runWipPassForTarget(target(wsid, desktopPath), "origin-refs");
-          assert.strictEqual(outcome._tag, "done");
-          return yield* resolveOid(desktopPath, yield* wipRefName(wsid, LOCAL_ENVIRONMENT_ID));
-        }),
-      );
-
-      const glob = `refs/t3/wip/${wsid}/*`;
-      yield* git(laptopPath, ["fetch", "origin", `+${glob}:${glob}`]);
-      const desktopRef = `refs/t3/wip/${wsid}/${LOCAL_ENVIRONMENT_ID}`;
-      yield* git(laptopPath, [
-        "restore",
-        "--source",
-        desktopRef,
-        "--worktree",
-        "--staged",
-        "--",
-        ".",
-      ]);
-      yield* git(laptopPath, ["reset", "-q", "--", "."]);
-      yield* git(laptopPath, ["update-ref", `refs/t3/wip-applied/${wsid}`, s1!]);
-
-      // The laptop DELETES the file and pushes.
-      yield* fs.remove(pathService.join(laptopPath, "doomed.txt"), { force: true });
-      yield* peerSnapshot(laptopPath, wsid, minutesFromNow(60));
-
-      const applied = yield* runWipApplyForTarget(target(wsid, desktopPath));
-      assert.strictEqual(applied._tag, "applied");
-      assert.isFalse(yield* fs.exists(pathService.join(desktopPath, "doomed.txt")));
-      // The deleted content stays recoverable from the based-on commit.
-      const recovered = yield* gitStdout(desktopPath, ["show", `${s1!}:doomed.txt`]);
-      assert.strictEqual(recovered, "delete me");
-    }),
-  );
-
-  it.effect("based-on: a snapshot without the trailer stays blocked on a dirty tree", () =>
-    Effect.gen(function* () {
-      const wsid = WorkspaceProjectId.make("wp-apply-basedon-legacy");
-      const fs = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-basedon-leg-" });
-      const { peerPath: desktopPath, localPath: laptopPath } = yield* initApplyFixture(root);
-
-      yield* fs.writeFileString(pathService.join(desktopPath, "desktop-work.txt"), "desk\n");
-      // The laptop authors WITHOUT ever applying (no marker → no trailer).
-      yield* fs.writeFileString(pathService.join(laptopPath, "laptop-note.txt"), "note\n");
-      yield* peerSnapshot(laptopPath, wsid, minutesFromNow(60));
-
-      const outcome = yield* runWipApplyForTarget(target(wsid, desktopPath));
-      assert.strictEqual(outcome._tag, "blocked");
-      assert.isFalse(yield* fs.exists(pathService.join(desktopPath, "laptop-note.txt")));
     }),
   );
 });
