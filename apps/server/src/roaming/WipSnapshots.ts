@@ -70,7 +70,7 @@ export const wipRefGlob = (workspaceProjectId: WorkspaceProjectId) =>
 export const wipAppliedMarkerRefName = (workspaceProjectId: WorkspaceProjectId) =>
   refSafe(workspaceProjectId).pipe(Effect.map((id) => `refs/t3/wip-applied/${id}`));
 
-const COMMIT_ENV_IDENTITY = {
+export const COMMIT_ENV_IDENTITY = {
   GIT_AUTHOR_NAME: "T3 Code",
   GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
   GIT_COMMITTER_NAME: "T3 Code",
@@ -118,7 +118,7 @@ export interface CaptureWipInput {
   /** Repo-relative paths subtracted from the snapshot (the vault set). */
   readonly vaultExcludePaths: ReadonlyArray<string>;
   /** Skip commit + ref moves when the written tree equals this tree. */
-  readonly skipIfTreeOid?: string | null;
+  readonly skipIfTreeOids?: ReadonlyArray<string>;
 }
 
 export interface CaptureWipResult {
@@ -260,7 +260,7 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
     cwd: input.cwd,
     vaultExcludePaths: input.vaultExcludePaths,
   });
-  if (input.skipIfTreeOid != null && treeOid === input.skipIfTreeOid) {
+  if (input.skipIfTreeOids !== undefined && input.skipIfTreeOids.includes(treeOid)) {
     return null;
   }
 
