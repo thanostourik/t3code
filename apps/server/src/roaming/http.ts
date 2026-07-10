@@ -22,6 +22,7 @@ import {
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
   ROAMING_MIRROR_PUSH_PATH,
+  ROAMING_MIRROR_WAIT_PATH,
   ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
   ROAMING_HANDSHAKE_COMPLETE_PATH,
@@ -50,9 +51,13 @@ import {
   RoamingPushBlobsResponse,
   RoamingSyncManifestRequest,
   RoamingSyncManifestResponse,
+  RoamingWaitChangesRequest,
+  RoamingWaitChangesResponse,
 } from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -225,8 +230,51 @@ const pushRoute = HttpRouter.add(
             ),
           );
         results.push({ kind: blob.kind, key: blob.key, outcome });
+        if (blob.kind === "wip") {
+          yield* Effect.logInfo("roaming timing: wip-blob-ingested", {
+            key: blob.key,
+            version: blob.version,
+            outcome,
+          });
+        }
       }
       return yield* respondJson(RoamingPushBlobsResponse, { results });
+    }),
+  ),
+);
+
+/**
+ * Long-poll: respond when the blob store's change revision moves past the
+ * caller's, or after the hold expires (M3.7). Mirror connectivity is
+ * one-directional — the pairing initiator holds the only credential/URL
+ * pair — so this is how a machine that cannot reach its peer makes its
+ * writes visible in seconds instead of on the peer's interval tick.
+ */
+const WAIT_HOLD = Duration.seconds(25);
+
+const waitRoute = HttpRouter.add(
+  "POST",
+  ROAMING_MIRROR_WAIT_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      const session = yield* requireRoamingScope(AuthRoamingMirrorScope);
+      yield* rejectPausedPeer(session);
+      const body = yield* decodeBody(RoamingWaitChangesRequest);
+      const blobStore = yield* RoamingBlobStore;
+      const revision = yield* Effect.scoped(
+        Effect.gen(function* () {
+          // Subscribe BEFORE reading the revision so a write between the
+          // read and the wait cannot be missed.
+          const changes = yield* blobStore.subscribeChanges;
+          const current = yield* blobStore.changeRevision;
+          if (body.sinceRevision === null || body.sinceRevision !== current) {
+            return current;
+          }
+          yield* Effect.race(PubSub.take(changes), Effect.sleep(WAIT_HOLD));
+          return yield* blobStore.changeRevision;
+        }),
+      );
+      return yield* respondJson(RoamingWaitChangesResponse, { revision });
     }),
   ),
 );
@@ -514,6 +562,7 @@ export const roamingRoutesLayer = Layer.mergeAll(
   manifestRoute,
   fetchRoute,
   pushRoute,
+  waitRoute,
   machineCredentialRoute,
   addPeerRoute,
   listPeersRoute,
