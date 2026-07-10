@@ -56,11 +56,27 @@ machine's projects are visible but dead.
 > author via T3-Based-On provenance; divergence stays blocked for M5);
 > blockedReason + per-project sync indicator in the one list. Acceptance:
 > `accept-m36.mjs` + `accept-m35.mjs` + canonical re-run, all green.
-> **NEXT UP: M3.7 (sync hardening — user directive 2026-07-07: the M3.6
-> flagged follow-ups are DEFECTS in the shipped sync, not future work).**
-> Then M4 (bootstrap recipes; its analysis pass must scope honest limits —
-> v1 targets scriptable setups; capture-what-happened over
-> guaranteed-boot). M2.5 DONE 2026-07-06 (PRs #19–#29+).
+> **M3.7 (sync hardening) DONE 2026-07-10** — PR #52 (root cause: inotify
+> `max_user_instances` exhaustion) + the per-file-apply PR. Scope grew
+> beyond the row's spec, driven by two field sessions: per-file WIP merge
+> (replaces whole-tree blocking; concurrent edits to different files
+> cross), a correct two-machine deletion model (always-advanced applied
+> marker with conflicted paths pinned to base; shipped-diff deletions
+> gated on T3-Based-On provenance; causality re-ship when an unchanged
+> tree follows a marker move), sync pill data path (shell projections now
+> carry `workspaceProjectId`; statuses baseline-publish, seed on ws
+> resume, and survive restarts via marker commit dates), project-title
+> propagation through the registry (renames roam), vault interval
+> backbone (30s sweep; the fs watcher is an optimization, not a
+> guarantee). Verified: unit suite + repeated two-instance harness E2E
+> (pair → materialize → WIP both ways → receiver-side delete with a live
+> conflict → restart). The row's formal exit criteria (10× delivery
+> latency run, watcher stress fixture) were NOT run — closed on user call
+> 2026-07-10; carry them into M4's analysis pass if latency complaints
+> persist.
+> **NEXT UP: M4 (bootstrap recipes; its analysis pass must scope honest
+> limits — v1 targets scriptable setups; capture-what-happened over
+> guaranteed-boot).** M2.5 DONE 2026-07-06 (PRs #19–#29+).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -985,16 +1001,50 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
 - Acceptance: `accept-m36.mjs` (post-materialize vault delivery, secret
   update + no-clobber, based-on backflow onto a dirty-but-unchanged
   author, divergence blocked + surfaced) + `accept-m35.mjs` + canonical.
-- **Flagged follow-ups (observed during M3.6 acceptance, not fixed):**
-  (1) A→B delivery latency varies 1s–56s across identical-code runs — the
-  beacon fast path sometimes loses to the periodic pass; worst case stays
-  bounded by the 60s mirror interval. Needs instrumentation before
-  optimizing. (2) Under harness load the settings file-watcher stopped
-  delivering external-edit reloads (no errors logged) — suspected inotify
-  instance exhaustion from the recursive per-project watchers; the
-  acceptance step was made restart-based, but watcher budgeting deserves a
-  real look (it could starve settings/skills watching on user machines
-  with many projects).
+- ~~Flagged follow-ups~~ Both M3.6 flags became M3.7 and are addressed:
+  the latency variance and watcher flake shared one root cause (inotify
+  `max_user_instances` exhaustion, PR #52 evidence); mitigated by interval
+  backbones (vault 30s sweep, WIP 2 min) so no sync direction depends on a
+  live watcher. True watcher budgeting (exclude node_modules/.git from
+  what is REGISTERED, not just from emitted events) remains open — revisit
+  if dead-watcher latency (bounded by the sweeps) is still felt in the field.
+
+### Sync hardening (M3.7)
+
+- **Per-file WIP merge:** apply moves exactly the files the peer changed
+  relative to the base; a file changed on both sides is kept ours and
+  surfaced (`blockedReason` → "Waiting"); everything else crosses even
+  while local edits exist. Whole-tree blocking is gone.
+- **Deletion model (three invariants, each a field bug):** (1) the applied
+  marker advances EVERY apply pass — clean applies to the peer snapshot,
+  conflicted passes to a synthetic commit with only the conflicted paths
+  pinned to base — so one conflict can no longer unrecord another file's
+  arrival (that unrecorded arrival is what resurrected deleted files).
+  (2) Peer-absence counts as a deletion beyond the marker diff only for
+  paths we SHIPPED, and only when the peer's snapshot `T3-Based-On` state
+  provably contained the file — an out-of-order snapshot that merely
+  predates the file can never delete it. (3) A tree identical to the last
+  shipped one still ships ONCE when the applied marker has moved (the
+  Based-On update is how a receiver-side delete that returns the tree to
+  an already-shipped state reaches the author), and settles the next
+  pass — no ACK ping-pong.
+- **Sync pill:** shell projections carry `workspaceProjectId` (four query/
+  mapping sites had silently dropped it — also re-arming the decider's
+  double-enrollment invariant); statuses publish a baseline on a project's
+  first pass, seed into resumed ws subscriptions, and after a server
+  restart the activity timestamps are reconstructed from the marker refs'
+  commit dates (git is the durable store; no status table).
+- **Titles roam:** a rename rewrites the registry blob's title (other
+  fields preserved) and mirrors; peers apply an arrived registry title to
+  the linked local project. Event-triggered in both directions (never
+  pass-based reconciliation, which could undo an in-flight remote rename);
+  the grouped sidebar label prefers a shared member title over the
+  repository name.
+- Acceptance: unit suite (deletion-model regression tests fail on the old
+  code) + repeated two-instance harness E2E; `accept-m36.mjs` step 6
+  updated for per-file merge (concurrent edits to different files now
+  cross instead of blocking). Formal latency/stress criteria not run
+  (user call, see status line).
 
 ## Execution process
 
