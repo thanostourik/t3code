@@ -974,20 +974,24 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
 
   // Staleness: never resurrect state older than what this checkout has
   // (an offline peer's stale echo must not undo a commit made here since).
-  // Strictly-older skips. TIES DO NOT (revised M3.7): committer stamps have
-  // 1-second resolution and the fast path now delivers sub-second, so the
-  // peer's fresh snapshot routinely lands in the same second as our applied
-  // marker — the old `<=` skip deadlocked delivery until the author's tree
-  // changed again (measured: run-4 harness). A tie skips only when the
-  // marker already records exactly this commit; anything else proceeds to
-  // the per-file merge, whose base-diff/local-edit/Based-On gates are what
-  // actually guarantee no local state is overwritten.
+  // Strictly-older skips. APPLIED-MARKER TIES DO NOT (revised M3.7):
+  // committer stamps have 1-second resolution and the fast path now
+  // delivers sub-second, so the peer's fresh snapshot routinely lands in
+  // the same second as the echo commit the marker records — the old `<=`
+  // skip deadlocked delivery until the author's tree changed again
+  // (measured: run-4 harness). A marker tie skips only when the marker
+  // already records exactly this commit; anything else proceeds to the
+  // per-file merge, whose local-edit checks measure against that same
+  // marker. HEAD ties STAY conservative (`<=`): with no marker the merge
+  // base falls back to HEAD, and a same-second-but-stale snapshot lacking
+  // a just-committed file would read as a peer deletion of it (review
+  // finding, 2026-07-10).
   const newestCommit = yield* resolveOid(cwd, newest.refName);
   const appliedCommit = yield* resolveOid(cwd, appliedMarker);
   if (
     newestCommit === null ||
     newestCommit === appliedCommit ||
-    (headUnix !== null && newestUnix < headUnix) ||
+    (headUnix !== null && newestUnix <= headUnix) ||
     (appliedUnix !== null && newestUnix < appliedUnix)
   ) {
     return { _tag: "skipped" } as WipApplyOutcome;
