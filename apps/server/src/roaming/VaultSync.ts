@@ -32,6 +32,16 @@ import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 
 const WATCH_DEBOUNCE = Duration.millis(500);
+// Interval backbone, the vault analogue of WipSnapshotReactor's WIP_INTERVAL.
+// The fs watcher is a latency optimization, not a guarantee: it misses events
+// and on some platforms dies outright (inotify instance exhaustion), which
+// froze the vault bundle at its enrollment snapshot forever — a changed secret
+// or a new .t3sync selection (e.g. `.idea/`) never shipped. A periodic sweep
+// re-captures and re-delivers regardless of the watcher's health. Tighter than
+// WIP's 2 min: vault payloads are small and bounded (16 MiB cap, and each
+// unchanged sweep short-circuits), and this is the ONLY latency the user sees
+// when the watcher is dead, so it must still feel live.
+const VAULT_INTERVAL = Duration.seconds(30);
 
 export class VaultPathEscapeError extends Schema.TaggedErrorClass<VaultPathEscapeError>()(
   "VaultPathEscapeError",
@@ -869,6 +879,38 @@ const make = Effect.gen(function* () {
             }),
           ),
           Effect.ignoreCause({ log: true }),
+        ),
+      );
+
+      // Interval fallback: re-capture local changes AND re-deliver arrived
+      // peer bundles for every project on a timer, so neither direction
+      // depends on a live fs watcher. Enqueue capture only (the worker
+      // self-gates on isEnabled) — no watcher reinstall, which would churn the
+      // scarce inotify handles this fallback exists to work around.
+      yield* Effect.forkScoped(
+        Effect.forever(
+          isEnabled.pipe(
+            Effect.flatMap((enabled) =>
+              enabled
+                ? listTargets.pipe(
+                    Effect.flatMap((targets) =>
+                      Effect.forEach(
+                        targets,
+                        (target) =>
+                          enqueueTarget(target).pipe(
+                            Effect.andThen(deliverArrivedVault(target.workspaceProjectId)),
+                          ),
+                        { discard: true },
+                      ),
+                    ),
+                  )
+                : Effect.void,
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("roaming vault: interval sweep failed", { cause }),
+            ),
+            Effect.andThen(Effect.sleep(VAULT_INTERVAL)),
+          ),
         ),
       );
 
