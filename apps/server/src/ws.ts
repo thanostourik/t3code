@@ -1383,6 +1383,13 @@ const makeWsRpcLayer = (
               // projects/threads list over the socket. If the client is too far
               // behind, we fall back to a fresh snapshot instead of an unbounded
               // replay (see below).
+              //
+              // Roaming items are sequence 0 (keyed, not sequenced replay). The
+              // desktop app almost always resumes from a warm shell cache, so we
+              // MUST seed the current roaming overlay here — the same fields the
+              // cold-subscribe snapshot and HTTP /shell route carry — or the
+              // client keeps stale/empty roamingWipStatus until the next live
+              // publish (sync pill never appears despite sync working).
               if (input.afterSequence !== undefined) {
                 const afterSequence = input.afterSequence;
                 const headSequence = yield* orchestrationEngine.latestSequence;
@@ -1415,7 +1422,49 @@ const makeWsRpcLayer = (
                       }),
                   ),
                 );
-                return Stream.concat(catchUpStream, synchronizedThenLive);
+                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = roamingEnabled
+                  ? yield* Effect.gen(function* () {
+                      const [shell, wipStatuses] = yield* Effect.all([
+                        projectionSnapshotQuery.getShellSnapshot(),
+                        wipSnapshotReactor.listStatuses(),
+                      ]);
+                      const items: OrchestrationShellStreamItem[] = [];
+                      for (const roamingProject of shell.roamingProjects) {
+                        items.push({
+                          kind: "roaming-project-upserted",
+                          sequence: 0,
+                          roamingProject,
+                        });
+                      }
+                      for (const materialization of shell.roamingMaterializations) {
+                        items.push({
+                          kind: "roaming-materialization-updated",
+                          sequence: 0,
+                          materialization,
+                        });
+                      }
+                      for (const wipStatus of wipStatuses) {
+                        items.push({
+                          kind: "roaming-wip-status-updated",
+                          sequence: 0,
+                          wipStatus,
+                        });
+                      }
+                      return items;
+                    }).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new OrchestrationGetSnapshotError({
+                            message: "Failed to seed roaming shell overlay on resume",
+                            cause,
+                          }),
+                      ),
+                    )
+                  : [];
+                return Stream.concat(
+                  Stream.fromIterable(roamingCatchUp),
+                  Stream.concat(catchUpStream, synchronizedThenLive),
+                );
               }
 
               const snapshot = yield* loadSnapshot;
