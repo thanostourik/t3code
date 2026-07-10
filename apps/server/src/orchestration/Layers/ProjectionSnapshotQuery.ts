@@ -547,6 +547,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          workspace_project_id AS "workspaceProjectId",
           default_model_selection_json AS "defaultModelSelection",
           default_thread_env_mode AS "defaultThreadEnvMode",
           auto_pull AS "autoPull",
@@ -1098,6 +1099,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          workspace_project_id AS "workspaceProjectId",
           default_model_selection_json AS "defaultModelSelection",
           default_thread_env_mode AS "defaultThreadEnvMode",
           auto_pull AS "autoPull",
@@ -1124,6 +1126,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          workspace_project_id AS "workspaceProjectId",
           default_model_selection_json AS "defaultModelSelection",
           default_thread_env_mode AS "defaultThreadEnvMode",
           auto_pull AS "autoPull",
@@ -2225,6 +2228,9 @@ pending_approval_requests AS (
                 title: row.title,
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
+                ...(row.workspaceProjectId !== null
+                  ? { workspaceProjectId: row.workspaceProjectId }
+                  : {}),
                 defaultModelSelection: row.defaultModelSelection,
                 defaultThreadEnvMode: row.defaultThreadEnvMode,
                 autoPull: row.autoPull === 1,
@@ -2392,6 +2398,11 @@ pending_approval_requests AS (
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
                   repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
+                  // The decider's double-enrollment invariant reads this;
+                  // omitting it made project.roaming.enroll unguarded.
+                  ...(row.workspaceProjectId !== null
+                    ? { workspaceProjectId: row.workspaceProjectId }
+                    : {}),
                   defaultModelSelection: row.defaultModelSelection,
                   defaultThreadEnvMode: row.defaultThreadEnvMode,
                   autoPull: row.autoPull === 1,
@@ -3116,6 +3127,9 @@ pending_approval_requests AS (
                     title: option.value.title,
                     workspaceRoot: option.value.workspaceRoot,
                     repositoryIdentity,
+                    ...(option.value.workspaceProjectId !== null
+                      ? { workspaceProjectId: option.value.workspaceProjectId }
+                      : {}),
                     defaultModelSelection: option.value.defaultModelSelection,
                     defaultThreadEnvMode: option.value.defaultThreadEnvMode,
                     autoPull: option.value.autoPull === 1,
