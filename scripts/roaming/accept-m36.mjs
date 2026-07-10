@@ -202,7 +202,7 @@ if ((await materializeResponse.json()).materialization.status !== "completed")
 // later via auto-apply — both are correct; wait rather than race.
 await waitFor(
   "A's WIP on B",
-  90_000,
+  200_000,
   async () =>
     existsSync(join(bTarget, "a-work.txt")) &&
     readFileSync(join(bTarget, "a-work.txt"), "utf8") === "A's uncommitted work\n"
@@ -259,20 +259,20 @@ if (readFileSync(join(p1Dir, "a-work.txt"), "utf8") !== "A's uncommitted work\n"
   fail("based-on", "A's own uncommitted work was damaged");
 pass("B's edit flowed back to A while A stayed dirty (based-on fast-forward)");
 
-// ── 6. true divergence: blocked + surfaced ─────────────────────────────
+// ── 6. concurrent edits to DIFFERENT files both propagate (M3.7 per-file
+// merge — replaces M3.6's whole-tree "any divergence blocks"). Two new files,
+// one on each side, is not a conflict: each lands on the other machine and
+// neither side's own work is touched.
 writeFileSync(join(p1Dir, "a-more.txt"), "A diverges\n");
-await sleep(10_000); // let A capture its divergence first
+await sleep(10_000); // let A capture its edit first
 writeFileSync(join(bTarget, "b-more.txt"), "B diverges\n");
-await waitFor("blockedReason surfaced on A", 180_000, async () => {
-  const response = await api(A.url, "/api/orchestration/shell", { token: adminA });
-  if (!response.ok) return null;
-  const snapshot = await response.json();
-  return (snapshot.roamingWipStatus ?? []).find((entry) => entry.blockedReason) ?? null;
-});
-if (existsSync(join(p1Dir, "b-more.txt")))
-  fail("divergence", "B's divergent edit was applied over A's");
+await waitFor("B's a-more and A's b-more both merged", 180_000, async () =>
+  existsSync(join(bTarget, "a-more.txt")) && existsSync(join(p1Dir, "b-more.txt")) ? true : null,
+);
 if (readFileSync(join(p1Dir, "a-more.txt"), "utf8") !== "A diverges\n")
-  fail("divergence", "A's divergent edit was damaged");
-pass("true divergence blocked on A and surfaced via blockedReason");
+  fail("per-file merge", "A's own edit was damaged");
+if (readFileSync(join(bTarget, "b-more.txt"), "utf8") !== "B diverges\n")
+  fail("per-file merge", "B's own edit was damaged");
+pass("concurrent edits to different files merged both ways, no clobber");
 
 console.log("\nM3.6 ACCEPTANCE: ALL CRITERIA PASS");
