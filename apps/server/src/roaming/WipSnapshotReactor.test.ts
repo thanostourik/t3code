@@ -25,6 +25,7 @@ import { runWipApplyForTarget, runWipPassForTarget, type WipTarget } from "./Wip
 import {
   captureWipSnapshot,
   resolveOid,
+  wipAppliedMarkerRefName,
   wipPushedMarkerRefName,
   wipRefName,
 } from "./WipSnapshots.ts";
@@ -210,9 +211,47 @@ testLayer("WipSnapshotReactor", (it) => {
         workspaceProjectId: wsid,
         environmentId: LOCAL_ENVIRONMENT_ID,
         vaultExcludePaths: [],
-        skipIfTreeOid: first!.treeOid,
+        skipIfTreeOids: [first!.treeOid],
       });
       assert.isNull(second);
+    }),
+  );
+
+  it.effect("re-ships an unchanged tree once after the applied marker moves, then settles", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-wip-reship");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-reship-" });
+      const { workPath } = yield* initRepoWithOrigin(root);
+      yield* fs.writeFileString(pathService.join(workPath, "scratch.txt"), "untracked\n");
+
+      const first = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+      assert.strictEqual(first._tag, "done");
+      const second = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+      assert.strictEqual(second._tag, "skipped");
+
+      // Consume a peer snapshot (applied marker moves to a state that is not
+      // our tree). The tree is unchanged, but the peer must still receive ONE
+      // fresh snapshot whose Based-On records what we saw — that is how a
+      // deletion that returns our tree to an already-shipped state gets
+      // heard. And exactly one: the next pass settles, no ACK ping-pong.
+      yield* fs.writeFileString(pathService.join(workPath, "peer-x.txt"), "peer\n");
+      const markerSnap = yield* captureWipSnapshot({
+        cwd: workPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(markerSnap);
+      yield* fs.remove(pathService.join(workPath, "peer-x.txt"), { force: true });
+      const appliedMarker = yield* wipAppliedMarkerRefName(wsid);
+      yield* git(workPath, ["update-ref", appliedMarker, markerSnap!.commitOid]);
+
+      const third = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+      assert.strictEqual(third._tag, "done");
+      const fourth = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+      assert.strictEqual(fourth._tag, "skipped");
     }),
   );
 
@@ -648,6 +687,130 @@ testLayer("WipSnapshotReactor", (it) => {
       yield* fs.remove(pathService.join(localPath, "F.txt"), { force: true });
       yield* runWipApplyForTarget(target(wsid, localPath));
       assert.isFalse(yield* fs.exists(pathService.join(localPath, "F.txt")));
+    }),
+  );
+
+  it.effect(
+    "per-file: a conflict on one path does not unrecord files applied in the same pass",
+    () =>
+      Effect.gen(function* () {
+        const wsid = WorkspaceProjectId.make("wp-apply-pin-marker");
+        const fs = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-pin-marker-" });
+        const { peerPath, localPath } = yield* initApplyFixture(root);
+
+        // One snapshot carries BOTH a genuine conflict (tracked.txt modified on
+        // both sides) and a brand-new file F.
+        yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "peer edit\n");
+        yield* fs.writeFileString(pathService.join(peerPath, "F.txt"), "from peer\n");
+        yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+        yield* fs.writeFileString(pathService.join(localPath, "tracked.txt"), "local edit\n");
+
+        const first = yield* runWipApplyForTarget(target(wsid, localPath));
+        assert.strictEqual(first._tag, "applied-with-conflicts");
+        assert.deepEqual(first._tag === "applied-with-conflicts" ? [...first.conflicts] : [], [
+          "tracked.txt",
+        ]);
+        assert.strictEqual(
+          yield* fs.readFileString(pathService.join(localPath, "F.txt")),
+          "from peer\n",
+        );
+
+        // The user deletes the just-arrived F. The SAME peer snapshot still
+        // carries F; before the pinned marker, the conflict had held the whole
+        // applied marker back, so F's arrival was never recorded — this delete
+        // read null==null "untouched" and F resurrected from the peer's copy
+        // (field bug 2026-07-10).
+        yield* fs.remove(pathService.join(localPath, "F.txt"), { force: true });
+        const second = yield* runWipApplyForTarget(target(wsid, localPath));
+        assert.isFalse(yield* fs.exists(pathService.join(localPath, "F.txt")));
+        // The genuine conflict keeps surfacing (Waiting stays honest) and our
+        // side of it is kept.
+        assert.strictEqual(second._tag, "applied-with-conflicts");
+        assert.strictEqual(
+          yield* fs.readFileString(pathService.join(localPath, "tracked.txt")),
+          "local edit\n",
+        );
+      }),
+  );
+
+  it.effect("per-file: a peer's deletion of a file THIS machine authored propagates", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-del-received");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-del-received-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // LOCAL authors F and ships it. Its applied marker stays empty (its own
+      // echoes are tree-equal no-ops), so the peer's later deletion is only
+      // visible against this shipped snapshot.
+      yield* fs.writeFileString(pathService.join(localPath, "F.txt"), "hello\n");
+      const localSnap = yield* captureWipSnapshot({
+        cwd: localPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(localSnap);
+      const pushedMarker = yield* wipPushedMarkerRefName(wsid, LOCAL_ENVIRONMENT_ID);
+      yield* git(localPath, ["update-ref", pushedMarker, localSnap!.commitOid]);
+      yield* git(localPath, ["push", "origin", `+${localSnap!.refName}:${localSnap!.refName}`]);
+
+      // PEER received F: file on disk, applied marker at local's snapshot —
+      // so its next capture records T3-Based-On = a state that contains F.
+      yield* git(peerPath, ["fetch", "origin", `+${localSnap!.refName}:${localSnap!.refName}`]);
+      yield* fs.writeFileString(pathService.join(peerPath, "F.txt"), "hello\n");
+      const appliedMarker = yield* wipAppliedMarkerRefName(wsid);
+      yield* git(peerPath, ["update-ref", appliedMarker, localSnap!.commitOid]);
+
+      // Peer deletes F (the user's field case: delete on the machine that
+      // RECEIVED the file) and snapshots.
+      yield* fs.remove(pathService.join(peerPath, "F.txt"), { force: true });
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.isFalse(yield* fs.exists(pathService.join(localPath, "F.txt")));
+    }),
+  );
+
+  it.effect("per-file: a peer snapshot that merely predates a local file never deletes it", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-ignorant-peer");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-ignorant-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // Local authors and ships F. The peer has NEVER seen F (its snapshot
+      // carries no Based-On state containing it) — its snapshot lacking F is
+      // ignorance, not a deletion (the 92b641b4 destructive-delete flap).
+      yield* fs.writeFileString(pathService.join(localPath, "F.txt"), "precious\n");
+      const localSnap = yield* captureWipSnapshot({
+        cwd: localPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(localSnap);
+      const pushedMarker = yield* wipPushedMarkerRefName(wsid, LOCAL_ENVIRONMENT_ID);
+      yield* git(localPath, ["update-ref", pushedMarker, localSnap!.commitOid]);
+
+      yield* fs.writeFileString(pathService.join(peerPath, "unrelated.txt"), "peer work\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "F.txt")),
+        "precious\n",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "unrelated.txt")),
+        "peer work\n",
+      );
     }),
   );
 
