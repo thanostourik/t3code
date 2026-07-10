@@ -1047,3 +1047,21 @@ still surfaced the one real P1. Compound Bash one-liners (harness restart
 chained with nohup launches) misfired twice; step-by-step absolute-path
 commands are the reliable pattern. Every harness/acceptance run went
 through /tmp scripts with /tmp logs and was judged from the log on disk.
+
+## M3.7 addendum: field verification round (2026-07-10, same day)
+
+User field testing after the criteria session surfaced three reports:
+creations "a few seconds" (= the designed 5s debounce + chain), deletions
+"minutes", and remote-thread rows flapping on the laptop. A timed harness
+deletion test reproduced the deletion report as a PERMANENT deadlock (not
+latency): the author-side delete returned the worktree to an old
+applied-marker tree, the unconditional applied-tree no-op baseline skipped
+capture forever, and the shipped ref kept advertising the deleted file.
+Fixed by gating that baseline on agreement with the shipped tree; ~5.5s
+deletions both directions after; unit regression added; full ladder
+(m37/m35/m36/m2.5) re-run green. A 4-minute churn/responsiveness test found
+zero server stalls (238 probes, max 38ms), so the flapping had no harness
+repro; the user later reported it stopped after the fixes. The branch-blind
+sync finding from the same field round became the M3.8 SHIP GATE (see the
+decisions log). Harness readiness curl got --max-time 5 after an untimed
+probe wedged a suite run under parallel CPU load.

@@ -1066,6 +1066,16 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   relative to the base; a file changed on both sides is kept ours and
   surfaced (`blockedReason` → "Waiting"); everything else crosses even
   while local edits exist. Whole-tree blocking is gone.
+- **No-op baseline (REVISED in the criteria session — deletion deadlock):**
+  the applied-marker tree counts as a capture no-op baseline ONLY while it
+  equals the last-shipped tree (their agreement is what ends the idle-ACK
+  ping-pong). Unconditional, it deadlocked deletions: a worktree returning
+  to an OLD applied state while the shipped ref still advertised the
+  deleted file skipped capture forever (measured: the author-side delete
+  never propagated, >300s; field report "deletion took minutes"). A
+  worktree the shipped ref does not match must always ship. After the fix,
+  deletions propagate in ~5.5s in both directions (timed harness test);
+  unit regression fails on the old baseline.
 - **Deletion model (three invariants, each a field bug):** (1) the applied
   marker advances EVERY apply pass — clean applies to the peer snapshot,
   conflicted passes to a synthetic commit with only the conflicted paths
