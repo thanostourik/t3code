@@ -1924,11 +1924,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   // an invisible button). The click resolves what it can and otherwise
   // explains itself.
   const roamingEntries = useRoamingProjects();
-  // The sync indicator keys off the roaming workspaceProjectId. A member's own
-  // workspaceProjectId is often null on a materialized project, so fall back to
-  // the roaming registry by repository — the same resolution the materialize
-  // button uses. Without this the indicator's prop was undefined and it never
-  // rendered.
+  // The sync indicator keys off the roaming workspaceProjectId. Members carry
+  // it once enrolled/materialized; the roaming-registry fallback (same
+  // resolution the materialize button uses) covers remote-only rows that have
+  // no local member yet.
   const syncWorkspaceProjectId = useMemo(() => {
     const fromMember = project.memberProjects.find(
       (member) => member.workspaceProjectId != null,
@@ -3017,6 +3016,7 @@ const joinTargetPath = (baseDirectory: string, dirName: string): string => {
 function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undefined }) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const wipStatus = useEnvironmentRoamingWipStatus(primaryEnvironmentId);
+  const roamingWipSync = usePrimarySettings((settings) => settings.roamingWipSync);
   const entry = props.workspaceProjectId
     ? wipStatus.find((candidate) => candidate.workspaceProjectId === props.workspaceProjectId)
     : undefined;
@@ -3033,7 +3033,29 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
     return () => window.clearInterval(interval);
   }, [recentlyActive]);
 
-  if (!entry) return null;
+  if (!entry) {
+    // Enrolled + WIP sync on, but no status row in the shell snapshot yet
+    // (warm-cache resume used to skip roamingWipStatus until the next pass).
+    if (props.workspaceProjectId && roamingWipSync) {
+      return (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                aria-label="Sync is on for this project"
+                className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
+              >
+                <span className="size-2 shrink-0 rounded-full bg-muted-foreground/50" />
+                <span className="whitespace-nowrap">Sync on</span>
+              </span>
+            }
+          />
+          <TooltipPopup side="top">Sync is on for this project</TooltipPopup>
+        </Tooltip>
+      );
+    }
+    return null;
+  }
 
   // A persistent pill so "sync is on and healthy" is always visible — not a
   // dot that vanishes after two minutes. States, most-urgent first:

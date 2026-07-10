@@ -327,6 +327,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          workspace_project_id AS "workspaceProjectId",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
           created_at AS "createdAt",
@@ -688,6 +689,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          workspace_project_id AS "workspaceProjectId",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
           created_at AS "createdAt",
@@ -710,6 +712,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          workspace_project_id AS "workspaceProjectId",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
           created_at AS "createdAt",
@@ -1187,6 +1190,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 title: row.title,
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
+                ...(row.workspaceProjectId !== null
+                  ? { workspaceProjectId: row.workspaceProjectId }
+                  : {}),
                 defaultModelSelection: row.defaultModelSelection,
                 scripts: row.scripts,
                 createdAt: row.createdAt,
@@ -1309,6 +1315,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   id: row.projectId,
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
+                  // The decider's double-enrollment invariant reads this;
+                  // omitting it made project.roaming.enroll unguarded.
+                  ...(row.workspaceProjectId !== null
+                    ? { workspaceProjectId: row.workspaceProjectId }
+                    : {}),
                   defaultModelSelection: row.defaultModelSelection,
                   scripts: row.scripts,
                   createdAt: row.createdAt,
@@ -1917,6 +1928,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     title: option.value.title,
                     workspaceRoot: option.value.workspaceRoot,
                     repositoryIdentity,
+                    ...(option.value.workspaceProjectId !== null
+                      ? { workspaceProjectId: option.value.workspaceProjectId }
+                      : {}),
                     defaultModelSelection: option.value.defaultModelSelection,
                     scripts: option.value.scripts,
                     createdAt: option.value.createdAt,
