@@ -26,10 +26,13 @@ import {
 } from "@t3tools/contracts";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Fiber from "effect/Fiber";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -71,15 +74,49 @@ const WATCH_DEBOUNCE = Duration.seconds(5);
 const SHUTDOWN_SNAPSHOT_TIMEOUT = Duration.seconds(10);
 
 const WATCH_NOISE = /(^|\/)(\.git|node_modules|dist|build|target|out|\.venv|__pycache__)(\/|$)/;
+const WATCH_EXCLUDED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  "target",
+  "out",
+  ".venv",
+  "__pycache__",
+]);
+// Budget cap (M3.7): inotify watches are a per-user resource shared with
+// every desktop app. A source tree needing more directories than this is
+// not worth the budget — the project falls back to the short sweep.
+const MAX_WATCHED_DIRS_PER_PROJECT = 4096;
+// Fallback pacing when a watch cannot exist: capture sweeps every 10s (NOT
+// the 2-minute interval — that cliff is the M3.7 defect), and a real watch
+// is re-attempted after 30 ticks (~5 min) in case budget freed up.
+const WATCH_FALLBACK_SWEEP = Duration.seconds(10);
+const WATCH_REINSTALL_TICKS = 30;
+// A watch stream that stays alive this long is considered healthy and the
+// degraded notice is withdrawn.
+const WATCH_HEALTHY_AFTER = Duration.seconds(30);
+const WATCH_FALLBACK_NOTICE =
+  "File watching is unavailable on this system right now — changes sync every 10 seconds instead of instantly";
 
 /**
  * Recursive filesystem events for a project root (the Dropbox model: watch,
- * debounce, ship). Effect's FileSystem.watch is single-directory, so this
- * wraps node's recursive fs.watch (Linux ≥ Node 20 / macOS); on platforms
- * without recursive support the stream ends and the interval sweep remains
- * the only trigger. .git and node_modules churn is filtered at the source.
+ * debounce, ship). The stream ENDS when watching is impossible or dies —
+ * the caller owns the fallback.
+ *
+ * On Linux, node's recursive fs.watch registers an inotify watch for EVERY
+ * directory in the tree — node_modules/.git included (measured 2026-07-10:
+ * a running desktop instance held ~167k watches), which exhausts the
+ * per-user inotify budgets and starves every other watcher in the process.
+ * So on Linux the tree is walked and watched per directory, skipping the
+ * trees whose events were filtered anyway and capping the total. On
+ * macOS/Windows recursive watching is a cheap native facility (FSEvents /
+ * ReadDirectoryChangesW) — one watcher, no walk.
  */
 const watchTreeEvents = (root: string): Stream.Stream<string> =>
+  process.platform === "linux" ? watchTreePerDirectory(root) : watchTreeRecursiveNative(root);
+
+const watchTreeRecursiveNative = (root: string): Stream.Stream<string> =>
   Stream.callback<string>((queue) =>
     Effect.acquireRelease(
       Effect.sync(() => {
@@ -101,6 +138,96 @@ const watchTreeEvents = (root: string): Stream.Stream<string> =>
         Effect.sync(() => {
           watcher?.close();
         }),
+    ),
+  );
+
+const watchTreePerDirectory = (root: string): Stream.Stream<string> =>
+  Stream.callback<string>((queue) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        const watchers = new Map<string, NodeFS.FSWatcher>();
+        let ended = false;
+        const end = () => {
+          if (ended) return;
+          ended = true;
+          for (const watcher of watchers.values()) {
+            watcher.close();
+          }
+          watchers.clear();
+          Queue.endUnsafe(queue);
+        };
+        const watchDir = (dir: string): boolean => {
+          if (ended || watchers.has(dir)) return !ended;
+          if (watchers.size >= MAX_WATCHED_DIRS_PER_PROJECT) {
+            end();
+            return false;
+          }
+          try {
+            const watcher = NodeFS.watch(dir, (_event, fileName) => onEvent(dir, fileName));
+            // A single dead directory (deleted mid-walk) must not kill the
+            // project's whole watch; genuine budget exhaustion surfaces as
+            // watchDir throwing on the NEXT registration.
+            watcher.on("error", () => {
+              watcher.close();
+              watchers.delete(dir);
+            });
+            watchers.set(dir, watcher);
+            return true;
+          } catch {
+            end();
+            return false;
+          }
+        };
+        const walk = (dir: string): void => {
+          if (!watchDir(dir)) return;
+          let entries: NodeFS.Dirent[];
+          try {
+            entries = NodeFS.readdirSync(dir, { withFileTypes: true });
+          } catch {
+            return;
+          }
+          for (const entry of entries) {
+            if (ended) return;
+            if (
+              entry.isDirectory() &&
+              !entry.isSymbolicLink() &&
+              !WATCH_EXCLUDED_DIRS.has(entry.name)
+            ) {
+              walk(NodePath.join(dir, entry.name));
+            }
+          }
+        };
+        const onEvent = (dir: string, fileName: string | Buffer | null) => {
+          if (ended) return;
+          const name = fileName?.toString() ?? "";
+          const absolute = NodePath.join(dir, name);
+          if (name.length > 0 && !WATCH_EXCLUDED_DIRS.has(name)) {
+            // Keep the watcher set in step with directory churn: watch new
+            // subtrees, drop watchers under removed ones.
+            try {
+              if (NodeFS.lstatSync(absolute).isDirectory()) {
+                walk(absolute);
+              }
+            } catch {
+              for (const key of [...watchers.keys()]) {
+                if (key === absolute || key.startsWith(absolute + NodePath.sep)) {
+                  watchers.get(key)?.close();
+                  watchers.delete(key);
+                }
+              }
+            }
+          }
+          if (ended) return;
+          const relative = NodePath.relative(root, absolute);
+          if (!WATCH_NOISE.test(relative)) {
+            Queue.offerUnsafe(queue, relative);
+          }
+        };
+        walk(root);
+        if (watchers.size === 0) end();
+        return { close: end };
+      }),
+      (handle) => Effect.sync(() => handle.close()),
     ),
   );
 
@@ -387,9 +514,17 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     appliedNow === null ? null : yield* resolveOid(cwd, `${appliedMarkerRef}^{tree}`);
   const shippedBasedOn =
     shippedCommitSpec === null ? null : yield* readBasedOn(cwd, shippedCommitSpec);
+  // The applied-marker tree is a no-op baseline ONLY while the shipped ref
+  // advertises that same tree (that agreement is what ends the idle-ACK
+  // ping-pong). Unconditional, it deadlocked deletions (measured 2026-07-10
+  // harness): create on A → B applies (B's echo rightly suppressed, so A's
+  // marker stays at an OLD snapshot) → A deletes → A's tree returns to that
+  // old marker tree → capture skipped forever while A's shipped ref still
+  // advertises the deleted file. A worktree the shipped ref does not match
+  // must always ship.
   const noOpTrees = [
     ...(shippedTree !== null && appliedNow === shippedBasedOn ? [shippedTree] : []),
-    ...(appliedTree !== null ? [appliedTree] : []),
+    ...(appliedTree !== null && appliedTree === shippedTree ? [appliedTree] : []),
   ];
 
   // Fast path: clean worktree whose HEAD tree is already a no-op baseline.
@@ -407,6 +542,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     }
   }
 
+  const captureStartedMs = yield* Clock.currentTimeMillis;
   const captured = yield* captureWipSnapshot({
     cwd,
     workspaceProjectId: target.workspaceProjectId,
@@ -423,6 +559,16 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     ) as WipPassOutcome;
   }
   const capturedAt = yield* nowIso;
+  // Stage timing (M3.7): every hop of the delivery chain logs one line with
+  // the commitOid, so slow deliveries can be attributed to a stage instead
+  // of guessed at. Grep key: "roaming timing".
+  const captureDoneMs = yield* Clock.currentTimeMillis;
+  yield* Effect.logInfo("roaming timing: captured", {
+    workspaceProjectId: target.workspaceProjectId,
+    commitOid: captured.commitOid,
+    treeOid: captured.treeOid,
+    durationMs: captureDoneMs - captureStartedMs,
+  });
 
   const entryBase = {
     workspaceProjectId: target.workspaceProjectId,
@@ -522,6 +668,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     });
 
   const markerOid = yield* resolveOid(cwd, markerRef);
+  const pushStartedMs = yield* Clock.currentTimeMillis;
   let pushResult = yield* pushOnce(markerOid ?? "");
   // Permission is terminal — git also prints lease-shaped lines ("failed to
   // push some refs") on denials, so it must be classified first or we would
@@ -547,6 +694,12 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   }
 
   if (pushResult.exitCode === 0) {
+    const pushDoneMs = yield* Clock.currentTimeMillis;
+    yield* Effect.logInfo("roaming timing: origin-pushed", {
+      workspaceProjectId: target.workspaceProjectId,
+      commitOid: captured.commitOid,
+      durationMs: pushDoneMs - pushStartedMs,
+    });
     yield* git.execute({
       operation: "WipSnapshotReactor.updateMarker",
       cwd,
@@ -571,9 +724,18 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         workspaceProjectId: target.workspaceProjectId,
         payload,
       });
+      yield* Effect.logInfo("roaming timing: beacon-written", {
+        workspaceProjectId: target.workspaceProjectId,
+        commitOid: captured.commitOid,
+      });
     }).pipe(
+      // A lost beacon silently demotes delivery to the next interval tick
+      // (~60-120s) — that must be loud, not debug-level.
       Effect.catchCause((cause) =>
-        Effect.logDebug("roaming wip: freshness beacon write failed", { cause }),
+        Effect.logWarning("roaming wip: freshness beacon write failed", {
+          workspaceProjectId: target.workspaceProjectId,
+          cause,
+        }),
       ),
     );
     return {
@@ -679,11 +841,17 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   // the mirror always (both non-fatal — apply works from whatever arrived).
   const remote = yield* primaryRemoteName(cwd);
   if (remote !== null) {
+    const fetchStartedMs = yield* Clock.currentTimeMillis;
     yield* git.execute({
       operation: "WipSnapshotReactor.fetchPeerWipRefs",
       cwd,
       args: ["fetch", remote, `+${glob}:${glob}`],
       allowNonZeroExit: true,
+    });
+    const fetchDoneMs = yield* Clock.currentTimeMillis;
+    yield* Effect.logInfo("roaming timing: peer-refs-fetched", {
+      workspaceProjectId: target.workspaceProjectId,
+      durationMs: fetchDoneMs - fetchStartedMs,
     });
   }
   const manifest = yield* blobStore.manifest().pipe(Effect.orElseSucceed(() => []));
@@ -795,9 +963,13 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     // back, so a later peer deletion of a file this machine authored produced
     // no diff against HEAD and never propagated (field bug 2026-07-10:
     // a receiver-side delete never reached the author).
-    if (newestTree !== null && (appliedUnix === null || newestUnix > appliedUnix)) {
+    // Monotonic: never move the marker to an OLDER stamp. Same-second
+    // advances are allowed for a different commit (M3.7 — 1s stamp
+    // resolution vs a sub-second pipeline; recording is content-safe).
+    if (newestTree !== null && (appliedUnix === null || newestUnix >= appliedUnix)) {
       const echoCommit = yield* resolveOid(cwd, newest.refName);
-      if (echoCommit !== null) {
+      const markerCommit = yield* resolveOid(cwd, appliedMarker);
+      if (echoCommit !== null && echoCommit !== markerCommit) {
         yield* git.execute({
           operation: "WipSnapshotReactor.updateAppliedMarker",
           cwd,
@@ -810,9 +982,25 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
 
   // Staleness: never resurrect state older than what this checkout has
   // (an offline peer's stale echo must not undo a commit made here since).
+  // Strictly-older skips. APPLIED-MARKER TIES DO NOT (revised M3.7):
+  // committer stamps have 1-second resolution and the fast path now
+  // delivers sub-second, so the peer's fresh snapshot routinely lands in
+  // the same second as the echo commit the marker records — the old `<=`
+  // skip deadlocked delivery until the author's tree changed again
+  // (measured: run-4 harness). A marker tie skips only when the marker
+  // already records exactly this commit; anything else proceeds to the
+  // per-file merge, whose local-edit checks measure against that same
+  // marker. HEAD ties STAY conservative (`<=`): with no marker the merge
+  // base falls back to HEAD, and a same-second-but-stale snapshot lacking
+  // a just-committed file would read as a peer deletion of it (review
+  // finding, 2026-07-10).
+  const newestCommit = yield* resolveOid(cwd, newest.refName);
+  const appliedCommit = yield* resolveOid(cwd, appliedMarker);
   if (
+    newestCommit === null ||
+    newestCommit === appliedCommit ||
     (headUnix !== null && newestUnix <= headUnix) ||
-    (appliedUnix !== null && newestUnix <= appliedUnix)
+    (appliedUnix !== null && newestUnix < appliedUnix)
   ) {
     return { _tag: "skipped" } as WipApplyOutcome;
   }
@@ -1029,7 +1217,6 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   // paths stay diffable so the conflict re-surfaces each pass until resolved,
   // and the commit is dated just before the peer snapshot so the staleness
   // gate keeps re-examining that snapshot while the conflict lives.
-  const newestCommit = yield* resolveOid(cwd, newest.refName);
   if (newestCommit !== null && conflicts.length === 0) {
     yield* git.execute({
       operation: "WipSnapshotReactor.updateAppliedMarker",
@@ -1139,10 +1326,12 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   }
 
   const fromEnvironmentId = EnvironmentId.make(newest.refName.split("/").pop() ?? "unknown");
+  const appliedCommitOid = yield* resolveOid(cwd, newest.refName);
   if (conflicts.length > 0) {
     yield* Effect.logInfo("roaming wip: applied peer changes with conflicts held back", {
       workspaceProjectId: target.workspaceProjectId,
       fromEnvironmentId,
+      commitOid: appliedCommitOid,
       applied: applied.length,
       conflicts,
     });
@@ -1156,6 +1345,7 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   yield* Effect.logInfo("roaming wip: applied peer changes per-file", {
     workspaceProjectId: target.workspaceProjectId,
     fromEnvironmentId,
+    commitOid: appliedCommitOid,
     applied: applied.length,
   });
   return {
@@ -1245,6 +1435,31 @@ const make = Effect.gen(function* () {
       Effect.asVoid,
     );
 
+  // Degraded-watch advisories, merged into every published status entry so
+  // a pass cannot wipe them (the notice outlives individual passes).
+  const watchNotices = yield* Ref.make(new Map<WorkspaceProjectId, string>());
+
+  const setWatchNotice = (target: WipTarget, message: string | null) =>
+    Effect.gen(function* () {
+      const changed = yield* Ref.modify(watchNotices, (map) => {
+        if ((map.get(target.workspaceProjectId) ?? null) === message) {
+          return [false, map] as const;
+        }
+        const next = new Map(map);
+        if (message === null) {
+          next.delete(target.workspaceProjectId);
+        } else {
+          next.set(target.workspaceProjectId, message);
+        }
+        return [true, next] as const;
+      });
+      if (!changed) return;
+      const current = (yield* Ref.get(statuses)).get(target.workspaceProjectId);
+      if (current === undefined) return;
+      const { notice: _stale, ...rest } = current;
+      yield* publishEntry(message === null ? rest : { ...rest, notice: message });
+    });
+
   const processTarget = (target: WipTarget) =>
     Effect.gen(function* () {
       if (!(yield* isEnabled)) {
@@ -1279,7 +1494,10 @@ const make = Effect.gen(function* () {
             });
       // blockedReason reflects THIS pass only: set on blocked, cleared on
       // anything else (a stale "blocked" after the user commits would lie).
-      const { blockedReason: _stale, ...baseWithoutBlocked } = base;
+      // The watch notice is owned by the watch loop, not the pass — strip
+      // whatever the previous entry carried and re-merge the current one.
+      const { blockedReason: _stale, notice: _staleNotice, ...baseWithoutBlocked } = base;
+      const currentNotice = (yield* Ref.get(watchNotices)).get(target.workspaceProjectId);
       const withWarning: RoamingWipStatusEntry =
         outcome._tag === "skipped" && outcome.warning !== undefined
           ? { ...baseWithoutBlocked, lastError: outcome.warning }
@@ -1302,10 +1520,12 @@ const make = Effect.gen(function* () {
             : applied._tag === "blocked"
               ? { ...withWarning, blockedReason: applied.reason }
               : withWarning;
+      const entryWithNotice: RoamingWipStatusEntry =
+        currentNotice === undefined ? entry : { ...entry, notice: currentNotice };
       const seeded =
         previous === undefined
-          ? yield* providePassDeps(seedActivityFromMarkers(target, entry, mode))
-          : entry;
+          ? yield* providePassDeps(seedActivityFromMarkers(target, entryWithNotice, mode))
+          : entryWithNotice;
       if (
         // A project's FIRST pass always publishes, even when fully skipped
         // (clean tree, nothing to apply): the sidebar pill renders only for
@@ -1360,8 +1580,11 @@ const make = Effect.gen(function* () {
   );
 
   // Watch → debounce → enqueue: capture latency drops from the interval tick
-  // to seconds after the last write (the interval stays as the fallback
-  // sweep). Swap scopes atomically — the VaultSync watcher lesson.
+  // to seconds after the last write. When a watch cannot exist (inotify
+  // budget, unsupported platform) or dies, the project falls back to a 10s
+  // capture sweep with a surfaced notice — NEVER silently to the 2-minute
+  // interval (the M3.7 latency cliff) — and periodically re-attempts a real
+  // watch. Swap scopes atomically — the VaultSync watcher lesson.
   const installWatcher = (target: WipTarget) =>
     Effect.gen(function* () {
       const scope = yield* Scope.make("sequential");
@@ -1374,13 +1597,39 @@ const make = Effect.gen(function* () {
       if (previous !== undefined) {
         yield* Scope.close(previous, Exit.void);
       }
-      yield* Stream.runForEach(
-        watchTreeEvents(target.workspaceRoot).pipe(Stream.debounce(WATCH_DEBOUNCE)),
-        () => worker.enqueue(target.workspaceProjectId, target),
-      ).pipe(
+      const runWatchOnce = Effect.gen(function* () {
+        // The notice withdraws only once the fresh watch proves healthy —
+        // an install that dies instantly must not blink the advisory.
+        const clearFiber = yield* Effect.sleep(WATCH_HEALTHY_AFTER).pipe(
+          Effect.andThen(setWatchNotice(target, null)),
+          Effect.forkIn(scope),
+        );
+        yield* Stream.runForEach(
+          watchTreeEvents(target.workspaceRoot).pipe(Stream.debounce(WATCH_DEBOUNCE)),
+          (relative) =>
+            Effect.logInfo("roaming timing: watch-trigger", {
+              workspaceProjectId: target.workspaceProjectId,
+              path: relative,
+            }).pipe(Effect.andThen(worker.enqueue(target.workspaceProjectId, target))),
+        ).pipe(Effect.ignoreCause({ log: true }), Effect.ensuring(Fiber.interrupt(clearFiber)));
+      });
+      const watchLoop = Effect.gen(function* () {
+        while (true) {
+          yield* runWatchOnce;
+          // Reached only when the stream ended on its own — scope
+          // interruption never gets here. Loud + surfaced + short sweep.
+          yield* Effect.logWarning("roaming wip: tree watch unavailable, sweeping every 10s", {
+            workspaceProjectId: target.workspaceProjectId,
+          });
+          yield* setWatchNotice(target, WATCH_FALLBACK_NOTICE);
+          for (let tick = 0; tick < WATCH_REINSTALL_TICKS; tick++) {
+            yield* Effect.sleep(WATCH_FALLBACK_SWEEP);
+            yield* worker.enqueue(target.workspaceProjectId, target);
+          }
+        }
+      });
+      yield* watchLoop.pipe(
         Effect.ignoreCause({ log: true }),
-        // A watcher whose stream ends (error, unsupported platform) evicts
-        // itself so the next scan re-installs instead of trusting a corpse.
         Effect.ensuring(
           Ref.update(watcherScopes, (scopes) => {
             if (scopes.get(target.workspaceProjectId) !== scope) {
@@ -1545,12 +1794,28 @@ const make = Effect.gen(function* () {
                 record.kind === "wip" &&
                 !record.key.endsWith(`/${ownEnvironmentId}`) &&
                 record.authorEnvironmentId !== ownEnvironmentId
-                  ? snapshotProject(record.workspaceProjectId)
+                  ? Effect.logInfo("roaming timing: wip-blob-arrival trigger", {
+                      workspaceProjectId: record.workspaceProjectId,
+                      key: record.key,
+                      version: record.version,
+                    }).pipe(Effect.andThen(snapshotProject(record.workspaceProjectId)))
                   : Effect.void,
               ),
             ),
           );
         }),
+      );
+      // Enrollment: a project gains its workspaceProjectId AFTER pairing has
+      // already run the settings-triggered scan, so without this trigger the
+      // fresh project has no watcher and no first snapshot until the next
+      // interval sweep — measured on the M3.7 harness as a ~2-minute stall
+      // on the very first delivery.
+      yield* Effect.forkScoped(
+        Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
+          event.type === "project.meta-updated" && event.payload.workspaceProjectId !== undefined
+            ? snapshotAll()
+            : Effect.void,
+        ).pipe(Effect.ignoreCause({ log: true })),
       );
       // Turn completion: snapshot just that project, post-checkpoint.
       yield* Effect.forkScoped(

@@ -947,3 +947,121 @@ only the two-instance harness exposed the capture-dedup and marker-timing
 interactions. `codex exec` background runs hang reading a non-TTY stdin
 unless `</dev/null` is appended (root cause of three sessions of "silent
 codex hangs"); model pinning (`-m`) is now explicit in the codex skills.
+
+## M3.7 formal exit criteria session (2026-07-10, reopened same day)
+
+The first M3.7 close skipped the row's formal exit criteria; this session
+executed them per user directive ("these are DEFECTS in the shipped sync").
+Instrumentation strictly first, fixes only for measured stalls.
+
+**Measurement infrastructure.** Every delivery stage now logs a permanent
+`roaming timing:` line keyed by commitOid/blob version: watch-trigger →
+captured → origin-pushed → beacon-written → mirror-exchange (with trigger
+provenance: interval/blob-write/peer-notify/manual, threaded through a
+sliding-queue-of-string) → blobs-pushed-to-peer → wip-blob-ingested →
+arrival trigger → peer-refs-fetched → apply. `accept-m37.mjs` writes a file
+on A ten times, polls B at 100ms, and prints a per-stage table per delivery
+from the two server.log files.
+
+**Analysis-pass correction (measured).** The first close attributed the
+ENOSPC to `max_user_instances` per watcher. Measured: libuv shares ONE
+inotify instance per process regardless of fs.watch call count — instances
+are consumed per PROCESS (zombies, desktop apps), while the recursive
+watchers exhausted `max_user_watches` (one running desktop instance held
+~167,340 watches, node_modules/.git registered). Same ENOSPC, different
+budget; the fix directions held for both.
+
+**Baseline (clean machine!).** The bimodality reproduced immediately:
+delivery 1 ~28s, deliveries 2-10 all ~52s phase-locked. The stage table
+attributed it in one read: A captured/pushed/beaconed in ~500ms, then
+NOTHING on A — B's own 60s interval pass fetched the beacon. Root cause:
+mirror connectivity is one-directional (M2.5 tamper resistance: the callee
+holds no credential/URL for the initiator; the server cannot discover its
+own reachable URLs, so a reciprocal-credential handshake is a dead end).
+The "fast" runs in the field were writes that rode an adjacent trigger.
+M3.5's "~1s A→B" acceptance number was exactly that luck.
+
+**Fix 1 — mirror/wait long-poll.** The initiator (only side with
+credential+URL) holds `POST /api/roaming/mirror/wait` (25s hold, same
+gating as all mirror routes) against an in-memory blob-store change
+revision; any callee blob write returns it and the initiator passes
+immediately. Works for existing pairings without re-pairing. Run 3:
+delivery 1 dropped to 0.6s — and exposed fix 2.
+
+**Fix 2 — enrollment trigger.** The pairing-time settings scan raced
+RoamingAutoEnroll: a project enrolled after the scan had no watcher and no
+first snapshot until the 2-min sweep (run 2/3: first delivery waited ~106s
+or ~2min). `project.meta-updated` with a workspaceProjectId now triggers a
+scan. Also found here: the recursive watcher was dying within ~1s of
+install on git's transient `.git` churn (Node's Linux recursive watch
+errors on vanished dirs mid-registration) — the probable mechanism behind
+much of the field's "watcher flake", distinct from budget exhaustion.
+
+**Fix 3 — staleness tie deadlock.** With the pipeline sub-second, A's
+fresh snapshot and B's echo marker routinely land in the same 1-second
+committer stamp; M3.5's `<=` skip then blocked delivery until A's tree
+changed again (run 4: hot file captured+beaconed in 900ms, B refused it
+forever). Applied-marker ties now evaluate (identical commit still skips);
+unit regression test added. Codex review (P1, verified real) kept HEAD
+ties at `<=`: with no applied marker the merge base falls back to HEAD,
+and a tied-but-stale snapshot lacking a just-committed file reads as a
+peer deletion of it — base-diff deletions are not Based-On-gated (that
+remains a flagged narrow gap for no-marker states generally).
+
+**Fix 4 — waiter spawn latency.** Run 5: 9/10 deliveries ~5.5s, one 43.7s
+outlier — the waiter for a fresh pairing spawned only on the 30s reconcile
+scan, missing the first beacons. Waiters now also reconcile on every
+mirror drain pass (atomic claim against double-spawn).
+
+**Run 6 (criterion): 0.7, 5.6, 5.5, 5.7, 5.5, 5.6, 5.7, 5.4, 5.3, 5.8 —
+max 5.8s, all ≤10s.** Steady state = 5s watch debounce + ~0.5s chain.
+
+**Watcher budget.** Linux tree watching rewritten to per-directory
+registration (walk skipping .git/node_modules/dist/build/target/out/
+.venv/__pycache__, symlinks never followed, dir-create walks the new
+subtree, dir-delete prunes watchers by prefix), 4096-dir cap per project.
+Watch death/cap → 10s fallback sweep + `notice` field on the status entry
+(new optional contracts field; amber "Sync on" pill with concept-free
+copy) + real-watch retry ~5min; the notice is reactor state merged into
+every publish so passes cannot wipe it, and clears only after a fresh
+watch stays healthy 30s. Settings watcher backed by an unconditional 2s
+mtime poll (the "can never starve" guarantee — external edit honored
+within 5s at zero budget). Measured after: 1 inotify instance, ~5k watches
+for 13 harness projects.
+
+**Stress fixture pivot.** The first fixture exhausted real
+`max_user_instances` (200 `tail -f` holders) and restarted A — the server
+CRASHED in upstream watch paths (git driver watching .git/hooks and
+FETCH_HEAD, atomic-write temp files) before roaming code was reached.
+Fixing upstream watch error handling is outside the milestone's blast
+radius (fork discipline), so `accept-m37-stress.mjs` instead drives the
+budget machinery deterministically: 12 live projects + a 13th with 4200
+directories (over the cap) — notice surfaced, fallback-sweep delivery,
+healthy projects unaffected, settings edits ≤5s in both phases (measured
+340/350ms). The instance-exhaustion crash is recorded as an accepted
+known limit.
+
+Process notes: the codex CLI's `review --base` rejects a custom prompt in
+this version (both stdin `-` and positional) — the default review stance
+still surfaced the one real P1. Compound Bash one-liners (harness restart
+chained with nohup launches) misfired twice; step-by-step absolute-path
+commands are the reliable pattern. Every harness/acceptance run went
+through /tmp scripts with /tmp logs and was judged from the log on disk.
+
+## M3.7 addendum: field verification round (2026-07-10, same day)
+
+User field testing after the criteria session surfaced three reports:
+creations "a few seconds" (= the designed 5s debounce + chain), deletions
+"minutes", and remote-thread rows flapping on the laptop. A timed harness
+deletion test reproduced the deletion report as a PERMANENT deadlock (not
+latency): the author-side delete returned the worktree to an old
+applied-marker tree, the unconditional applied-tree no-op baseline skipped
+capture forever, and the shipped ref kept advertising the deleted file.
+Fixed by gating that baseline on agreement with the shipped tree; ~5.5s
+deletions both directions after; unit regression added; full ladder
+(m37/m35/m36/m2.5) re-run green. A 4-minute churn/responsiveness test found
+zero server stalls (238 probes, max 38ms), so the flapping had no harness
+repro; the user later reported it stopped after the fixes. The branch-blind
+sync finding from the same field round became the M3.8 SHIP GATE (see the
+decisions log). Harness readiness curl got --max-time 5 after an untimed
+probe wedged a suite run under parallel CPU load.

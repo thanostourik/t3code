@@ -1,9 +1,11 @@
 // M3.5 acceptance (.plans/21-roaming-workspace.md): sync completion.
 // Exit criteria: a file created on machine A appears on machine B's clean
-// checkout within seconds with no user action; a locally-edited checkout on
-// B is never overwritten (surfaced as blocked, not clobbered); .idea/ listed
-// in .t3sync round-trips A→B while staying off the origin; an oversized
-// untracked file is skipped with a surfaced warning and never pushed.
+// checkout within seconds with no user action; locally-edited FILES on B
+// are never overwritten (step 5 revised by M3.7's per-file merge — a local
+// edit no longer blocks the whole tree, a same-file conflict keeps ours);
+// .idea/ listed in .t3sync round-trips A→B while staying off the origin;
+// an oversized untracked file is skipped with a surfaced warning and never
+// pushed.
 //
 // Run the harness FRESH first:
 //   scripts/roaming/harness.sh stop; rm -rf /tmp/t3-roaming-harness
@@ -234,17 +236,24 @@ for (const ref of originWipRefs.split("\n").filter((line) => line.length > 0)) {
 }
 pass(`file created on A appeared on B in ~${latencySeconds}s; origin holds no .idea/.env`);
 
-// ── 5. locally-edited B checkout is never overwritten ─────────────────
+// ── 5. locally-edited FILES on B are never overwritten ────────────────
+// REVISED by M3.7's per-file merge (like accept-m36 step 6): a local edit
+// no longer blocks the whole tree — peer changes to OTHER files cross —
+// but a file changed on both sides is kept ours and surfaced. Both sides
+// edit the same file inside one debounce window so neither has applied
+// the other's version first: a genuine two-sided conflict.
 writeFileSync(join(bTarget, "local-work.txt"), "B's own edit\n");
-await sleep(8_000); // let B's watcher capture ITS edit first
+writeFileSync(join(bTarget, "hot-file.txt"), "B's local take\n");
 writeFileSync(join(p1Dir, "hot-file.txt"), "changed on A again\n");
-// give the pipeline ample time to (incorrectly) deliver
-await sleep(45_000);
+// give the pipeline ample time to (incorrectly) clobber either side
+await sleep(60_000);
 if (!existsSync(join(bTarget, "local-work.txt")))
   fail("no-clobber", "B's local file was deleted by auto-apply");
-if (readFileSync(join(bTarget, "hot-file.txt"), "utf8") === "changed on A again\n")
-  fail("no-clobber", "A's change was applied over B's locally-edited checkout");
-pass("locally-edited checkout on B untouched (blocked, not clobbered)");
+if (readFileSync(join(bTarget, "hot-file.txt"), "utf8") !== "B's local take\n")
+  fail("no-clobber", "A's change was applied over B's locally-edited file");
+if (readFileSync(join(p1Dir, "hot-file.txt"), "utf8") !== "changed on A again\n")
+  fail("no-clobber", "B's change was applied over A's locally-edited file");
+pass("two-sided edit of one file: both sides kept their own copy (per-file merge)");
 
 // ── 6. oversize untracked file: warned, never pushed ──────────────────
 writeFileSync(join(p1Dir, "huge.bin"), Buffer.alloc(60 * 1024 * 1024, 7));
@@ -271,9 +280,23 @@ pass("oversize untracked file warned and kept off the origin");
 // (flagged in the plan as a follow-up — the recursive project watchers are
 // the suspected budget hog).
 const settingsB = readSettings(B);
-process.kill(
-  Number(readFileSync(join(HARNESS_DIR, "instance-b/server.pid"), "utf8").trim()),
-  "SIGKILL",
+const bPid = Number(readFileSync(join(HARNESS_DIR, "instance-b/server.pid"), "utf8").trim());
+process.kill(bPid, "SIGKILL");
+// Wait until the process is fully REAPED: harness.sh start probes the pid
+// with `kill -0`, and a not-yet-reaped zombie reads as "already running",
+// which skips the relaunch and leaves the port dead (race hit 2026-07-10).
+await waitFor(
+  "instance-b fully dead",
+  15_000,
+  async () => {
+    try {
+      process.kill(bPid, 0);
+      return null;
+    } catch {
+      return true;
+    }
+  },
+  200,
 );
 writeFileSync(
   join(B.base, "userdata", "settings.json"),
