@@ -70,10 +70,19 @@ machine's projects are visible but dead.
 > backbone (30s sweep; the fs watcher is an optimization, not a
 > guarantee). Verified: unit suite + repeated two-instance harness E2E
 > (pair → materialize → WIP both ways → receiver-side delete with a live
-> conflict → restart). The row's formal exit criteria (10× delivery
-> latency run, watcher stress fixture) were NOT run — closed on user call
-> 2026-07-10; carry them into M4's analysis pass if latency complaints
-> persist.
+> conflict → restart). **REOPENED 2026-07-10 (user directive, same day):**
+> the row's formal exit criteria (10× delivery latency run, watcher stress
+> fixture) had been skipped on close and the watcher-budgeting work was
+> still open — this session executes them: per-stage latency
+> instrumentation + measurement, budget-aware tree watching,
+> settings-watcher guarantee, then the full acceptance suite.
+> Analysis-pass correction (measured 2026-07-10): libuv shares ONE inotify
+> instance per process regardless of fs.watch call count — the recursive
+> per-project watchers exhaust `max_user_watches` (a running desktop
+> instance held ~167k watches with node_modules/.git registered), while
+> `max_user_instances` (128) is consumed per PROCESS (test zombies +
+> desktop apps). Both paths end in the same ENOSPC; the row's fix
+> directions stand for both.
 > **NEXT UP: M4 (bootstrap recipes; its analysis pass must scope honest
 > limits — v1 targets scriptable setups; capture-what-happened over
 > guaranteed-boot).** M2.5 DONE 2026-07-06 (PRs #19–#29+).

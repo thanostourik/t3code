@@ -28,6 +28,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -407,6 +408,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     }
   }
 
+  const captureStartedMs = yield* Clock.currentTimeMillis;
   const captured = yield* captureWipSnapshot({
     cwd,
     workspaceProjectId: target.workspaceProjectId,
@@ -423,6 +425,16 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     ) as WipPassOutcome;
   }
   const capturedAt = yield* nowIso;
+  // Stage timing (M3.7): every hop of the delivery chain logs one line with
+  // the commitOid, so slow deliveries can be attributed to a stage instead
+  // of guessed at. Grep key: "roaming timing".
+  const captureDoneMs = yield* Clock.currentTimeMillis;
+  yield* Effect.logInfo("roaming timing: captured", {
+    workspaceProjectId: target.workspaceProjectId,
+    commitOid: captured.commitOid,
+    treeOid: captured.treeOid,
+    durationMs: captureDoneMs - captureStartedMs,
+  });
 
   const entryBase = {
     workspaceProjectId: target.workspaceProjectId,
@@ -522,6 +534,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     });
 
   const markerOid = yield* resolveOid(cwd, markerRef);
+  const pushStartedMs = yield* Clock.currentTimeMillis;
   let pushResult = yield* pushOnce(markerOid ?? "");
   // Permission is terminal — git also prints lease-shaped lines ("failed to
   // push some refs") on denials, so it must be classified first or we would
@@ -547,6 +560,12 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   }
 
   if (pushResult.exitCode === 0) {
+    const pushDoneMs = yield* Clock.currentTimeMillis;
+    yield* Effect.logInfo("roaming timing: origin-pushed", {
+      workspaceProjectId: target.workspaceProjectId,
+      commitOid: captured.commitOid,
+      durationMs: pushDoneMs - pushStartedMs,
+    });
     yield* git.execute({
       operation: "WipSnapshotReactor.updateMarker",
       cwd,
@@ -571,9 +590,18 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         workspaceProjectId: target.workspaceProjectId,
         payload,
       });
+      yield* Effect.logInfo("roaming timing: beacon-written", {
+        workspaceProjectId: target.workspaceProjectId,
+        commitOid: captured.commitOid,
+      });
     }).pipe(
+      // A lost beacon silently demotes delivery to the next interval tick
+      // (~60-120s) — that must be loud, not debug-level.
       Effect.catchCause((cause) =>
-        Effect.logDebug("roaming wip: freshness beacon write failed", { cause }),
+        Effect.logWarning("roaming wip: freshness beacon write failed", {
+          workspaceProjectId: target.workspaceProjectId,
+          cause,
+        }),
       ),
     );
     return {
@@ -679,11 +707,17 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   // the mirror always (both non-fatal — apply works from whatever arrived).
   const remote = yield* primaryRemoteName(cwd);
   if (remote !== null) {
+    const fetchStartedMs = yield* Clock.currentTimeMillis;
     yield* git.execute({
       operation: "WipSnapshotReactor.fetchPeerWipRefs",
       cwd,
       args: ["fetch", remote, `+${glob}:${glob}`],
       allowNonZeroExit: true,
+    });
+    const fetchDoneMs = yield* Clock.currentTimeMillis;
+    yield* Effect.logInfo("roaming timing: peer-refs-fetched", {
+      workspaceProjectId: target.workspaceProjectId,
+      durationMs: fetchDoneMs - fetchStartedMs,
     });
   }
   const manifest = yield* blobStore.manifest().pipe(Effect.orElseSucceed(() => []));
@@ -1139,10 +1173,12 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   }
 
   const fromEnvironmentId = EnvironmentId.make(newest.refName.split("/").pop() ?? "unknown");
+  const appliedCommitOid = yield* resolveOid(cwd, newest.refName);
   if (conflicts.length > 0) {
     yield* Effect.logInfo("roaming wip: applied peer changes with conflicts held back", {
       workspaceProjectId: target.workspaceProjectId,
       fromEnvironmentId,
+      commitOid: appliedCommitOid,
       applied: applied.length,
       conflicts,
     });
@@ -1156,6 +1192,7 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   yield* Effect.logInfo("roaming wip: applied peer changes per-file", {
     workspaceProjectId: target.workspaceProjectId,
     fromEnvironmentId,
+    commitOid: appliedCommitOid,
     applied: applied.length,
   });
   return {
@@ -1376,8 +1413,22 @@ const make = Effect.gen(function* () {
       }
       yield* Stream.runForEach(
         watchTreeEvents(target.workspaceRoot).pipe(Stream.debounce(WATCH_DEBOUNCE)),
-        () => worker.enqueue(target.workspaceProjectId, target),
+        (relative) =>
+          Effect.logInfo("roaming timing: watch-trigger", {
+            workspaceProjectId: target.workspaceProjectId,
+            path: relative,
+          }).pipe(Effect.andThen(worker.enqueue(target.workspaceProjectId, target))),
       ).pipe(
+        // Reached only when the stream ENDS on its own (watch creation
+        // failed or the watcher errored) — scope interruption skips it. A
+        // dead watcher demotes capture to the interval sweep, which is
+        // exactly the silent latency cliff M3.7 exists to remove, so it
+        // must be loud.
+        Effect.andThen(
+          Effect.logWarning("roaming wip: tree watch ended, interval sweep is the only trigger", {
+            workspaceProjectId: target.workspaceProjectId,
+          }),
+        ),
         Effect.ignoreCause({ log: true }),
         // A watcher whose stream ends (error, unsupported platform) evicts
         // itself so the next scan re-installs instead of trusting a corpse.
@@ -1545,7 +1596,11 @@ const make = Effect.gen(function* () {
                 record.kind === "wip" &&
                 !record.key.endsWith(`/${ownEnvironmentId}`) &&
                 record.authorEnvironmentId !== ownEnvironmentId
-                  ? snapshotProject(record.workspaceProjectId)
+                  ? Effect.logInfo("roaming timing: wip-blob-arrival trigger", {
+                      workspaceProjectId: record.workspaceProjectId,
+                      key: record.key,
+                      version: record.version,
+                    }).pipe(Effect.andThen(snapshotProject(record.workspaceProjectId)))
                   : Effect.void,
               ),
             ),

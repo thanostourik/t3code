@@ -225,6 +225,13 @@ const pushRoute = HttpRouter.add(
             ),
           );
         results.push({ kind: blob.kind, key: blob.key, outcome });
+        if (blob.kind === "wip") {
+          yield* Effect.logInfo("roaming timing: wip-blob-ingested", {
+            key: blob.key,
+            version: blob.version,
+            outcome,
+          });
+        }
       }
       return yield* respondJson(RoamingPushBlobsResponse, { results });
     }),
