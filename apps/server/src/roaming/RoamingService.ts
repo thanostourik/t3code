@@ -83,6 +83,12 @@ export class RoamingService extends Context.Service<
       projectId: ProjectId,
     ) => Effect.Effect<WorkspaceProjectId, RoamingEnrollError>;
     /**
+     * Push a renamed local project's title into its registry blob (and mirror
+     * it), preserving every other registry field. No-op when the project is
+     * not enrolled, the registry is missing, or the title already matches.
+     */
+    readonly syncRegistryTitle: (projectId: ProjectId) => Effect.Effect<void, RoamingEnrollError>;
+    /**
      * The unified pairing handshake (M2.5): exchange the single-use pairing
      * credential once, establish the mirror when the credential allows it,
      * and always derive an attach bearer for the client. Attach-only against
@@ -125,6 +131,9 @@ const decodePeerDescriptor = Schema.decodeUnknownEffect(
   Schema.Struct({ environmentId: EnvironmentId }),
 );
 const encodeRegistryPayloadJson = Schema.encodeUnknownEffect(
+  Schema.fromJsonString(RoamingRegistryPayload),
+);
+const decodeRegistryPayloadJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RoamingRegistryPayload),
 );
 
@@ -235,6 +244,48 @@ const make = Effect.gen(function* () {
 
     yield* peerMirror.syncNow();
     return workspaceProjectId;
+  });
+
+  const syncRegistryTitle: RoamingService["Service"]["syncRegistryTitle"] = Effect.fn(
+    "RoamingService.syncRegistryTitle",
+  )(function* (projectId) {
+    const projectRow = yield* projectRepository
+      .getById({ projectId })
+      .pipe(Effect.mapError(internalError("project lookup failed")));
+    if (projectRow._tag === "None" || projectRow.value.deletedAt !== null) {
+      return;
+    }
+    const project = projectRow.value;
+    if (project.workspaceProjectId == null) {
+      return;
+    }
+    const blob = yield* blobStore
+      .get({ kind: "registry", key: project.workspaceProjectId })
+      .pipe(Effect.mapError(internalError("registry blob lookup failed")));
+    if (blob === null) {
+      return;
+    }
+    const registry = yield* decodeRegistryPayloadJson(blob.payload).pipe(
+      Effect.mapError(internalError("registry payload decode failed")),
+    );
+    if (registry.title === project.title) {
+      return;
+    }
+    // Patch ONLY the title — perMachineRoots and vault overrides accumulate
+    // contributions from other machines and must survive the rewrite.
+    const payloadJson = yield* encodeRegistryPayloadJson({
+      ...registry,
+      title: project.title,
+    }).pipe(Effect.mapError(internalError("registry payload encode failed")));
+    yield* blobStore
+      .writeLocal({
+        kind: "registry",
+        key: project.workspaceProjectId,
+        workspaceProjectId: project.workspaceProjectId,
+        payload: payloadJson,
+      })
+      .pipe(Effect.mapError(internalError("registry blob write failed")));
+    yield* peerMirror.syncNow();
   });
 
   const exchangePairingCredential = (baseUrl: string, pairingCredential: string) =>
@@ -588,7 +639,12 @@ const make = Effect.gen(function* () {
     };
   });
 
-  return { enrollProject, addPeer, mintMachineCredential } satisfies RoamingService["Service"];
+  return {
+    enrollProject,
+    syncRegistryTitle,
+    addPeer,
+    mintMachineCredential,
+  } satisfies RoamingService["Service"];
 });
 
 export const layer = Layer.effect(RoamingService, make);
