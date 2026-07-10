@@ -95,9 +95,16 @@ machine's projects are visible but dead.
 > `accept-m37-stress.mjs` (12 live projects + over-cap 13th: notice
 > surfaced, sweep delivery, others unaffected, settings ≤5s);
 > `accept-m35.mjs` + `accept-m36.mjs` + canonical re-run all green.
-> **NEXT UP: M4 (bootstrap recipes; its analysis pass must scope honest
-> limits — v1 targets scriptable setups; capture-what-happened over
-> guaranteed-boot).** M2.5 DONE 2026-07-06 (PRs #19–#29+).
+> **SHIP GATE — NEXT UP: M3.8 (branch-aware sync model). Declared by the
+> user 2026-07-10 after real two-machine use: branch-blind WIP auto-apply
+> is COMPLETELY BROKEN for real git workflows and BLOCKS SHIPPING THE SYNC
+> FEATURE AT ALL — not a side-note on any milestone, its own
+> analysis/decision phase whose outcome may change the sync model's
+> direction. Nothing ships until its decision lands (see the M3.8 row and
+> the 2026-07-10 decisions-log entry).** M4 (bootstrap recipes; its
+> analysis pass must scope honest limits — v1 targets scriptable setups;
+> capture-what-happened over guaranteed-boot) queues behind it. M2.5 DONE
+> 2026-07-06 (PRs #19–#29+).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -145,6 +152,23 @@ machine's projects are visible but dead.
 > recipes milestone's analysis pass must scope honest limits (v1 targets
 > scriptable setups; capture-what-happened over guaranteed-boot). Documents
 > written before 2026-07-06 (the history file) use the OLD numbering.
+> 2026-07-10 — **SHIP GATE (user directive, field session): branch-blind
+> WIP sync is not shippable — period.** Field finding on the real machines:
+> the user modernized a repo on the desktop on a NEW branch (all work
+> committed there); the laptop — still on `master` — received that work as
+> UNSTAGED modifications on `master`. After merge+push on the desktop, the
+> laptop again showed the merged content as an unstaged mess. This is the
+> v1 model working AS SPECIFIED (snapshots mirror the worktree TREE only;
+> branches/HEAD/index are invisible to sync, commits travel via origin) —
+> and the user's verdict is that the specification itself is COMPLETELY
+> BROKEN for real git usage: "we can't be creating such a mess in the
+> git; this is not acceptable to ship." Explicitly NOT to be recorded as
+> a bullet under M5 or any existing milestone: it is its own phase (M3.8)
+> whose outcome — up to and including a direction change for the whole
+> sync model — gates ANY shipping of the sync feature. Proper handling is
+> an OPEN QUESTION; the user has deliberately not picked a direction, and
+> no implementation may start before an options analysis and an explicit
+> user decision.
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
 > section at the end. Milestones run strictly in order (M0 → M2, M2.5, M3 → M7; renumbered 2026-07-06 so execution order and numbers agree).
@@ -705,6 +729,7 @@ load-bearing assumptions are cheap to verify before building on them.
 | **M3.5 — Sync completion (field-driven)** | Delivery + freshness for step 5, per the 2026-07-07 field session: auto-apply of newer other-machine snapshots onto clean/strictly-behind checkouts (applied-marker ref `refs/t3/wip-applied/<wsid>`; locally-edited trees are never touched — notice only); filesystem-watch capture (seconds, not minutes; 2-min sweep as fallback); graceful-shutdown snapshot; `.t3sync` per-project include file (gitignore syntax) carrying gitignored paths like `.idea/` over the machine-to-machine channel; origin-mode size guard; per-machine consent copy/propagation fix. | Create a file on machine A → it appears on machine B's clean checkout within seconds, no user action; a locally-edited checkout on B is never overwritten and surfaces a notice; `.idea/` listed in `.t3sync` round-trips A→B while staying out of the origin; an oversized untracked file is skipped with a surfaced notice, never pushed. Canonical workflow re-run. |
 | **M3.6 — Field round 2 (delivery gaps + visibility)** | Same-day field findings on the real machines: (1) **vault delivery** — vault blobs apply on arrival (and at startup catch-up) to linked checkouts, not only at materialize: missing files written, files unmodified since OUR last apply updated (per-file applied-hash record under `<stateDir>/vault-applied/`), locally-modified files never overwritten (notice); peer-deleted files are NOT deleted locally (v1 accepted gap — the mirrored bundle holds the only other copy). (2) **based-on fast-forward** — WIP capture embeds a `T3-Based-On` trailer (the applied-marker commit); apply additionally accepts a peer snapshot whose based-on tree equals the current worktree tree (the peer built on exactly what this machine has — e.g. laptop edits on top of the desktop's WIP flowing back to the still-unchanged desktop). Edited-since stays blocked (M5). (3) **sync visibility** — `blockedReason` on the wip status entry + a per-project sync indicator (error > blocked > synced-recently > idle). | With A dirty-but-unchanged: a file created on B lands on A within seconds (based-on path); with A edited since, A's tree is untouched and the indicator shows blocked. A `.t3sync` line added on A delivers the matched files to an already-materialized B without re-materializing; an updated secret reaches B's unmodified copy; B's locally-edited copy is never overwritten. Canonical re-run. |
 | **M3.7 — Sync hardening** | Fix the two defects flagged during M3.6 acceptance (user directive: these are sync bugs, not follow-ups). (1) **Delivery latency is bimodal** — identical runs deliver A→B in ~1s or ~56s; the beacon fast path (push → beacon blob → mirror write-trigger → peer blob arrival → apply pass) sometimes loses to the 60s mirror interval. Instrument the full chain with timestamps first (per-stage logs on the harness), identify the stage that stalls, fix it — no speculative changes. (2) **Watcher starvation — ROOT CAUSE CONFIRMED 2026-07-07 from a receiver server log:** `ENOSPC: System limit for number of file watchers reached` on `FileSystem.watch(<project root>)`, i.e. the `fs.inotify.max_user_instances` limit (128 by default, a per-user budget SHARED with every desktop app — JetBrains/junie, Spotify, Chrome, Insync already consume ~100). `watchTreeEvents` opens a RECURSIVE watch per project (Node recursive watch registers into node_modules/.git/build trees — the hog), tips the shared budget over, the watch dies silently, and WIP capture/delivery falls back to the 60s mirror interval — this is the observed "~56–60s / never synced" latency; the settings-watcher flake is the same exhaustion. FIX: exclude node_modules/.git/build trees from what is actually WATCHED (not just from emitted events — the current WATCH_NOISE only filters events, the watchers are still registered); on any watch-create failure fall back to a SHORT interval (~10s) not the 60s mirror tick, and surface it. Guarantee the settings watcher never starves. Note: a clean delivery-latency measurement was impossible in the dev env (the shared inotify budget was saturated by test zombies + desktop apps), so M3.7 must ALSO verify on a clean machine whether a delivery-path stall exists independent of the watcher. | Ten consecutive harness A→B deliveries all land within 10s (no bimodal outliers), measured by an extended acceptance script; with many watched projects (stress fixture), an external settings.json edit propagates to `getSettings` within 5s AND every project keeps syncing (watch or surfaced fallback); `accept-m35.mjs` / `accept-m36.mjs` / canonical all green. |
+| **M3.8 — Branch-aware sync model (SHIP GATE, added 2026-07-10)** | User directive after real two-machine use: WIP sync mirrors the worktree TREE regardless of which branch/HEAD either machine is on, so committed branch work on one machine materializes as uncommitted modifications on the other machine's different branch — "a complete mess in the git", declared COMPLETELY BROKEN and unshippable. This phase is ANALYSIS AND DECISION FIRST, implementation only after an explicit user decision; a direction change for the whole sync model is on the table. The analysis pass must produce an options paper measured against the canonical workflow and real git workflows (branch → commit → merge → push), covering at least: (a) gate auto-apply on the two machines having the same HEAD/branch, surfacing "on different branches" instead of applying; (b) make snapshots branch-aware — carry branch/HEAD identity and reproduce the branch state on the peer (overlaps M5 takeover); (c) auto-apply only onto never-locally-touched checkouts, everything else explicit (shrinks the ambient-sync promise); (d) other directions found during analysis. Each option assessed for: silent-data-loss risk, mess-in-git risk, canonical-workflow fit, M5 overlap, migration from shipped behavior. | An explicit recorded user decision on the model; this plan updated (or restructured) to match; the decided behavior implemented and demonstrated on the M0 harness with the field scenario — machine A creates a branch, commits work, merges and pushes, while machine B on `master` NEVER ends up with uncommitted soup and nothing is silently lost. Until this row is done, NO part of the sync feature ships, regardless of other milestones' status. |
 | **M4 — Bootstrap recipes** | Step 4. | First materialize triggers an agent setup thread that writes a recipe; second materialize replays it; a broken recipe escalates to an agent turn. Canonical workflow re-run. |
 | **M5 — Takeover + divergence** | Step 6. | Takeover applies newest snapshot and moves the lease; two-sided dirty divergence shows the diff-and-choose screen; the losing side remains recoverable as a ref. Canonical workflow re-run. |
 | **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options step of the one pairing flow. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. Canonical workflow re-run. |
