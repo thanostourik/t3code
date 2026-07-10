@@ -509,6 +509,42 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect("applies a same-second peer snapshot (M3.7 tie deadlock regression)", () =>
+    Effect.gen(function* () {
+      // Committer stamps are 1-second; the sub-second fast path routinely
+      // lands a fresh snapshot in the SAME second as the applied marker.
+      // The old `<=` staleness skip deadlocked delivery until the author's
+      // tree changed again.
+      const wsid = WorkspaceProjectId.make("wp-apply-tie");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-tie-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      const when = minutesFromNow(60);
+      yield* fs.writeFileString(pathService.join(peerPath, "tracked.txt"), "tie v1\n");
+      yield* peerSnapshot(peerPath, wsid, when);
+      const first = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(first._tag, "applied");
+
+      // Second snapshot with the SAME committer second, different content.
+      yield* fs.writeFileString(pathService.join(peerPath, "peer-note.txt"), "tie v2\n");
+      const second = yield* peerSnapshot(peerPath, wsid, when);
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "peer-note.txt")),
+        "tie v2\n",
+      );
+      const marker = yield* resolveOid(localPath, `refs/t3/wip-applied/${wsid}`);
+      assert.strictEqual(marker, second.commitOid);
+
+      // And the guard still holds: the identical commit never re-applies.
+      const again = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(again._tag, "skipped");
+    }),
+  );
+
   it.effect("per-file: peer changes to other files apply while local edits are kept", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-apply-perfile");

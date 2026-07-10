@@ -347,6 +347,12 @@ export const RoamingWipStatusEntry = Schema.Struct({
   lastError: Schema.optional(Schema.String),
   /** Why the last incoming snapshot was NOT applied (local edits). */
   blockedReason: Schema.optional(Schema.String),
+  /**
+   * Degraded-but-working advisory (M3.7): set while file watching is
+   * unavailable (inotify budget) and capture runs on the short sweep
+   * instead. Informational — sync still works, unlike lastError.
+   */
+  notice: Schema.optional(Schema.String),
   /** Set when auto-apply last fast-forwarded this checkout (M3.5). */
   lastAppliedAt: Schema.optional(IsoDateTime),
   /** environmentId whose snapshot was last auto-applied here. */
@@ -423,6 +429,25 @@ export const RoamingPushBlobsResponse = Schema.Struct({
   ),
 });
 export type RoamingPushBlobsResponse = typeof RoamingPushBlobsResponse.Type;
+
+/**
+ * Long-poll for blob-store changes (M3.7). Mirror connectivity is
+ * one-directional (the pairing initiator holds the only credential/URL
+ * pair), so the machine that CANNOT be reached needs a way to make its
+ * writes visible immediately: the reachable side holds this request open
+ * and re-runs a mirror pass when the response reports a new revision.
+ * The revision is an in-memory per-boot counter — only ever compared for
+ * inequality, never interpreted.
+ */
+export const RoamingWaitChangesRequest = Schema.Struct({
+  sinceRevision: Schema.NullOr(Schema.Int),
+});
+export type RoamingWaitChangesRequest = typeof RoamingWaitChangesRequest.Type;
+
+export const RoamingWaitChangesResponse = Schema.Struct({
+  revision: Schema.Int,
+});
+export type RoamingWaitChangesResponse = typeof RoamingWaitChangesResponse.Type;
 
 // ── Enrollment RPCs ──────────────────────────────────────────────────
 
@@ -589,6 +614,7 @@ export type RoamingEnrollProjectResponse = typeof RoamingEnrollProjectResponse.T
 export const ROAMING_MIRROR_MANIFEST_PATH = "/api/roaming/mirror/manifest";
 export const ROAMING_MIRROR_FETCH_PATH = "/api/roaming/mirror/fetch";
 export const ROAMING_MIRROR_PUSH_PATH = "/api/roaming/mirror/push";
+export const ROAMING_MIRROR_WAIT_PATH = "/api/roaming/mirror/wait";
 export const ROAMING_MACHINE_CREDENTIAL_PATH = "/api/roaming/machine-credential";
 export const ROAMING_PEERS_PATH = "/api/roaming/peers";
 export const ROAMING_PEERS_LIST_PATH = "/api/roaming/peers/list";
