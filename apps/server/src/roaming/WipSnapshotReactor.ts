@@ -514,9 +514,17 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     appliedNow === null ? null : yield* resolveOid(cwd, `${appliedMarkerRef}^{tree}`);
   const shippedBasedOn =
     shippedCommitSpec === null ? null : yield* readBasedOn(cwd, shippedCommitSpec);
+  // The applied-marker tree is a no-op baseline ONLY while the shipped ref
+  // advertises that same tree (that agreement is what ends the idle-ACK
+  // ping-pong). Unconditional, it deadlocked deletions (measured 2026-07-10
+  // harness): create on A → B applies (B's echo rightly suppressed, so A's
+  // marker stays at an OLD snapshot) → A deletes → A's tree returns to that
+  // old marker tree → capture skipped forever while A's shipped ref still
+  // advertises the deleted file. A worktree the shipped ref does not match
+  // must always ship.
   const noOpTrees = [
     ...(shippedTree !== null && appliedNow === shippedBasedOn ? [shippedTree] : []),
-    ...(appliedTree !== null ? [appliedTree] : []),
+    ...(appliedTree !== null && appliedTree === shippedTree ? [appliedTree] : []),
   ];
 
   // Fast path: clean worktree whose HEAD tree is already a no-op baseline.

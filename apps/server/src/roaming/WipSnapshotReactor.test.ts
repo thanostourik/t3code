@@ -255,6 +255,58 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect(
+    "ships a tree that RETURNS to an old applied state (deletion deadlock regression)",
+    () =>
+      Effect.gen(function* () {
+        // Measured deadlock (2026-07-10 harness): the applied marker sits at an
+        // OLD snapshot whose tree lacks a file; we then ship a tree WITH the
+        // file; deleting it returns the worktree to the marker's tree. The old
+        // unconditional applied-tree baseline skipped the capture forever while
+        // the shipped ref still advertised the file — the peer never learned of
+        // the deletion.
+        const wsid = WorkspaceProjectId.make("wp-wip-del-deadlock");
+        const fs = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-del-deadlock-" });
+        const { workPath } = yield* initRepoWithOrigin(root);
+
+        // Applied marker records the CURRENT (file-less) tree, as if consumed
+        // from the peer long ago.
+        const markerSnap = yield* captureWipSnapshot({
+          cwd: workPath,
+          workspaceProjectId: wsid,
+          environmentId: LOCAL_ENVIRONMENT_ID,
+          vaultExcludePaths: [],
+        });
+        assert.isNotNull(markerSnap);
+        const appliedMarker = yield* wipAppliedMarkerRefName(wsid);
+        yield* git(workPath, ["update-ref", appliedMarker, markerSnap!.commitOid]);
+
+        // Ship a tree WITH the file.
+        yield* fs.writeFileString(pathService.join(workPath, "doomed.txt"), "here\n");
+        const shipped = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+        assert.strictEqual(shipped._tag, "done");
+
+        // Delete it: the worktree now equals the marker tree, but the shipped
+        // ref still advertises doomed.txt — the deletion MUST ship.
+        yield* fs.remove(pathService.join(workPath, "doomed.txt"), { force: true });
+        const afterDelete = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+        assert.strictEqual(afterDelete._tag, "done");
+        const refName = yield* wipRefName(wsid, LOCAL_ENVIRONMENT_ID);
+        const treeListing = yield* gitStdout(workPath, [
+          "ls-tree",
+          "--name-only",
+          `${refName}^{tree}`,
+        ]);
+        assert.notInclude(treeListing.split("\n"), "doomed.txt");
+
+        // And it settles: nothing changed, next pass is a no-op.
+        const settle = yield* runWipPassForTarget(target(wsid, workPath), "origin-refs");
+        assert.strictEqual(settle._tag, "skipped");
+      }),
+  );
+
   it.effect("pushes the wip ref to the origin and records the marker", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-wip-push");
