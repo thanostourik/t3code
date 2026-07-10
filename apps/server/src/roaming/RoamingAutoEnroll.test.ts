@@ -1,5 +1,6 @@
 import { EnvironmentId, ProjectId, WorkspaceProjectId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import { NodeServices } from "@effect/platform-node";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,17 +8,25 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "../persistence/Layers/ProjectionProjects.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { RoamingAutoEnroll, layer as RoamingAutoEnrollLayer } from "./RoamingAutoEnroll.ts";
+import { layer as RoamingBlobStoreLayer } from "./RoamingBlobStore.ts";
 import { RoamingPeers, layer as RoamingPeersLayer } from "./RoamingPeers.ts";
 import { RoamingService } from "./RoamingService.ts";
 
 const PEER_ENVIRONMENT_ID = EnvironmentId.make("env-peer");
 const PROJECT_ID = ProjectId.make("project-auto-enroll");
+const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("env-auto-enroll-local");
+
+const serverEnvironmentStub = Layer.succeed(ServerEnvironment.ServerEnvironment, {
+  getEnvironmentId: Effect.succeed(LOCAL_ENVIRONMENT_ID),
+  getDescriptor: Effect.die("descriptor unused in RoamingAutoEnroll tests"),
+});
 
 const makeLayer = (input: {
   readonly roaming: boolean;
@@ -25,9 +34,11 @@ const makeLayer = (input: {
 }) =>
   Layer.empty.pipe(
     Layer.provideMerge(RoamingAutoEnrollLayer),
+    Layer.provideMerge(RoamingBlobStoreLayer),
     Layer.provideMerge(RoamingPeersLayer),
     Layer.provideMerge(ProjectionProjectRepositoryLive),
     Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(serverEnvironmentStub),
     Layer.provideMerge(ServerSettingsService.layerTest({ roaming: input.roaming })),
     Layer.provideMerge(
       Layer.succeed(OrchestrationEngineService, {
@@ -42,10 +53,12 @@ const makeLayer = (input: {
           Ref.update(input.enrollCalls, (calls) => [...calls, projectId]).pipe(
             Effect.as(WorkspaceProjectId.make(`wp-${projectId}`)),
           ),
+        syncRegistryTitle: () => Effect.void,
         addPeer: () => Effect.die("unused"),
         mintMachineCredential: () => Effect.die("unused"),
       } satisfies RoamingService["Service"]),
     ),
+    Layer.provideMerge(NodeServices.layer),
   );
 
 const seedProjectAndPeer = Effect.gen(function* () {
