@@ -529,10 +529,46 @@ const make = Effect.gen(function* () {
     );
 
     yield* Stream.runForEach(debouncedSettingsEvents, () => revalidateAndEmitSafely).pipe(
+      // Reached only when the watch stream ends/fails on its own (e.g. the
+      // per-user inotify budget is exhausted by other processes — ENOSPC).
+      // The poll backbone below keeps settings honored regardless.
+      Effect.andThen(
+        Effect.logWarning("settings watch unavailable; external edits picked up by polling only", {
+          settingsPath,
+        }),
+      ),
       Effect.ignoreCause({ log: true }),
       Effect.forkIn(watcherScope),
       Effect.asVoid,
     );
+
+    // Poll backbone (M3.7): fs.watch depends on a per-user inotify budget
+    // shared with every other desktop app, so the watcher can be dead or
+    // impossible to create with no error surfaced anywhere useful. A 2s
+    // mtime stat guarantees an external settings edit is honored within
+    // seconds even with zero watch budget; the watcher above remains the
+    // fast path.
+    const SETTINGS_POLL_INTERVAL = Duration.seconds(2);
+    const statMtimeMs = fs.stat(settingsPath).pipe(
+      Effect.map((info) =>
+        Option.getOrElse(
+          Option.map(info.mtime, (mtime) => mtime.getTime()),
+          () => -1,
+        ),
+      ),
+      Effect.orElseSucceed(() => -1),
+    );
+    yield* Effect.gen(function* () {
+      let lastMtime = yield* statMtimeMs;
+      while (true) {
+        yield* Effect.sleep(SETTINGS_POLL_INTERVAL);
+        const mtime = yield* statMtimeMs;
+        if (mtime !== lastMtime) {
+          lastMtime = mtime;
+          yield* revalidateAndEmitSafely;
+        }
+      }
+    }).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(watcherScope), Effect.asVoid);
   });
 
   const start = Effect.gen(function* () {

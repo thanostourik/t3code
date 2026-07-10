@@ -70,13 +70,41 @@ machine's projects are visible but dead.
 > backbone (30s sweep; the fs watcher is an optimization, not a
 > guarantee). Verified: unit suite + repeated two-instance harness E2E
 > (pair → materialize → WIP both ways → receiver-side delete with a live
-> conflict → restart). The row's formal exit criteria (10× delivery
-> latency run, watcher stress fixture) were NOT run — closed on user call
-> 2026-07-10; carry them into M4's analysis pass if latency complaints
-> persist.
-> **NEXT UP: M4 (bootstrap recipes; its analysis pass must scope honest
-> limits — v1 targets scriptable setups; capture-what-happened over
-> guaranteed-boot).** M2.5 DONE 2026-07-06 (PRs #19–#29+).
+> conflict → restart). **Formal exit criteria MET 2026-07-10 (reopened and
+> completed the same day, user directive)** — the criteria had been skipped
+> on the first close. Instrumentation-first per the row: every delivery
+> stage logs a "roaming timing" line keyed by commitOid. Measured on a
+> CLEAN machine, the harness baseline was bimodal exactly as reported
+> (~0.8s or ~52s phase-locked); three root causes found and fixed:
+> (1) mirror connectivity is ONE-directional — only the pairing initiator
+> holds a credential/URL pair, so the callee's beacons sat until the
+> initiator's 60s interval → new `mirror/wait` long-poll (initiator holds
+> it; callee blob writes return it; works for existing pairings, no
+> re-pair); (2) nothing triggered the WIP reactor on enrollment, so a
+> fresh pairing had no watcher/first snapshot until the 2-min sweep;
+> (3) the M3.5 staleness guard's `<=` tie-skip deadlocked the now
+> sub-second pipeline (1s committer stamps) — marker ties now evaluate
+> (identical commit still skips; HEAD ties stay `<=`, review finding).
+> Watcher budget: per-directory registration on Linux excluding
+> node_modules/.git/build (recursive fs.watch held ~167k watches for one
+> desktop instance; now 1 instance + ~hundreds per project), 4096-dir cap
+> per project, watch death/cap → surfaced notice + 10s sweep (never the
+> silent 2-min cliff), settings watcher backed by an unconditional 2s
+> mtime poll. Criteria green: `accept-m37.mjs` 10/10 deliveries ≤10s
+> (max 5.8s, steady ~5.5s = 5s watch debounce + ~0.5s chain);
+> `accept-m37-stress.mjs` (12 live projects + over-cap 13th: notice
+> surfaced, sweep delivery, others unaffected, settings ≤5s);
+> `accept-m35.mjs` + `accept-m36.mjs` + canonical re-run all green.
+> **SHIP GATE — NEXT UP: M3.8 (branch-aware sync model). Declared by the
+> user 2026-07-10 after real two-machine use: branch-blind WIP auto-apply
+> is COMPLETELY BROKEN for real git workflows and BLOCKS SHIPPING THE SYNC
+> FEATURE AT ALL — not a side-note on any milestone, its own
+> analysis/decision phase whose outcome may change the sync model's
+> direction. Nothing ships until its decision lands (see the M3.8 row and
+> the 2026-07-10 decisions-log entry).** M4 (bootstrap recipes; its
+> analysis pass must scope honest limits — v1 targets scriptable setups;
+> capture-what-happened over guaranteed-boot) queues behind it. M2.5 DONE
+> 2026-07-06 (PRs #19–#29+).
 > **Decisions log (still binding; full log + superseded entries in
 > [21-roaming-history.md](21-roaming-history.md)):**
 > 2026-07-04 — v1 transport for small state = machine-to-machine mirror
@@ -124,6 +152,23 @@ machine's projects are visible but dead.
 > recipes milestone's analysis pass must scope honest limits (v1 targets
 > scriptable setups; capture-what-happened over guaranteed-boot). Documents
 > written before 2026-07-06 (the history file) use the OLD numbering.
+> 2026-07-10 — **SHIP GATE (user directive, field session): branch-blind
+> WIP sync is not shippable — period.** Field finding on the real machines:
+> the user modernized a repo on the desktop on a NEW branch (all work
+> committed there); the laptop — still on `master` — received that work as
+> UNSTAGED modifications on `master`. After merge+push on the desktop, the
+> laptop again showed the merged content as an unstaged mess. This is the
+> v1 model working AS SPECIFIED (snapshots mirror the worktree TREE only;
+> branches/HEAD/index are invisible to sync, commits travel via origin) —
+> and the user's verdict is that the specification itself is COMPLETELY
+> BROKEN for real git usage: "we can't be creating such a mess in the
+> git; this is not acceptable to ship." Explicitly NOT to be recorded as
+> a bullet under M5 or any existing milestone: it is its own phase (M3.8)
+> whose outcome — up to and including a direction change for the whole
+> sync model — gates ANY shipping of the sync feature. Proper handling is
+> an OPEN QUESTION; the user has deliberately not picked a direction, and
+> no implementation may start before an options analysis and an explicit
+> user decision.
 > **How to execute:** this document is self-contained. To start work in a fresh
 > thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
 > section at the end. Milestones run strictly in order (M0 → M2, M2.5, M3 → M7; renumbered 2026-07-06 so execution order and numbers agree).
@@ -684,6 +729,7 @@ load-bearing assumptions are cheap to verify before building on them.
 | **M3.5 — Sync completion (field-driven)** | Delivery + freshness for step 5, per the 2026-07-07 field session: auto-apply of newer other-machine snapshots onto clean/strictly-behind checkouts (applied-marker ref `refs/t3/wip-applied/<wsid>`; locally-edited trees are never touched — notice only); filesystem-watch capture (seconds, not minutes; 2-min sweep as fallback); graceful-shutdown snapshot; `.t3sync` per-project include file (gitignore syntax) carrying gitignored paths like `.idea/` over the machine-to-machine channel; origin-mode size guard; per-machine consent copy/propagation fix. | Create a file on machine A → it appears on machine B's clean checkout within seconds, no user action; a locally-edited checkout on B is never overwritten and surfaces a notice; `.idea/` listed in `.t3sync` round-trips A→B while staying out of the origin; an oversized untracked file is skipped with a surfaced notice, never pushed. Canonical workflow re-run. |
 | **M3.6 — Field round 2 (delivery gaps + visibility)** | Same-day field findings on the real machines: (1) **vault delivery** — vault blobs apply on arrival (and at startup catch-up) to linked checkouts, not only at materialize: missing files written, files unmodified since OUR last apply updated (per-file applied-hash record under `<stateDir>/vault-applied/`), locally-modified files never overwritten (notice); peer-deleted files are NOT deleted locally (v1 accepted gap — the mirrored bundle holds the only other copy). (2) **based-on fast-forward** — WIP capture embeds a `T3-Based-On` trailer (the applied-marker commit); apply additionally accepts a peer snapshot whose based-on tree equals the current worktree tree (the peer built on exactly what this machine has — e.g. laptop edits on top of the desktop's WIP flowing back to the still-unchanged desktop). Edited-since stays blocked (M5). (3) **sync visibility** — `blockedReason` on the wip status entry + a per-project sync indicator (error > blocked > synced-recently > idle). | With A dirty-but-unchanged: a file created on B lands on A within seconds (based-on path); with A edited since, A's tree is untouched and the indicator shows blocked. A `.t3sync` line added on A delivers the matched files to an already-materialized B without re-materializing; an updated secret reaches B's unmodified copy; B's locally-edited copy is never overwritten. Canonical re-run. |
 | **M3.7 — Sync hardening** | Fix the two defects flagged during M3.6 acceptance (user directive: these are sync bugs, not follow-ups). (1) **Delivery latency is bimodal** — identical runs deliver A→B in ~1s or ~56s; the beacon fast path (push → beacon blob → mirror write-trigger → peer blob arrival → apply pass) sometimes loses to the 60s mirror interval. Instrument the full chain with timestamps first (per-stage logs on the harness), identify the stage that stalls, fix it — no speculative changes. (2) **Watcher starvation — ROOT CAUSE CONFIRMED 2026-07-07 from a receiver server log:** `ENOSPC: System limit for number of file watchers reached` on `FileSystem.watch(<project root>)`, i.e. the `fs.inotify.max_user_instances` limit (128 by default, a per-user budget SHARED with every desktop app — JetBrains/junie, Spotify, Chrome, Insync already consume ~100). `watchTreeEvents` opens a RECURSIVE watch per project (Node recursive watch registers into node_modules/.git/build trees — the hog), tips the shared budget over, the watch dies silently, and WIP capture/delivery falls back to the 60s mirror interval — this is the observed "~56–60s / never synced" latency; the settings-watcher flake is the same exhaustion. FIX: exclude node_modules/.git/build trees from what is actually WATCHED (not just from emitted events — the current WATCH_NOISE only filters events, the watchers are still registered); on any watch-create failure fall back to a SHORT interval (~10s) not the 60s mirror tick, and surface it. Guarantee the settings watcher never starves. Note: a clean delivery-latency measurement was impossible in the dev env (the shared inotify budget was saturated by test zombies + desktop apps), so M3.7 must ALSO verify on a clean machine whether a delivery-path stall exists independent of the watcher. | Ten consecutive harness A→B deliveries all land within 10s (no bimodal outliers), measured by an extended acceptance script; with many watched projects (stress fixture), an external settings.json edit propagates to `getSettings` within 5s AND every project keeps syncing (watch or surfaced fallback); `accept-m35.mjs` / `accept-m36.mjs` / canonical all green. |
+| **M3.8 — Branch-aware sync model (SHIP GATE, added 2026-07-10)** | User directive after real two-machine use: WIP sync mirrors the worktree TREE regardless of which branch/HEAD either machine is on, so committed branch work on one machine materializes as uncommitted modifications on the other machine's different branch — "a complete mess in the git", declared COMPLETELY BROKEN and unshippable. This phase is ANALYSIS AND DECISION FIRST, implementation only after an explicit user decision; a direction change for the whole sync model is on the table. The analysis pass must produce an options paper measured against the canonical workflow and real git workflows (branch → commit → merge → push), covering at least: (a) gate auto-apply on the two machines having the same HEAD/branch, surfacing "on different branches" instead of applying; (b) make snapshots branch-aware — carry branch/HEAD identity and reproduce the branch state on the peer (overlaps M5 takeover); (c) auto-apply only onto never-locally-touched checkouts, everything else explicit (shrinks the ambient-sync promise); (d) other directions found during analysis. Each option assessed for: silent-data-loss risk, mess-in-git risk, canonical-workflow fit, M5 overlap, migration from shipped behavior. | An explicit recorded user decision on the model; this plan updated (or restructured) to match; the decided behavior implemented and demonstrated on the M0 harness with the field scenario — machine A creates a branch, commits work, merges and pushes, while machine B on `master` NEVER ends up with uncommitted soup and nothing is silently lost. Until this row is done, NO part of the sync feature ships, regardless of other milestones' status. |
 | **M4 — Bootstrap recipes** | Step 4. | First materialize triggers an agent setup thread that writes a recipe; second materialize replays it; a broken recipe escalates to an agent turn. Canonical workflow re-run. |
 | **M5 — Takeover + divergence** | Step 6. | Takeover applies newest snapshot and moves the lease; two-sided dirty divergence shows the diff-and-choose screen; the losing side remains recoverable as a ref. Canonical workflow re-run. |
 | **M6 — Briefs + transcripts** | Step 7. Adds the "Conversations" row to the sync-options step of the one pairing flow. | Threads from instance A readable on instance B after a mirror pass; park produces an editable brief; resume seeds a new local thread with it. Canonical workflow re-run. |
@@ -931,7 +977,12 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   guard); locally-present vault files are preserved across the restore from
   the WORKTREE's copies, never from a possibly-stale blob. A snapshot older
   than HEAD or the applied marker never applies (no stale-echo
-  resurrection; timestamps compare with `<=`, so ties skip).
+  resurrection). REVISED M3.7: committer stamps are 1-second and the fast
+  path is sub-second, so applied-marker TIES evaluate (identical commit
+  still skips; the per-file merge's base-diff/local-edit/Based-On gates own
+  safety); HEAD ties keep the conservative `<=` skip — with no marker the
+  merge base falls back to HEAD and a tied-but-stale snapshot lacking a
+  just-committed file would read as a peer deletion.
 - **Freshness beacon:** origin-mode pushes ALSO write an empty-bundle wip
   blob (metadata only — refName/commitOid/treeOid, `bundleBase64: ""`);
   the mirror pushes on every blob write, and peers run the project's pass
@@ -964,9 +1015,11 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   laptop's first post-apply capture echoes an identical-tree snapshot once
   (settles via tree-equality skips).
 - Acceptance: `accept-m35.mjs` (1-second A→B delivery onto a clean
-  checkout, no-clobber of a locally-edited checkout, `.t3sync` `.idea/`
-  round-trip with origin hygiene, oversize warning) + the
-  canonical-workflow re-run.
+  checkout, no-clobber of locally-edited FILES — step 5 revised by M3.7's
+  per-file merge, same as accept-m36 step 6: a local edit no longer blocks
+  the whole tree, a same-file conflict keeps ours on both sides —
+  `.t3sync` `.idea/` round-trip with origin hygiene, oversize warning) +
+  the canonical-workflow re-run.
 
 ### Field round 2 (M3.6, PRs #43–#47)
 
@@ -1001,13 +1054,11 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
 - Acceptance: `accept-m36.mjs` (post-materialize vault delivery, secret
   update + no-clobber, based-on backflow onto a dirty-but-unchanged
   author, divergence blocked + surfaced) + `accept-m35.mjs` + canonical.
-- ~~Flagged follow-ups~~ Both M3.6 flags became M3.7 and are addressed:
-  the latency variance and watcher flake shared one root cause (inotify
-  `max_user_instances` exhaustion, PR #52 evidence); mitigated by interval
-  backbones (vault 30s sweep, WIP 2 min) so no sync direction depends on a
-  live watcher. True watcher budgeting (exclude node_modules/.git from
-  what is REGISTERED, not just from emitted events) remains open — revisit
-  if dead-watcher latency (bounded by the sweeps) is still felt in the field.
+- ~~Flagged follow-ups~~ Both M3.6 flags became M3.7 and are CLOSED there:
+  the latency variance had three distinct causes (one-directional mirror
+  connectivity, the missing enrollment trigger, the staleness tie-skip),
+  and watcher budgeting landed as per-directory registration + cap +
+  surfaced fallback — see Sync hardening (M3.7) below.
 
 ### Sync hardening (M3.7)
 
@@ -1015,6 +1066,16 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   relative to the base; a file changed on both sides is kept ours and
   surfaced (`blockedReason` → "Waiting"); everything else crosses even
   while local edits exist. Whole-tree blocking is gone.
+- **No-op baseline (REVISED in the criteria session — deletion deadlock):**
+  the applied-marker tree counts as a capture no-op baseline ONLY while it
+  equals the last-shipped tree (their agreement is what ends the idle-ACK
+  ping-pong). Unconditional, it deadlocked deletions: a worktree returning
+  to an OLD applied state while the shipped ref still advertised the
+  deleted file skipped capture forever (measured: the author-side delete
+  never propagated, >300s; field report "deletion took minutes"). A
+  worktree the shipped ref does not match must always ship. After the fix,
+  deletions propagate in ~5.5s in both directions (timed harness test);
+  unit regression fails on the old baseline.
 - **Deletion model (three invariants, each a field bug):** (1) the applied
   marker advances EVERY apply pass — clean applies to the peer snapshot,
   conflicted passes to a synthetic commit with only the conflicted paths
@@ -1040,11 +1101,65 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   pass-based reconciliation, which could undo an in-flight remote rename);
   the grouped sidebar label prefers a shared member title over the
   repository name.
-- Acceptance: unit suite (deletion-model regression tests fail on the old
-  code) + repeated two-instance harness E2E; `accept-m36.mjs` step 6
-  updated for per-file merge (concurrent edits to different files now
-  cross instead of blocking). Formal latency/stress criteria not run
-  (user call, see status line).
+- **Mirror wait long-poll (formal-criteria session, 2026-07-10):** mirror
+  connectivity is ONE-directional by design (M2.5 tamper resistance: the
+  callee holds no credential/URL for the initiator, and the server cannot
+  discover its own reachable URLs) — so the callee's write-trigger pass is
+  a no-op and its beacons used to wait for the initiator's 60s interval
+  (the measured ~52s phase-locked deliveries). `POST
+  /api/roaming/mirror/wait` (same gating as every mirror route: roaming
+  flag 404, `roaming:mirror` scope, paused-peer 403) holds up to 25s
+  against an in-memory per-boot blob-store change revision (compared only
+  for inequality; restart wakes the waiter into one no-op pass). PeerMirror
+  runs one waiter fiber per reachable enabled peer (atomic claim; waiters
+  self-terminate when the peer is paused/removed/roaming off; reconciled
+  every drain pass + a 30s scan; 15s backoff on failure, 40s client cap).
+  The 60s interval remains the delivery guarantee; the waiter is the fast
+  path and self-heals for pre-M3.7 pairings without re-pairing.
+- **Enrollment trigger:** `project.meta-updated` carrying a
+  `workspaceProjectId` runs a reactor scan — a fresh pairing's projects get
+  watchers and a first snapshot immediately, not on the next 2-min sweep.
+- **Watcher budget (Linux):** tree watching registers PER DIRECTORY,
+  skipping `.git`/`node_modules`/`dist`/`build`/`target`/`out`/`.venv`/
+  `__pycache__` at REGISTRATION (libuv shares one inotify instance per
+  process; the watches budget is what recursive fs.watch exhausted —
+  ~167k watches measured for one desktop instance), capped at 4096
+  dirs/project; macOS/Windows keep native recursive. A single dead
+  directory no longer kills a project's watch (this was the silent
+  watcher-death mechanism: git's transient `.git` churn erroring the
+  recursive watcher). Watch death or cap → per-project fallback: 10s
+  capture sweep + `notice` on the status entry (amber "Sync on" pill,
+  concept-free copy) + a real-watch retry every ~5 min — NEVER a silent
+  fall to the 2-min interval. Notices live in reactor state merged into
+  every published entry; passes cannot wipe them.
+- **Settings freshness guarantee:** an unconditional 2s mtime poll backs
+  the settings watcher (upstream file, minimal diff) — an external
+  settings.json edit is honored within ~2-4s even with ZERO inotify
+  budget; watch death also logs a warning instead of ending silently.
+- **Timing instrumentation is permanent:** every delivery stage logs a
+  `roaming timing:` line keyed by commitOid/blob version (watch-trigger,
+  captured, origin-pushed, beacon-written, mirror-exchange with trigger
+  source, blobs-pushed-to-peer, wip-blob-ingested, arrival trigger,
+  peer-refs-fetched, apply) — slow deliveries are attributable from the
+  two server.log files alone. Beacon write failure is a WARNING (it
+  silently costs the fast path). `accept-m37.mjs` prints a per-stage
+  table per delivery.
+- Known limits (accepted): total inotify-INSTANCE exhaustion at server
+  boot crashes UPSTREAM watch paths (git driver, atomic-write temp files)
+  before roaming code runs — out of M3.7's blast radius; M3.7 removes the
+  dominant watch consumer, making that state unlikely. Base-diff peer
+  deletions when NO applied marker exists yet are not Based-On-gated
+  (pre-existing, narrow: markers appear on first exchange; HEAD-tie `<=`
+  covers the same-second case). The M3.5 "~1s A→B" acceptance number rode
+  adjacent-trigger luck; the honest steady-state fast path is ~5.5s
+  (5s watch debounce + ~0.5s chain), ~0.5s when riding another trigger.
+- Acceptance: unit suite (deletion-model + tie-deadlock regression tests
+  fail on the old code) + `accept-m37.mjs` (ten consecutive A→B
+  deliveries, all ≤10s, max 5.8s) + `accept-m37-stress.mjs` (12 live
+  projects + an over-cap 13th: notice surfaced, fallback-sweep delivery,
+  healthy projects unaffected, settings edit ≤5s in both phases) +
+  `accept-m36.mjs` step 6 updated for per-file merge + `accept-m35.mjs` +
+  canonical re-run.
 
 ## Execution process
 

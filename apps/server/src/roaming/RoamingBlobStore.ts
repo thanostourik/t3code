@@ -26,6 +26,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -84,6 +85,12 @@ export class RoamingBlobStore extends Context.Service<
       never,
       Scope.Scope
     >;
+    /**
+     * Monotonic per-boot counter, bumped on every published change. Only
+     * ever compared for inequality (the mirror wait route, M3.7) — resets
+     * on restart, which at worst wakes a waiting peer into one no-op pass.
+     */
+    readonly changeRevision: Effect.Effect<number>;
   }
 >()("t3/roaming/RoamingBlobStore") {}
 
@@ -121,6 +128,11 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const changesPubSub = yield* PubSub.unbounded<RoamingBlobRecord>();
+  const revisionRef = yield* Ref.make(0);
+  const publishChange = (record: RoamingBlobRecord) =>
+    Ref.update(revisionRef, (revision) => revision + 1).pipe(
+      Effect.andThen(PubSub.publish(changesPubSub, record)),
+    );
   // Serializes every read-modify-write. Statements on the shared SQLite
   // connection are async Effects, so without this two fibers can both read a
   // row before either writes — losing updates and defeating equal-version
@@ -205,7 +217,7 @@ const make = Effect.gen(function* () {
         }).pipe(Effect.mapError(decodeError("roaming.blob.write-local")));
         yield* upsertRow(record, "roaming.blob.write-local");
         yield* clearConflict(record, "roaming.blob.write-local");
-        yield* PubSub.publish(changesPubSub, record);
+        yield* publishChange(record);
         return record;
       }),
     ),
@@ -262,12 +274,12 @@ const make = Effect.gen(function* () {
           const localRecord = yield* decodeRecord(existing).pipe(
             Effect.mapError(decodeError("roaming.blob.apply-remote")),
           );
-          yield* PubSub.publish(changesPubSub, localRecord);
+          yield* publishChange(localRecord);
           return "conflict" as const;
         }
         yield* upsertRow(record, "roaming.blob.apply-remote");
         yield* clearConflict(record, "roaming.blob.apply-remote");
-        yield* PubSub.publish(changesPubSub, record);
+        yield* publishChange(record);
         return "applied" as const;
       }),
     ),
@@ -355,6 +367,7 @@ const make = Effect.gen(function* () {
     manifest,
     listConflicts,
     subscribeChanges: PubSub.subscribe(changesPubSub),
+    changeRevision: Ref.get(revisionRef),
   } satisfies RoamingBlobStore["Service"];
 });
 
