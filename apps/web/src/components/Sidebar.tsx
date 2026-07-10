@@ -2327,6 +2327,15 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       text: "Waiting",
       tip: "Sync waiting: this machine and the other one both changed the same files — commit or discard on one side to continue",
     };
+  } else if (entry.notice) {
+    // Degraded but working (e.g. file watching unavailable): sync still
+    // runs on a short sweep — advisory amber, not an error.
+    pill = {
+      icon: "dot",
+      dotClass: "bg-amber-500",
+      text: "Sync on",
+      tip: entry.notice,
+    };
   } else if (recentlyActive) {
     pill = {
       icon: "spinner",
