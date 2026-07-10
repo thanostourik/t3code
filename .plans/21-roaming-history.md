@@ -876,3 +876,74 @@ Process notes: the session-restart pattern kept killing background
 acceptance runs mid-flight ("are you stuck again?") — the fix was
 launching the gauntlet as a detached setsid process with a log file,
 immune to app restarts. Worth keeping for all future long harness runs.
+
+---
+
+## M3.7 — Sync hardening (DONE 2026-07-10, PR #52 + per-file-apply PR)
+
+Planned as latency instrumentation + watcher budgeting; became three field
+sessions of sync-correctness work once real usage surfaced what the M3.6
+model actually did under concurrent two-machine edits.
+
+1. **Root cause round (PR #52):** the M3.6 "bimodal latency" and the
+   settings-watcher flake were one bug — `fs.inotify.max_user_instances`
+   exhaustion (128 shared with every desktop app; recursive project watches
+   register into node_modules/.git). Evidence-only PR; the mitigation became
+   interval backbones: VaultSync got a 30s sweep (capture AND deliver), so no
+   sync direction depends on a live watcher.
+2. **Per-file apply:** whole-tree blocking replaced by a per-file three-way
+   merge (peer-changed vs base; ours-wins + surfaced on both-changed).
+   First delete handling shipped, was reverted for propagating deletions too
+   eagerly, then landed correctly (9eeb12d2) for the AUTHOR side via the
+   pushed-marker fallback.
+3. **Field round 3 (the receiver-side delete disaster):** deleting a
+   peer-authored file on the receiving machine showed Waiting for minutes and
+   then resurrected it (the user's `go-to-desktop.md` / GNOME
+   `Untitled Document` case). Three distinct defects, each with a regression
+   test that fails on the old code:
+   - a conflict on ANY path held the whole applied marker back, unrecording
+     files applied in the same pass → later deletes read null==null
+     "untouched" and re-added the peer copy. Fix: marker advances every pass;
+     conflicted paths pinned to their base blob in a synthetic commit dated
+     newestUnix-1 (staleness gate keeps re-examining; Waiting stays honest).
+   - the author never learned about the delete: its own echoes are tree-equal
+     no-ops, so its marker lagged and the deletion produced no diff vs HEAD
+     (untracked file). Fix: deletions also enumerate against the shipped
+     snapshot, gated on the peer's T3-Based-On state PROVABLY containing the
+     file — the 92b641b4 destructive-delete flap stays impossible by
+     construction (an ignorant snapshot fails the guard).
+   - capture dedup swallowed the delete: post-delete the tree equals a
+     previously-shipped tree → "nothing to ship" while the peer had moved
+     past that state. Fix: ship once when the applied marker moved since the
+     last ship (the Based-On update IS the message), settle next pass; the
+     applied-marker-tree is a second no-op baseline so two idle machines
+     never ACK-ping-pong.
+4. **Pill data path:** `projects[].workspaceProjectId` was null in every
+   shell response — `listProjectRows` (and three sibling mappings) never
+   selected the column, masked by `withDecodingDefault(null)`. Same omission
+   in the decider read model had silently disabled the double-enrollment
+   invariant. Statuses: baseline publish on first pass, seeding into resumed
+   ws subscriptions, and restart survival by reconstructing timestamps from
+   marker-ref commit dates (rejected a persistence table: git already holds
+   the durable fact; a table is a second source of truth with migration +
+   drift costs).
+5. **Titles roam:** rename → registry blob rewrite (title only, other fields
+   preserved) → mirror → peer applies to its linked project. Event-triggered
+   both directions; pass-based reconciliation was explicitly rejected (a
+   stale pass would undo an in-flight remote rename). Sidebar group label
+   prefers a shared member title over the repo name (the "project renamed
+   itself after materialize" bug was label precedence, not data).
+
+Verification: full server suite (1452), roaming suite, and repeated
+fresh-harness E2E — pair → materialize → WIP both ways → receiver-side delete
+clean AND with a live README conflict (no resurrection, deletion propagates
+~60s, conflict surfaces as Waiting) → server restart shows seeded "Synced"
+timestamps. The row's formal exit criteria (10× delivery-latency run, watcher
+stress fixture) were NOT run — user closed the stage 2026-07-10 accepting
+that gap; revisit under M4 if field latency complaints persist.
+
+Process notes: unit tests alone missed two of the three deletion defects —
+only the two-instance harness exposed the capture-dedup and marker-timing
+interactions. `codex exec` background runs hang reading a non-TTY stdin
+unless `</dev/null` is appended (root cause of three sessions of "silent
+codex hangs"); model pinning (`-m`) is now explicit in the codex skills.
