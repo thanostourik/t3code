@@ -47,7 +47,9 @@ start_instance() {
       rm -f "$dir/server.pid"
       return 1
     fi
-    if descriptor="$(curl -fsS "http://$HOST:$port/.well-known/t3/environment" 2>/dev/null)"; then
+    # --max-time: a connection accepted mid-boot but never serviced hangs
+    # an untimed curl forever, wedging the whole readiness loop.
+    if descriptor="$(curl -fsS --max-time 5 "http://$HOST:$port/.well-known/t3/environment" 2>/dev/null)"; then
       envid="$(cat "$dir/basedir/userdata/environment-id" 2>/dev/null || true)"
       case "$descriptor" in
         *"$envid"*) [ -n "$envid" ] && {
@@ -78,7 +80,7 @@ status_instance() {
   local name="$1" port
   port="$(instance_port "$name")"
   local descriptor
-  if descriptor="$(curl -fsS "http://$HOST:$port/.well-known/t3/environment" 2>/dev/null)"; then
+  if descriptor="$(curl -fsS --max-time 5 "http://$HOST:$port/.well-known/t3/environment" 2>/dev/null)"; then
     echo "$name: up on http://$HOST:$port — $descriptor"
   else
     echo "$name: down"
