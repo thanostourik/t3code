@@ -1,14 +1,20 @@
 /**
- * RoamingAutoEnroll - links existing local projects once roaming has peers.
+ * RoamingAutoEnroll - links existing local projects once roaming has peers,
+ * and keeps project titles and registry titles reconciled in both directions
+ * (a local rename flows out through the registry; an arrived registry title
+ * flows into the linked local project).
  *
  * The reactor always starts and gates itself internally on the roaming
  * setting, matching the other roaming reactors.
  */
+import { CommandId, ProjectId, RoamingRegistryPayload } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -16,8 +22,16 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers } from "./RoamingPeers.ts";
 import { RoamingService } from "./RoamingService.ts";
+
+const decodeRegistryPayloadJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(RoamingRegistryPayload),
+);
+const decodeMetaUpdatedPayload = Schema.decodeUnknownEffect(
+  Schema.Struct({ projectId: ProjectId, title: Schema.optional(Schema.String) }),
+);
 
 export class RoamingAutoEnroll extends Context.Service<
   RoamingAutoEnroll,
@@ -32,8 +46,79 @@ const make = Effect.gen(function* () {
   const projectRepository = yield* ProjectionProjectRepository;
   const roamingService = yield* RoamingService;
   const engine = yield* OrchestrationEngineService;
+  const blobStore = yield* RoamingBlobStore;
+  const crypto = yield* Crypto.Crypto;
   const sql = yield* SqlClient.SqlClient;
   const trigger = yield* Queue.sliding<void>(1);
+
+  const roamingEnabled = settings.getSettings.pipe(
+    Effect.map((currentSettings) => currentSettings.roaming === true),
+    Effect.orElseSucceed(() => false),
+  );
+
+  // Local rename → registry: push the new title into the registry blob so it
+  // mirrors to peers. Event-triggered only (never pass-based): a stale
+  // periodic reconcile could overwrite an in-flight rename from the peer.
+  const pushRenamedTitle = (payload: unknown) =>
+    Effect.gen(function* () {
+      const meta = yield* decodeMetaUpdatedPayload(payload).pipe(Effect.orElseSucceed(() => null));
+      if (meta === null || meta.title === undefined || !(yield* roamingEnabled)) {
+        return;
+      }
+      yield* roamingService.syncRegistryTitle(meta.projectId).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("roaming: registry title sync failed", {
+            projectId: meta.projectId,
+            cause,
+          }),
+        ),
+      );
+    });
+
+  // Arrived registry → local project: an enrolled project follows its
+  // registry title (renames roam; the registry is the shared source of
+  // truth, last writer wins).
+  const applyRegistryTitle = (workspaceProjectId: string) =>
+    Effect.gen(function* () {
+      if (!(yield* roamingEnabled)) {
+        return;
+      }
+      const blob = yield* blobStore
+        .get({ kind: "registry", key: workspaceProjectId })
+        .pipe(Effect.orElseSucceed(() => null));
+      if (blob === null) {
+        return;
+      }
+      const registry = yield* decodeRegistryPayloadJson(blob.payload).pipe(
+        Effect.orElseSucceed(() => null),
+      );
+      if (registry === null || registry.title.length === 0) {
+        return;
+      }
+      const projects = yield* projectRepository.listAll().pipe(Effect.orElseSucceed(() => []));
+      const linked = projects.find(
+        (project) =>
+          project.workspaceProjectId === registry.workspaceProjectId && project.deletedAt === null,
+      );
+      if (linked === undefined || linked.title === registry.title) {
+        return;
+      }
+      yield* engine
+        .dispatch({
+          type: "project.meta.update",
+          commandId: CommandId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie)),
+          projectId: linked.projectId,
+          title: registry.title,
+        })
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("roaming: applying registry title failed", {
+              projectId: linked.projectId,
+              cause,
+            }),
+          ),
+        );
+    });
 
   // Roots the materializer is (or was) working in. A materialized project is
   // linked to its EXISTING workspaceProjectId by the register step; if this
@@ -144,6 +229,28 @@ const make = Effect.gen(function* () {
           Stream.filter((event) => event.type === "project.created"),
           Stream.runForEach(() => Queue.offer(trigger, undefined)),
         ),
+      );
+
+      yield* Effect.forkScoped(
+        engine.streamDomainEvents.pipe(
+          Stream.filter((event) => event.type === "project.meta-updated"),
+          Stream.runForEach((event) => pushRenamedTitle(event.payload)),
+        ),
+      );
+
+      yield* Effect.forkScoped(
+        Effect.gen(function* () {
+          const blobChanges = yield* blobStore.subscribeChanges;
+          return yield* Effect.forever(
+            PubSub.take(blobChanges).pipe(
+              Effect.flatMap((record) =>
+                record.kind === "registry"
+                  ? applyRegistryTitle(record.workspaceProjectId)
+                  : Effect.void,
+              ),
+            ),
+          );
+        }),
       );
 
       yield* Effect.forkScoped(
