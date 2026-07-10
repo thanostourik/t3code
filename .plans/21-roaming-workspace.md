@@ -70,19 +70,31 @@ machine's projects are visible but dead.
 > backbone (30s sweep; the fs watcher is an optimization, not a
 > guarantee). Verified: unit suite + repeated two-instance harness E2E
 > (pair → materialize → WIP both ways → receiver-side delete with a live
-> conflict → restart). **REOPENED 2026-07-10 (user directive, same day):**
-> the row's formal exit criteria (10× delivery latency run, watcher stress
-> fixture) had been skipped on close and the watcher-budgeting work was
-> still open — this session executes them: per-stage latency
-> instrumentation + measurement, budget-aware tree watching,
-> settings-watcher guarantee, then the full acceptance suite.
-> Analysis-pass correction (measured 2026-07-10): libuv shares ONE inotify
-> instance per process regardless of fs.watch call count — the recursive
-> per-project watchers exhaust `max_user_watches` (a running desktop
-> instance held ~167k watches with node_modules/.git registered), while
-> `max_user_instances` (128) is consumed per PROCESS (test zombies +
-> desktop apps). Both paths end in the same ENOSPC; the row's fix
-> directions stand for both.
+> conflict → restart). **Formal exit criteria MET 2026-07-10 (reopened and
+> completed the same day, user directive)** — the criteria had been skipped
+> on the first close. Instrumentation-first per the row: every delivery
+> stage logs a "roaming timing" line keyed by commitOid. Measured on a
+> CLEAN machine, the harness baseline was bimodal exactly as reported
+> (~0.8s or ~52s phase-locked); three root causes found and fixed:
+> (1) mirror connectivity is ONE-directional — only the pairing initiator
+> holds a credential/URL pair, so the callee's beacons sat until the
+> initiator's 60s interval → new `mirror/wait` long-poll (initiator holds
+> it; callee blob writes return it; works for existing pairings, no
+> re-pair); (2) nothing triggered the WIP reactor on enrollment, so a
+> fresh pairing had no watcher/first snapshot until the 2-min sweep;
+> (3) the M3.5 staleness guard's `<=` tie-skip deadlocked the now
+> sub-second pipeline (1s committer stamps) — marker ties now evaluate
+> (identical commit still skips; HEAD ties stay `<=`, review finding).
+> Watcher budget: per-directory registration on Linux excluding
+> node_modules/.git/build (recursive fs.watch held ~167k watches for one
+> desktop instance; now 1 instance + ~hundreds per project), 4096-dir cap
+> per project, watch death/cap → surfaced notice + 10s sweep (never the
+> silent 2-min cliff), settings watcher backed by an unconditional 2s
+> mtime poll. Criteria green: `accept-m37.mjs` 10/10 deliveries ≤10s
+> (max 5.8s, steady ~5.5s = 5s watch debounce + ~0.5s chain);
+> `accept-m37-stress.mjs` (12 live projects + over-cap 13th: notice
+> surfaced, sweep delivery, others unaffected, settings ≤5s);
+> `accept-m35.mjs` + `accept-m36.mjs` + canonical re-run all green.
 > **NEXT UP: M4 (bootstrap recipes; its analysis pass must scope honest
 > limits — v1 targets scriptable setups; capture-what-happened over
 > guaranteed-boot).** M2.5 DONE 2026-07-06 (PRs #19–#29+).
@@ -940,7 +952,12 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   guard); locally-present vault files are preserved across the restore from
   the WORKTREE's copies, never from a possibly-stale blob. A snapshot older
   than HEAD or the applied marker never applies (no stale-echo
-  resurrection; timestamps compare with `<=`, so ties skip).
+  resurrection). REVISED M3.7: committer stamps are 1-second and the fast
+  path is sub-second, so applied-marker TIES evaluate (identical commit
+  still skips; the per-file merge's base-diff/local-edit/Based-On gates own
+  safety); HEAD ties keep the conservative `<=` skip — with no marker the
+  merge base falls back to HEAD and a tied-but-stale snapshot lacking a
+  just-committed file would read as a peer deletion.
 - **Freshness beacon:** origin-mode pushes ALSO write an empty-bundle wip
   blob (metadata only — refName/commitOid/treeOid, `bundleBase64: ""`);
   the mirror pushes on every blob write, and peers run the project's pass
@@ -973,9 +990,11 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   laptop's first post-apply capture echoes an identical-tree snapshot once
   (settles via tree-equality skips).
 - Acceptance: `accept-m35.mjs` (1-second A→B delivery onto a clean
-  checkout, no-clobber of a locally-edited checkout, `.t3sync` `.idea/`
-  round-trip with origin hygiene, oversize warning) + the
-  canonical-workflow re-run.
+  checkout, no-clobber of locally-edited FILES — step 5 revised by M3.7's
+  per-file merge, same as accept-m36 step 6: a local edit no longer blocks
+  the whole tree, a same-file conflict keeps ours on both sides —
+  `.t3sync` `.idea/` round-trip with origin hygiene, oversize warning) +
+  the canonical-workflow re-run.
 
 ### Field round 2 (M3.6, PRs #43–#47)
 
@@ -1010,13 +1029,11 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
 - Acceptance: `accept-m36.mjs` (post-materialize vault delivery, secret
   update + no-clobber, based-on backflow onto a dirty-but-unchanged
   author, divergence blocked + surfaced) + `accept-m35.mjs` + canonical.
-- ~~Flagged follow-ups~~ Both M3.6 flags became M3.7 and are addressed:
-  the latency variance and watcher flake shared one root cause (inotify
-  `max_user_instances` exhaustion, PR #52 evidence); mitigated by interval
-  backbones (vault 30s sweep, WIP 2 min) so no sync direction depends on a
-  live watcher. True watcher budgeting (exclude node_modules/.git from
-  what is REGISTERED, not just from emitted events) remains open — revisit
-  if dead-watcher latency (bounded by the sweeps) is still felt in the field.
+- ~~Flagged follow-ups~~ Both M3.6 flags became M3.7 and are CLOSED there:
+  the latency variance had three distinct causes (one-directional mirror
+  connectivity, the missing enrollment trigger, the staleness tie-skip),
+  and watcher budgeting landed as per-directory registration + cap +
+  surfaced fallback — see Sync hardening (M3.7) below.
 
 ### Sync hardening (M3.7)
 
@@ -1049,11 +1066,65 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   pass-based reconciliation, which could undo an in-flight remote rename);
   the grouped sidebar label prefers a shared member title over the
   repository name.
-- Acceptance: unit suite (deletion-model regression tests fail on the old
-  code) + repeated two-instance harness E2E; `accept-m36.mjs` step 6
-  updated for per-file merge (concurrent edits to different files now
-  cross instead of blocking). Formal latency/stress criteria not run
-  (user call, see status line).
+- **Mirror wait long-poll (formal-criteria session, 2026-07-10):** mirror
+  connectivity is ONE-directional by design (M2.5 tamper resistance: the
+  callee holds no credential/URL for the initiator, and the server cannot
+  discover its own reachable URLs) — so the callee's write-trigger pass is
+  a no-op and its beacons used to wait for the initiator's 60s interval
+  (the measured ~52s phase-locked deliveries). `POST
+  /api/roaming/mirror/wait` (same gating as every mirror route: roaming
+  flag 404, `roaming:mirror` scope, paused-peer 403) holds up to 25s
+  against an in-memory per-boot blob-store change revision (compared only
+  for inequality; restart wakes the waiter into one no-op pass). PeerMirror
+  runs one waiter fiber per reachable enabled peer (atomic claim; waiters
+  self-terminate when the peer is paused/removed/roaming off; reconciled
+  every drain pass + a 30s scan; 15s backoff on failure, 40s client cap).
+  The 60s interval remains the delivery guarantee; the waiter is the fast
+  path and self-heals for pre-M3.7 pairings without re-pairing.
+- **Enrollment trigger:** `project.meta-updated` carrying a
+  `workspaceProjectId` runs a reactor scan — a fresh pairing's projects get
+  watchers and a first snapshot immediately, not on the next 2-min sweep.
+- **Watcher budget (Linux):** tree watching registers PER DIRECTORY,
+  skipping `.git`/`node_modules`/`dist`/`build`/`target`/`out`/`.venv`/
+  `__pycache__` at REGISTRATION (libuv shares one inotify instance per
+  process; the watches budget is what recursive fs.watch exhausted —
+  ~167k watches measured for one desktop instance), capped at 4096
+  dirs/project; macOS/Windows keep native recursive. A single dead
+  directory no longer kills a project's watch (this was the silent
+  watcher-death mechanism: git's transient `.git` churn erroring the
+  recursive watcher). Watch death or cap → per-project fallback: 10s
+  capture sweep + `notice` on the status entry (amber "Sync on" pill,
+  concept-free copy) + a real-watch retry every ~5 min — NEVER a silent
+  fall to the 2-min interval. Notices live in reactor state merged into
+  every published entry; passes cannot wipe them.
+- **Settings freshness guarantee:** an unconditional 2s mtime poll backs
+  the settings watcher (upstream file, minimal diff) — an external
+  settings.json edit is honored within ~2-4s even with ZERO inotify
+  budget; watch death also logs a warning instead of ending silently.
+- **Timing instrumentation is permanent:** every delivery stage logs a
+  `roaming timing:` line keyed by commitOid/blob version (watch-trigger,
+  captured, origin-pushed, beacon-written, mirror-exchange with trigger
+  source, blobs-pushed-to-peer, wip-blob-ingested, arrival trigger,
+  peer-refs-fetched, apply) — slow deliveries are attributable from the
+  two server.log files alone. Beacon write failure is a WARNING (it
+  silently costs the fast path). `accept-m37.mjs` prints a per-stage
+  table per delivery.
+- Known limits (accepted): total inotify-INSTANCE exhaustion at server
+  boot crashes UPSTREAM watch paths (git driver, atomic-write temp files)
+  before roaming code runs — out of M3.7's blast radius; M3.7 removes the
+  dominant watch consumer, making that state unlikely. Base-diff peer
+  deletions when NO applied marker exists yet are not Based-On-gated
+  (pre-existing, narrow: markers appear on first exchange; HEAD-tie `<=`
+  covers the same-second case). The M3.5 "~1s A→B" acceptance number rode
+  adjacent-trigger luck; the honest steady-state fast path is ~5.5s
+  (5s watch debounce + ~0.5s chain), ~0.5s when riding another trigger.
+- Acceptance: unit suite (deletion-model + tie-deadlock regression tests
+  fail on the old code) + `accept-m37.mjs` (ten consecutive A→B
+  deliveries, all ≤10s, max 5.8s) + `accept-m37-stress.mjs` (12 live
+  projects + an over-cap 13th: notice surfaced, fallback-sweep delivery,
+  healthy projects unaffected, settings edit ≤5s in both phases) +
+  `accept-m36.mjs` step 6 updated for per-file merge + `accept-m35.mjs` +
+  canonical re-run.
 
 ## Execution process
 
