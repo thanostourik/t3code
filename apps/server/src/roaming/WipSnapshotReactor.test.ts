@@ -2,6 +2,7 @@ import * as NodeCrypto from "node:crypto";
 
 import {
   EnvironmentId,
+  ProjectId,
   RoamingRegistryPayload,
   RoamingWipPayload,
   WorkspaceProjectId,
@@ -33,6 +34,7 @@ import {
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("env-wip-local");
 
 const decodeWipPayloadJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingWipPayload));
+const encodeWipPayloadJson = Schema.encodeEffect(Schema.fromJsonString(RoamingWipPayload));
 
 const serverEnvironmentStub = Layer.succeed(ServerEnvironment.ServerEnvironment, {
   getEnvironmentId: Effect.succeed(LOCAL_ENVIRONMENT_ID),
@@ -88,7 +90,7 @@ const initRepoWithOrigin = Effect.fn(function* (root: string) {
 const target = (workspaceProjectId: WorkspaceProjectId, workPath: string): WipTarget => ({
   workspaceProjectId,
   workspaceRoot: workPath,
-  localProjectId: "project-wip",
+  localProjectId: ProjectId.make("project-wip"),
 });
 
 const PEER_ENVIRONMENT_ID = EnvironmentId.make("env-wip-peer");
@@ -139,6 +141,7 @@ const peerSnapshot = (peerPath: string, wsid: WorkspaceProjectId, dateIso: strin
   withCommitterDate(
     dateIso,
     Effect.gen(function* () {
+      const blobStore = yield* RoamingBlobStore;
       const captured = yield* captureWipSnapshot({
         cwd: peerPath,
         workspaceProjectId: wsid,
@@ -147,6 +150,21 @@ const peerSnapshot = (peerPath: string, wsid: WorkspaceProjectId, dateIso: strin
       });
       assert.isNotNull(captured);
       yield* git(peerPath, ["push", "origin", `+${captured!.refName}:${captured!.refName}`]);
+      yield* blobStore.writeLocal({
+        kind: "wip",
+        key: `${wsid}/${PEER_ENVIRONMENT_ID}`,
+        workspaceProjectId: wsid,
+        payload: yield* encodeWipPayloadJson({
+          schemaVersion: 2,
+          capturedAt: dateIso,
+          refName: captured!.refName,
+          commitOid: captured!.commitOid,
+          treeOid: captured!.treeOid,
+          branchRef: captured!.branchRef,
+          headOid: captured!.headOid,
+          bundleBase64: "",
+        }),
+      });
       return captured!;
     }),
   );
@@ -624,6 +642,133 @@ testLayer("WipSnapshotReactor", (it) => {
       // And the guard still holds: the identical commit never re-applies.
       const again = yield* runWipApplyForTarget(target(wsid, localPath));
       assert.strictEqual(again._tag, "skipped");
+    }),
+  );
+
+  it.effect("blocks a legacy snapshot without branch metadata", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-legacy");
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-legacy-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+      const captured = yield* captureWipSnapshot({
+        cwd: peerPath,
+        workspaceProjectId: wsid,
+        environmentId: PEER_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(captured);
+      yield* git(peerPath, ["push", "origin", `+${captured!.refName}:${captured!.refName}`]);
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "blocked");
+      assert.match(outcome._tag === "blocked" ? outcome.reason : "", /other machine must update/);
+    }),
+  );
+
+  it.effect("fast-forwards a clean checkout before applying peer WIP", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-ff");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-ff-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+      yield* fs.writeFileString(pathService.join(peerPath, "committed.txt"), "commit\n");
+      yield* git(peerPath, ["add", "committed.txt"]);
+      yield* git(peerPath, ["commit", "-m", "peer commit"]);
+      yield* git(peerPath, ["push", "origin", "main"]);
+      yield* fs.writeFileString(pathService.join(peerPath, "wip.txt"), "dirty\n");
+      const snapshot = yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(yield* gitStdout(localPath, ["rev-parse", "HEAD"]), snapshot.headOid);
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "wip.txt")),
+        "dirty\n",
+      );
+    }),
+  );
+
+  it.effect("blocks a fast-forward when the checkout has local edits", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-ff-dirty");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-ff-dirty-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+      yield* fs.writeFileString(pathService.join(peerPath, "committed.txt"), "commit\n");
+      yield* git(peerPath, ["add", "committed.txt"]);
+      yield* git(peerPath, ["commit", "-m", "peer commit"]);
+      yield* git(peerPath, ["push", "origin", "main"]);
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      yield* fs.writeFileString(pathService.join(localPath, "local.txt"), "mine\n");
+      const headBefore = yield* gitStdout(localPath, ["rev-parse", "HEAD"]);
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "blocked");
+      assert.match(outcome._tag === "blocked" ? outcome.reason : "", /local edits/);
+      assert.strictEqual(yield* gitStdout(localPath, ["rev-parse", "HEAD"]), headBefore);
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "local.txt")),
+        "mine\n",
+      );
+    }),
+  );
+
+  it.effect("switches a clean checkout to the peer branch and parks the old branch", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-switch");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-switch-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+      yield* git(peerPath, ["switch", "-c", "feature/peer"]);
+      yield* fs.writeFileString(pathService.join(peerPath, "branch.txt"), "committed\n");
+      yield* git(peerPath, ["add", "branch.txt"]);
+      yield* git(peerPath, ["commit", "-m", "branch commit"]);
+      yield* fs.writeFileString(pathService.join(peerPath, "wip.txt"), "dirty\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(yield* gitStdout(localPath, ["branch", "--show-current"]), "feature/peer");
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "wip.txt")),
+        "dirty\n",
+      );
+      assert.isNotNull(yield* resolveOid(localPath, `refs/t3/wip-parked/${wsid}/main`));
+    }),
+  );
+
+  it.effect("takeover parks local work and reproduces the peer branch", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-takeover");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-takeover-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+      yield* git(peerPath, ["switch", "-c", "feature/peer"]);
+      yield* fs.writeFileString(pathService.join(peerPath, "peer.txt"), "peer dirty\n");
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      yield* fs.writeFileString(pathService.join(localPath, "mine.txt"), "local dirty\n");
+
+      const blocked = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(blocked._tag, "blocked");
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath), undefined, {
+        takeover: true,
+      });
+      assert.strictEqual(outcome._tag, "applied");
+      assert.strictEqual(yield* gitStdout(localPath, ["branch", "--show-current"]), "feature/peer");
+      assert.isFalse(yield* fs.exists(pathService.join(localPath, "mine.txt")));
+      assert.strictEqual(
+        yield* gitStdout(localPath, ["show", `refs/t3/wip-parked/${wsid}/main:mine.txt`]),
+        "local dirty",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "peer.txt")),
+        "peer dirty\n",
+      );
     }),
   );
 

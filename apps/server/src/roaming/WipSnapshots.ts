@@ -72,6 +72,18 @@ export const wipRefGlob = (workspaceProjectId: WorkspaceProjectId) =>
 export const wipAppliedMarkerRefName = (workspaceProjectId: WorkspaceProjectId) =>
   refSafe(workspaceProjectId).pipe(Effect.map((id) => `refs/t3/wip-applied/${id}`));
 
+export const wipParkedRefName = (
+  workspaceProjectId: WorkspaceProjectId,
+  branchRef: string,
+): Effect.Effect<string, WipRefIdError> =>
+  Effect.gen(function* () {
+    yield* refSafe(workspaceProjectId);
+    if (!branchRef.startsWith("refs/heads/") || branchRef.length === "refs/heads/".length) {
+      return yield* new WipRefIdError({ id: branchRef });
+    }
+    return `refs/t3/wip-parked/${workspaceProjectId}/${branchRef.slice("refs/heads/".length)}`;
+  });
+
 export const COMMIT_ENV_IDENTITY = {
   GIT_AUTHOR_NAME: "T3 Code",
   GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
