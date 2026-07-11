@@ -180,6 +180,10 @@ export const RoamingWipPayload = Schema.Struct({
   refName: Schema.String,
   commitOid: Schema.String,
   treeOid: Schema.String,
+  /** Symbolic HEAD (`refs/heads/...`) or an invalid-ref sentinel. Added in v2. */
+  branchRef: Schema.optional(Schema.String),
+  /** Commit checked out when the snapshot was captured. Added in v2. */
+  headOid: Schema.optional(Schema.String),
   bundleBase64: Schema.String,
 });
 export type RoamingWipPayload = typeof RoamingWipPayload.Type;
@@ -347,6 +351,8 @@ export const RoamingWipStatusEntry = Schema.Struct({
   lastError: Schema.optional(Schema.String),
   /** Why the last incoming snapshot was NOT applied (local edits). */
   blockedReason: Schema.optional(Schema.String),
+  /** The blocked snapshot can be reproduced explicitly after parking local work. */
+  takeoverAvailable: Schema.optional(Schema.Boolean),
   /**
    * Degraded-but-working advisory (M3.7): set while file watching is
    * unavailable (inotify budget) and capture runs on the short sweep
@@ -359,6 +365,16 @@ export const RoamingWipStatusEntry = Schema.Struct({
   lastAppliedFrom: Schema.optional(EnvironmentId),
 });
 export type RoamingWipStatusEntry = typeof RoamingWipStatusEntry.Type;
+
+export const RoamingWipTakeoverRequest = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+});
+export type RoamingWipTakeoverRequest = typeof RoamingWipTakeoverRequest.Type;
+
+export const RoamingWipTakeoverResponse = Schema.Struct({
+  applied: Schema.Boolean,
+});
+export type RoamingWipTakeoverResponse = typeof RoamingWipTakeoverResponse.Type;
 
 // ── Peers ────────────────────────────────────────────────────────────
 
@@ -623,5 +639,6 @@ export const ROAMING_PEERS_SYNC_PATH = "/api/roaming/peers/sync";
 export const ROAMING_HANDSHAKE_COMPLETE_PATH = "/api/roaming/handshake-complete";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
+export const ROAMING_WIP_TAKEOVER_PATH = "/api/roaming/wip/takeover";
 export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";
 export const ROAMING_CONFLICT_RESOLVE_PATH = "/api/roaming/conflicts/resolve";
