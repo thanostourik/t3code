@@ -190,8 +190,9 @@ yet built.
   `{ commitOid, treeOid }`. Real index and worktree untouched. Fixed
   author/committer identity.
 - **(M3.8)** payload v2 adds `branchRef` (symbolic HEAD; sentinel for
-  detached/unborn) and `headOid`. Legacy payloads (no branch info) are
-  never auto-applied.
+  detached/unborn) and `headOid`. Origin refs get this context from the
+  mirrored beacon only on an exact `(refName, commitOid)` match; a ref with
+  no matching v2 metadata is legacy. Legacy payloads never auto-apply.
 - The WIP ref mirrors the worktree tree even when clean (a stale dirty
   snapshot must never shadow committed work). No-op baseline = last SHIPPED
   tree (`wip-pushed` marker in origin mode; the wip blob's `treeOid` in
@@ -240,12 +241,13 @@ yet built.
   peer HEAD descendant, untouched checkout) → `merge --ff-only` + diff on
   top; different branch (untouched, ff-safe) → park, switch, apply;
   peer-behind → skip; diverged/detached/legacy → blocked. Untouched =
-  worktree tree equals applied-marker tree + no in-progress git op + no
-  in-flight agent turn. Every blocked case sets a specific `blockedReason`
-  and surfaces the takeover action. The shipped "strictly newer than HEAD"
-  committer-timestamp staleness gate is DELETED with M3.8, not kept
-  alongside. Newest-peer selection across environments stays
-  committer-timestamp (fine at 2 machines).
+  worktree tree equals applied-marker tree (or HEAD when no marker exists) +
+  no in-progress git op + no in-flight agent turn. The in-flight guard uses
+  a project-level projection query joining threads to sessions. Every blocked
+  case sets a specific `blockedReason` and surfaces the takeover action. The
+  shipped "strictly newer than HEAD" committer-timestamp staleness gate is
+  DELETED with M3.8, not kept alongside. Newest-peer selection across
+  environments stays committer-timestamp (fine at 2 machines).
 - Per-file merge (M3.7, survives as the same-context path): base =
   applied marker, else HEAD, else empty tree; peer changes via
   `git diff --name-status --no-renames <base> <peer>`. Per path with

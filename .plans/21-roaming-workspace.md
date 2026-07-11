@@ -197,6 +197,11 @@ capture the clean state too (a stale dirty snapshot must never shadow
 committed work). Triggers: fs watch (debounced), 2-min sweep, turn
 completion, enrollment, graceful shutdown.
 
+Origin-ref snapshots join branch context from the mirrored v2 beacon by an
+exact `(refName, commitOid)` match. A fetched ref without matching v2 metadata
+is legacy context and never auto-applies; ref ancestry alone cannot recover
+the checked-out branch.
+
 **Apply — reproduce completely or touch nothing.** Given peer snapshot
 `{branch Bp, head Hp, tree Tp}` and local `{branch Bl, head Hl}`, classify
 by ancestry (merge-base), never wall clock:
@@ -209,11 +214,12 @@ by ancestry (merge-base), never wall clock:
 | Peer behind | Hp ancestor of Hl | Skip (marker bookkeeping only). |
 | Diverged / detached / legacy payload | everything else | **Blocked.** Divergence resolution UI is M5. |
 
-**Untouched** = worktree tree equals the applied-marker tree, no
-merge/rebase/cherry-pick in progress, no in-flight agent turn in the
-project. Auto-switch on an untouched checkout is accepted behavior (user
-decision 2026-07-11): it is the roaming promise, and parking makes it
-lossless.
+**Untouched** = worktree tree equals the applied-marker tree when that marker
+exists, otherwise the HEAD tree; no merge/rebase/cherry-pick in progress; no
+in-flight agent turn in the project. The turn guard uses a project-level
+projection query (the current thread repository has no session-state query).
+Auto-switch on an untouched checkout is accepted behavior (user decision
+2026-07-11): it is the roaming promise, and parking makes it lossless.
 
 **Parked refs:** before any HEAD move, local state snapshots to
 `refs/t3/wip-parked/<wsid>/<branch>` (per branch — work on multiple branches
