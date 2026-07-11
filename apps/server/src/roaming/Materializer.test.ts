@@ -42,6 +42,7 @@ const WORKSPACE_PROJECT_ID = WorkspaceProjectId.make("wp-materializer");
 const REMOTE_URL = "https://example.test/owner/materializer.git";
 
 const encodeRegistryPayload = Schema.encodeEffect(Schema.fromJsonString(RoamingRegistryPayload));
+const encodeWipPayload = Schema.encodeEffect(Schema.fromJsonString(RoamingWipPayload));
 
 const peerMirrorStub = Layer.succeed(PeerMirror, {
   start: () => Effect.void,
@@ -605,7 +606,7 @@ const writeWipMetadata = Effect.fn("MaterializerTest.writeWipMetadata")(function
   bundleBase64 = "",
 ) {
   const store = yield* RoamingBlobStore;
-  const payload = yield* Schema.encodeEffect(Schema.fromJsonString(RoamingWipPayload))({
+  const payload = yield* encodeWipPayload({
     schemaVersion: 2,
     capturedAt: "2026-07-11T00:00:00.000Z",
     refName: captured.refName,

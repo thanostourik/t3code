@@ -31,6 +31,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -117,8 +118,8 @@ const WATCH_FALLBACK_NOTICE =
  * macOS/Windows recursive watching is a cheap native facility (FSEvents /
  * ReadDirectoryChangesW) — one watcher, no walk.
  */
-const watchTreeEvents = (root: string): Stream.Stream<string> =>
-  process.platform === "linux" ? watchTreePerDirectory(root) : watchTreeRecursiveNative(root);
+const watchTreeEvents = (root: string, platform: NodeJS.Platform): Stream.Stream<string> =>
+  platform === "linux" ? watchTreePerDirectory(root) : watchTreeRecursiveNative(root);
 
 const watchTreeRecursiveNative = (root: string): Stream.Stream<string> =>
   Stream.callback<string>((queue) =>
@@ -213,7 +214,7 @@ const watchTreePerDirectory = (root: string): Stream.Stream<string> =>
                 walk(absolute);
               }
             } catch {
-              for (const key of [...watchers.keys()]) {
+              for (const key of watchers.keys()) {
                 if (key === absolute || key.startsWith(absolute + NodePath.sep)) {
                   watchers.get(key)?.close();
                   watchers.delete(key);
@@ -485,7 +486,6 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     return { _tag: "skipped" } as WipPassOutcome;
   }
 
-  const refName = yield* wipRefName(target.workspaceProjectId, environmentId);
   const markerRef = yield* wipPushedMarkerRefName(target.workspaceProjectId, environmentId);
 
   const excludePaths = yield* vaultExcludePathsFor(target);
@@ -1572,6 +1572,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* serverEnvironment.getEnvironmentId;
+  const hostPlatform = yield* HostProcessPlatform;
   const orchestrationEngine = yield* OrchestrationEngineService;
 
   const statuses = yield* Ref.make(new Map<WorkspaceProjectId, RoamingWipStatusEntry>());
@@ -1843,7 +1844,7 @@ const make = Effect.gen(function* () {
           Effect.forkIn(scope),
         );
         yield* Stream.runForEach(
-          watchTreeEvents(target.workspaceRoot).pipe(Stream.debounce(WATCH_DEBOUNCE)),
+          watchTreeEvents(target.workspaceRoot, hostPlatform).pipe(Stream.debounce(WATCH_DEBOUNCE)),
           (relative) =>
             Effect.logInfo("roaming timing: watch-trigger", {
               workspaceProjectId: target.workspaceProjectId,

@@ -60,6 +60,7 @@ async function postRoaming<
 }): Promise<Res["Type"]> {
   const bearerToken = await readDesktopPrimaryBearerToken();
   const encoded = await Effect.runPromise(
+    // oxlint-disable-next-line t3code/no-inline-schema-compile -- schema is a generic call input
     Schema.encodeUnknownEffect(input.requestSchema)(input.body),
   );
   let response: Response;
@@ -92,6 +93,7 @@ async function postRoaming<
     );
   }
   const json: unknown = await response.json();
+  // oxlint-disable-next-line t3code/no-inline-schema-compile -- schemas are generic call inputs
   return Effect.runPromise(Schema.decodeUnknownEffect(input.responseSchema)(json));
 }
 

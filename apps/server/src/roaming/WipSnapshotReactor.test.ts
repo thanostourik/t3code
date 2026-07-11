@@ -3,7 +3,6 @@ import * as NodeCrypto from "node:crypto";
 import {
   EnvironmentId,
   ProjectId,
-  RoamingRegistryPayload,
   RoamingWipPayload,
   WorkspaceProjectId,
 } from "@t3tools/contracts";
@@ -1197,7 +1196,6 @@ testLayer("WipSnapshotReactor", (it) => {
       const wsid = WorkspaceProjectId.make("wp-apply-vaultkeep");
       const fs = yield* FileSystem.FileSystem;
       const pathService = yield* Path.Path;
-      const blobStore = yield* RoamingBlobStore;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-apply-d-" });
       const { peerPath, localPath } = yield* initApplyFixture(root);
 

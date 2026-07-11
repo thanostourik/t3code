@@ -3,10 +3,15 @@
 // and branch-aware materialization. The canonical pairing/thin-client walk
 // remains accept-m2.5.mjs and is rerun separately after this script.
 
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
+const { execFileSync } = NodeChildProcess;
+const { randomUUID } = NodeCrypto;
+const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = NodeFS;
+const { join } = NodePath;
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
 const REPO_ROOT = new URL("../..", import.meta.url).pathname;
