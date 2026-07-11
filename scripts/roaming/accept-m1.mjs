@@ -17,8 +17,16 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const A = { name: "instance-a", url: "http://127.0.0.1:14801", base: join(HARNESS_DIR, "instance-a/basedir") };
-const B = { name: "instance-b", url: "http://127.0.0.1:14802", base: join(HARNESS_DIR, "instance-b/basedir") };
+const A = {
+  name: "instance-a",
+  url: "http://127.0.0.1:14801",
+  base: join(HARNESS_DIR, "instance-a/basedir"),
+};
+const B = {
+  name: "instance-b",
+  url: "http://127.0.0.1:14802",
+  base: join(HARNESS_DIR, "instance-b/basedir"),
+};
 const REPO_ROOT = new URL("../..", import.meta.url).pathname;
 
 const fail = (step, detail) => {
@@ -89,7 +97,8 @@ const dispatchResponse = await api(A.url, "/api/orchestration/dispatch", {
     createdAt: new Date().toISOString(),
   },
 });
-if (!dispatchResponse.ok) fail("project.create", `${dispatchResponse.status} ${await dispatchResponse.text()}`);
+if (!dispatchResponse.ok)
+  fail("project.create", `${dispatchResponse.status} ${await dispatchResponse.text()}`);
 pass("project created on A");
 
 const enrollResponse = await api(A.url, "/api/roaming/projects/enroll", {
@@ -107,20 +116,28 @@ const pairingJson = JSON.parse(
   cli(["auth", "pairing", "create", "--admin", "--base-dir", B.base, "--json"]),
 );
 const pairingCredential = pairingJson.credential ?? pairingJson.token;
-if (!pairingCredential) fail("pairing", `unrecognized pairing output: ${JSON.stringify(pairingJson)}`);
+if (!pairingCredential)
+  fail("pairing", `unrecognized pairing output: ${JSON.stringify(pairingJson)}`);
 
 const addPeerResponse = await api(A.url, "/api/roaming/peers", {
   method: "POST",
   token: adminA,
   body: { baseUrls: [B.url], pairingCredential },
 });
-if (!addPeerResponse.ok) fail("addPeer", `${addPeerResponse.status} ${await addPeerResponse.text()}`);
+if (!addPeerResponse.ok)
+  fail("addPeer", `${addPeerResponse.status} ${await addPeerResponse.text()}`);
 const { peer } = await addPeerResponse.json();
 pass(`peer enrolled: A now mirrors to ${peer.environmentId}`);
 
 // ── 4. B holds the registry entry after a mirror pass ─────────────────
-const credentialPath = join(A.base, "userdata", "secrets", `roaming-peer-${peer.environmentId}.bin`);
-if (!existsSync(credentialPath)) fail("credential", `machine credential not stored at ${credentialPath}`);
+const credentialPath = join(
+  A.base,
+  "userdata",
+  "secrets",
+  `roaming-peer-${peer.environmentId}.bin`,
+);
+if (!existsSync(credentialPath))
+  fail("credential", `machine credential not stored at ${credentialPath}`);
 const machineToken = readFileSync(credentialPath, "utf8");
 
 const environmentIdA = readFileSync(join(A.base, "userdata", "environment-id"), "utf8").trim();
