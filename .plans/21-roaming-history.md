@@ -1065,3 +1065,659 @@ repro; the user later reported it stopped after the fixes. The branch-blind
 sync finding from the same field round became the M3.8 SHIP GATE (see the
 decisions log). Harness readiness curl got --max-time 5 after an untimed
 probe wedged a suite run under parallel CPU load.
+
+
+## 2026-07-11 — M3.8 options analysis + decision (branch-aware sync model)
+
+Context: the 2026-07-10 field finding (see the ship-gate decision below in
+the archived decisions log) — committed branch work on machine A arrived on
+machine B's different branch as unstaged soup, and stayed soup even after A
+merged and pushed. Root cause is the v1 snapshot semantics working as
+specified: the WIP ref mirrors the worktree TREE only; branch/HEAD/index are
+invisible to sync.
+
+Code-mapping findings that grounded the analysis (gpt-5.6-sol read-only pass
+over `apps/server/src/roaming/` + contracts, 2026-07-11):
+
+- Nothing anywhere records a branch name. The wip payload is
+  `{ schemaVersion, capturedAt, refName, commitOid, treeOid, bundleBase64 }`;
+  the only branch provenance is implicit (snapshot commit's parent = the
+  HEAD it sat on). The apply side never asks git for the current branch.
+- The M3.5 "edit-free checkouts fast-forward" never moved a branch ref or
+  HEAD in live apply OR materialize — it wrote worktree files and advanced
+  the hidden applied marker. So committed work had no delivery mode other
+  than "appear as modifications."
+- Materialize had the same defect latent: it restored the newest WIP tree
+  onto the default branch regardless of which branch the WIP came from.
+- The apply staleness gate compared committer wall-clock timestamps against
+  HEAD's commit time — a heuristic that ancestry checks can replace once
+  head identity travels with the snapshot.
+- Useful accident: pushing the WIP ref uploads its parent closure, so a
+  peer's local-only commits (never pushed to a branch) already reach the
+  origin as objects; bundles (`--not --remotes=origin`) likewise carry
+  them. Branch-aware apply therefore needs no new transport.
+
+Options assessed (per the M3.8 row's mandate):
+
+- (a) Gate auto-apply on same branch/HEAD, surface "on different branches"
+  — a guard, not a model; alone it leaves the field scenario permanently
+  stuck. Kept as the surfaced state when the gate blocks.
+- (b) Branch-aware snapshots — carry `branchRef` + `headOid`, apply
+  reproduces the peer's git state (checkout/ff) before laying the dirty
+  diff on top. The industry-precedented model (Codespaces auto-save,
+  git-wip workflows, jj's working-copy-as-commit). Smallest delta from the
+  shipped code since parent=HEAD already exists. CHOSEN as the model.
+- (c) Auto-apply only onto never-locally-touched checkouts — not an
+  alternative but (b)'s safety condition; alone it doesn't fix
+  branch-blindness. CHOSEN as the gate.
+- (d) Other directions: syncing `.git` raw (rejected — repo-corruption
+  class); demoting all apply to explicit takeover (kept as the documented
+  fallback re-scope if full-state auto-apply still feels wrong in real
+  use — deletes the surprise class while keeping most of the value).
+
+Decision (user, 2026-07-11): (b)+(c) with (a) as the blocked-state surface,
+under the principle "auto-apply reproduces the peer's complete git state or
+touches nothing." Three sub-decisions, user picked the recommendation on
+all: (1) auto-switch branches on untouched checkouts: YES (parking makes it
+lossless; downgrading to explicit-only later is cheap — it's one slice);
+(2) minimal takeover ships inside M3.8: YES (blocked states must not
+dead-end; full takeover UX stays M5); (3) per-branch parked refs: YES
+(`refs/t3/wip-parked/<wsid>/<branch>` — multi-branch WIP survives
+switching; a machine's single live wip ref would otherwise overwrite).
+
+Migration decisions: wip payload schemaVersion bump; legacy payloads never
+auto-apply (surfaced notice, age out on next capture); both machines must
+run ≥M3.8 builds before branch-aware behavior holds end-to-end (acceptable
+for a two-machine fork); no ref renames, no marker migration; the
+timestamp-vs-HEAD staleness gate is deleted rather than kept alongside the
+classifier (two overlapping gates caused M3.7's tie-deadlock).
+
+## 2026-07-11 — plan restructure (three-file split)
+
+User directive: the plan had grown to 1241 lines of mixed plan, status,
+results, and constraints — unreadable. Restructured into three documents:
+`21-roaming-workspace.md` (lean current-state plan), `21-roaming-reference.md`
+(NEW — binding technical mechanics: refs, schemas, invariants, harness),
+and this history file (narratives, results, superseded text). The plan's
+"Landed constraints" section was redistributed: behavior-defining rules
+into the plan's Design sections, mechanics into the reference file. The
+sections below preserve the evicted plan text verbatim as of commit
+1fd049d7 (pre-restructure) — first the status/decisions blockquote, then
+the full Landed constraints.
+
+### Archived: plan status + decisions blockquote (verbatim, pre-restructure)
+
+> **Status:** M3 (WIP snapshots) DONE 2026-07-07 — PRs #32–#37: analysis
+> pass (independently reviewed; bundle spike flipped WIP commits to
+> parent=HEAD), contracts, WipSnapshotReactor (capture + origin-refs push +
+> bundle fallback + status surfacing), materialize restore-wip (+ the
+> 2026-07-07 field bug: stale completed materialization records now
+> revalidate), UI (Work in progress row in the one pairing flow, settings
+> row, push-failure surfacing, materialize toggle). Acceptance green on the
+> M0 harness: `accept-m3.mjs` (origin-refs path with A killed, bundle
+> fallback end-to-end, push failures surfaced, field-bug regression) plus
+> the canonical-workflow re-run (`accept-m2.5.mjs`). Materialize now =
+> clone + WIP snapshot + secret files + registration. **M3.5 (sync completion)
+> DONE 2026-07-07** — PRs #38–#42, driven by the same-night field session:
+> auto-apply delivery (edit-free checkouts fast-forward; local work is
+> never touched), filesystem-watch capture + freshness beacon (~1s A→B
+> end-to-end on the harness), graceful-shutdown snapshot, t3sync manifests
+> (global defaults file + per-project .t3sync, user decision — replaces
+> vaultOverrides and the hidden pattern list), origin-mode size guard.
+> Acceptance green: `accept-m35.mjs` + canonical re-run (`accept-m2.5.mjs`).
+> Constraints under [Landed constraints](#landed-constraints-m0m35).
+> **M3.6 (field round 2) DONE 2026-07-07** — PRs #43–#47, same-day field
+> findings: HTTP shell snapshot respects the roaming flag; vault bundles
+> deliver on arrival to live checkouts (missing/unmodified/locally-edited
+> per-file contract, applied-hash record); based-on fast-forward (edits
+> made on the materialized machine flow back to the still-unchanged dirty
+> author via T3-Based-On provenance; divergence stays blocked for M5);
+> blockedReason + per-project sync indicator in the one list. Acceptance:
+> `accept-m36.mjs` + `accept-m35.mjs` + canonical re-run, all green.
+> **M3.7 (sync hardening) DONE 2026-07-10** — PR #52 (root cause: inotify
+> `max_user_instances` exhaustion) + the per-file-apply PR. Scope grew
+> beyond the row's spec, driven by two field sessions: per-file WIP merge
+> (replaces whole-tree blocking; concurrent edits to different files
+> cross), a correct two-machine deletion model (always-advanced applied
+> marker with conflicted paths pinned to base; shipped-diff deletions
+> gated on T3-Based-On provenance; causality re-ship when an unchanged
+> tree follows a marker move), sync pill data path (shell projections now
+> carry `workspaceProjectId`; statuses baseline-publish, seed on ws
+> resume, and survive restarts via marker commit dates), project-title
+> propagation through the registry (renames roam), vault interval
+> backbone (30s sweep; the fs watcher is an optimization, not a
+> guarantee). Verified: unit suite + repeated two-instance harness E2E
+> (pair → materialize → WIP both ways → receiver-side delete with a live
+> conflict → restart). **Formal exit criteria MET 2026-07-10 (reopened and
+> completed the same day, user directive)** — the criteria had been skipped
+> on the first close. Instrumentation-first per the row: every delivery
+> stage logs a "roaming timing" line keyed by commitOid. Measured on a
+> CLEAN machine, the harness baseline was bimodal exactly as reported
+> (~0.8s or ~52s phase-locked); three root causes found and fixed:
+> (1) mirror connectivity is ONE-directional — only the pairing initiator
+> holds a credential/URL pair, so the callee's beacons sat until the
+> initiator's 60s interval → new `mirror/wait` long-poll (initiator holds
+> it; callee blob writes return it; works for existing pairings, no
+> re-pair); (2) nothing triggered the WIP reactor on enrollment, so a
+> fresh pairing had no watcher/first snapshot until the 2-min sweep;
+> (3) the M3.5 staleness guard's `<=` tie-skip deadlocked the now
+> sub-second pipeline (1s committer stamps) — marker ties now evaluate
+> (identical commit still skips; HEAD ties stay `<=`, review finding).
+> Watcher budget: per-directory registration on Linux excluding
+> node_modules/.git/build (recursive fs.watch held ~167k watches for one
+> desktop instance; now 1 instance + ~hundreds per project), 4096-dir cap
+> per project, watch death/cap → surfaced notice + 10s sweep (never the
+> silent 2-min cliff), settings watcher backed by an unconditional 2s
+> mtime poll. Criteria green: `accept-m37.mjs` 10/10 deliveries ≤10s
+> (max 5.8s, steady ~5.5s = 5s watch debounce + ~0.5s chain);
+> `accept-m37-stress.mjs` (12 live projects + over-cap 13th: notice
+> surfaced, sweep delivery, others unaffected, settings ≤5s);
+> `accept-m35.mjs` + `accept-m36.mjs` + canonical re-run all green.
+> **SHIP GATE — NEXT UP: M3.8 (branch-aware sync model). Declared by the
+> user 2026-07-10 after real two-machine use: branch-blind WIP auto-apply
+> is COMPLETELY BROKEN for real git workflows and BLOCKS SHIPPING THE SYNC
+> FEATURE AT ALL — not a side-note on any milestone, its own
+> analysis/decision phase whose outcome may change the sync model's
+> direction. Nothing ships until its decision lands (see the M3.8 row and
+> the 2026-07-10 decisions-log entry).** M4 (bootstrap recipes; its
+> analysis pass must scope honest limits — v1 targets scriptable setups;
+> capture-what-happened over guaranteed-boot) queues behind it. M2.5 DONE
+> 2026-07-06 (PRs #19–#29+).
+> **Decisions log (still binding; full log + superseded entries in
+> [21-roaming-history.md](21-roaming-history.md)):**
+> 2026-07-04 — v1 transport for small state = machine-to-machine mirror
+> (user decision); cloud store backend deferred to gated milestone M7
+> behind the same `RoamingBlobStore` interface.
+> 2026-07-05 — **Product model locked (user decision): one project list, no
+> user-visible "roaming"/"machine sync"/enrollment concept, and "pairing"
+> means the EXISTING pairing/thin-client flow** — that one flow carries the
+> JetBrains-style sync-options step (Projects always on; Secret files
+> pre-checked; WIP and Conversations rows arrive with M3/M6). Registry
+> metadata syncs automatically for ALL projects once machines are paired;
+> per-project configuration survives only as the vault include/exclude
+> override. Guard rails: vault bundle size cap; never overwrite local files
+> silently on apply; M7 must re-ask the secrets consent before any cloud
+> backend activates. (M2 shipped a standalone "Machine sync" flow in
+> violation; M2.5 was the corrective — the canonical workflow section above
+> now exists to stop that class of drift, and every milestone re-runs it.)
+> 2026-07-05 — **Cloud-pairing readiness (user directive):** when upstream's
+> T3 Cloud environment discovery opens up, it replaces only the manual
+> introduction (URL + code) — never the trust model. Pairing sits behind the
+> peer-introduction seam (`PeerIntroduction` in client-runtime): cloud
+> arrives as a new producer behind an existing seam, not a redesign. Same
+> discipline as D0's `RoamingBlobStore` for the M7 storage backend.
+> 2026-07-06 — **M2.5 product model finalized under real two-machine use
+> (user, across a long field session).** Corrections that OVERRIDE earlier
+> wording, now reflected in [Landed constraints](#landed-constraints-m0m25):
+> (1) sync on/off is a PAUSE on the standing pairing, never a code — codes
+> are only for the first enable on an unpaired machine; (2) the pairing's
+> "Secret files" choice is ONE decision applied to whichever machine holds
+> each project (overrides M2's per-machine consent); (3) one paired machine
+> = one row in Authorized clients, credentials collapsed, user's pairing
+> label wins over hostnames; (4) Materialize is enabled-iff-workable
+> (visible+disabled-with-reason otherwise), fetches blobs on demand, auto-
+> trusts well-known SSH host keys, and prompts once for a projects folder;
+> (5) revoked/auth-failed remotes go dead and flip to offline+Materialize.
+> Full field-findings narrative in the history file. Materialize today =
+> clone + secrets; uncommitted-work sync remains M3.
+> 2026-07-06 — **Milestones RENUMBERED to execution order (user decision):
+> M3 = WIP snapshots (was M4), M4 = bootstrap recipes (was M3).** WIP-first
+> rationale: uncommitted work is in the thesis's first sentence and kept
+> surfacing as the missing piece in real use; recipes are the comfort
+> feature — and recipes are open-ended risk (an agent setting up an
+> arbitrary unknown project — unscripted services, databases, system deps —
+> is a black box; the milestone's "small" size is plumbing only). The
+> recipes milestone's analysis pass must scope honest limits (v1 targets
+> scriptable setups; capture-what-happened over guaranteed-boot). Documents
+> written before 2026-07-06 (the history file) use the OLD numbering.
+> 2026-07-10 — **SHIP GATE (user directive, field session): branch-blind
+> WIP sync is not shippable — period.** Field finding on the real machines:
+> the user modernized a repo on the desktop on a NEW branch (all work
+> committed there); the laptop — still on `master` — received that work as
+> UNSTAGED modifications on `master`. After merge+push on the desktop, the
+> laptop again showed the merged content as an unstaged mess. This is the
+> v1 model working AS SPECIFIED (snapshots mirror the worktree TREE only;
+> branches/HEAD/index are invisible to sync, commits travel via origin) —
+> and the user's verdict is that the specification itself is COMPLETELY
+> BROKEN for real git usage: "we can't be creating such a mess in the
+> git; this is not acceptable to ship." Explicitly NOT to be recorded as
+> a bullet under M5 or any existing milestone: it is its own phase (M3.8)
+> whose outcome — up to and including a direction change for the whole
+> sync model — gates ANY shipping of the sync feature. Proper handling is
+> an OPEN QUESTION; the user has deliberately not picked a direction, and
+> no implementation may start before an options analysis and an explicit
+> user decision.
+> **How to execute:** this document is self-contained. To start work in a fresh
+> thread, paste one of the kickoff prompts from the [Kickoff prompts](#kickoff-prompts)
+> section at the end. Milestones run strictly in order (M0 → M2, M2.5, M3 → M7; renumbered 2026-07-06 so execution order and numbers agree).
+> Every milestone begins by re-reading the Canonical workflow section and ends
+> by demonstrating it end to end.
+
+### Archived: Landed constraints M0–M3.7 (verbatim, pre-restructure)
+
+## Landed constraints (M0–M3.5)
+
+Full analysis/results narratives live in
+[21-roaming-history.md](21-roaming-history.md); git history and the PRs hold
+the diffs and rationale. This section keeps ONLY what still binds future
+work. When a milestone completes, its constraints land here and its
+narrative moves to the history file — this document stays current-state.
+
+### Platform + harness facts (M0, 2026-07-04)
+
+- Origin hidden refs: GO on GitHub over SSH (the only real host in use).
+  Non-fast-forward updates need `--force` → WIP pushes use
+  `--force-with-lease` or fast-forward chains; ref deletion works (pruning
+  viable); the default fetch refspec never sees `refs/t3/*`. Spot-check any
+  new host the first time a project uses one.
+- Server-to-server auth: GO — pairing credential → `/oauth/token` bearer
+  exchange works headless (`scripts/roaming/spike-server-to-server.mjs` is
+  the smoke test).
+- Harness: `scripts/roaming/harness.sh start|stop|status` — two `t3 serve`
+  instances from source on `127.0.0.1:14801/14802`, base dirs under
+  `/tmp/t3-roaming-harness/instance-{a,b}/basedir`, distinct persisted
+  environment-ids; state in `<baseDir>/userdata`; never pass
+  `--tailscale-serve`. Acceptance scripts: `accept-m{1,2,2.5}.mjs`.
+- The harness serves the PREBUILT `apps/web/dist` bundle — rebuild
+  (`cd apps/web && pnpm run build`) after web changes or browser walks test
+  stale UI. Headless web login: the `/pair` page + a one-time admin code.
+- The settings file stores non-default values only: a boolean set to its
+  default reads back as absence.
+
+### Registry + mirror (M1, PRs #2–#5)
+
+- `roaming` flag = `ServerSettings` boolean (default false); reactors
+  always start and internally no-op while it is off.
+- No server-side peer endpoint discovery exists: peer base URLs are
+  recorded at pairing and tried in order (revisit at M3/M5 when real
+  two-box usage starts).
+- Mirror RPCs = raw authenticated HTTP routes, schemas in
+  `packages/contracts/src/roaming.ts`; `roaming:mirror` is granted nowhere
+  by default and deliberately NOT requestable via `/oauth/token`.
+- Blob address = `(kind, key)` with contractual per-kind key derivation
+  (registry/vault/recipe/lease → workspaceProjectId; wip →
+  workspaceProjectId/environmentId; transcript/brief → threadId). Payload
+  strings are byte-authoritative for hashing — never re-serialize before
+  hashing. Conflict records retain the full remote record. The blob store
+  serializes read-modify-write and verifies `contentHash` on ingest.
+- `workspaceProjectId` is persisted in the SQL projection path, not only
+  the in-memory projector.
+- Enrollment/administrative routes require `access:write`; mirror routes
+  require `roaming:mirror`.
+- Callee-side peer records are tamper-resistant: `ensurePeer` is
+  insert-only and callers' advertised base URLs are ignored. (The
+  initiator side is deliberately NOT — see M2.5 accepted risks.)
+- `project.roaming.enroll` dispatches before the registry blob write (the
+  decider gates double-enroll; no orphan blob can mirror out); re-enroll is
+  idempotent and self-heals a missing blob.
+- `lastMirrorContactAt` = global max across peers, written only by a
+  completed mirror pass (revisit ~M3 for per-project staleness).
+- Roaming shell stream events ride `sequence: 0`; the client reducer owns
+  all sequencing rules.
+- Flag-off behavior: shell snapshots hide `roamingProjects`; roaming routes
+  404 — EXCEPT the two pairing routes (M2.5); local blob data is retained.
+
+### Vault + materialize (M2, PRs #7–#16)
+
+- Vault bundle = JSON `{ schemaVersion, capturedAt, files: [{ path, mode,
+  sha256, contentBase64 }] }`; cap = total decoded bytes
+  (`ROAMING_VAULT_BUNDLE_MAX_BYTES`, 16 MiB since M3.5 — the bundle also
+  carries `.t3sync`-selected trees — enforced from `stat` before any read);
+  oversize captures are skipped with a surfaced warning, never truncated.
+- Effective vault set (REVISED M3.5, supersedes the M2 rule): the global
+  `<stateDir>/t3sync` file (defaults written into it once) plus the
+  optional repo-root `.t3sync`, matched by git's own exclude engine —
+  `vaultOverrides` and the hidden top-level pattern scan are retired. A
+  file is captured only if manifest-matched AND untracked (`git ls-files`;
+  `check-ignore` is the wrong tool — it flags committed lookalikes).
+  Fail-closed: a genuine ls-files failure skips capture. Symlinks are never
+  captured; apply refuses symlinked targets/parents outside the workspace
+  root and writes new files with their mode up front.
+- `roamingSecretsSync` = per-machine capture consent (pairing-time
+  propagation rule under M2.5 below).
+- Materialize = synchronous `POST /api/roaming/materialize` + resumable
+  step machine in `roaming_materializations` (migration 035): resolve-path,
+  clone, apply-vault, restore-wip (recorded-as-skipped until M3),
+  register-project, bootstrap (skipped until M4). Failed runs return the
+  failed record over HTTP 200; resume continues from the failed step; a
+  completed record short-circuits even with a different targetPath
+  (REVISED M3: only while the targetPath still holds a git checkout AND
+  the registered project is live — see M3 constraints).
+  apply-vault never overwrites an existing differing file (notice instead);
+  interactive overwrite belongs to the on-demand "pull vault files" path.
+  Live progress = the step machine's own PubSub merged at the shell
+  subscribe point (`roaming-materialization-updated` events +
+  `roamingMaterializations` snapshot field).
+- `RoamingAutoEnroll` triggers on startup, peer-added (both directions),
+  `project.created`, and settings changes; it skips any workspaceRoot that
+  is a materialization target path (fork guard on the D1 identity).
+- `ensureRegistryRoot` merges `perMachineRoots` on raw JSON so
+  newer-schema peers' fields survive an older machine's version bump.
+- Accepted per D3: two machines materializing from the same registry
+  version produce an equal-version conflict (disjoint perMachineRoots keys
+  are not auto-merged).
+- Conflict get/resolve routes require `access:write` (they carry secret
+  payloads); resolution = pick a side, written as a new higher version.
+
+### Unified pairing (M2.5, PRs #19–#29 + field-hardening)
+
+Handshake (unchanged from the original M2.5 build):
+- ONE handshake, orchestrated by the initiating machine's own server
+  (`POST /api/roaming/peers`): exchange the single-use code at the peer's
+  `/oauth/token` with NO scope parameter (the peer consumes the code before
+  its scope check, so requesting scopes a weaker code lacks would burn it),
+  then branch on the granted scopes. With `access:write`: mint the 365-day
+  `roaming:mirror` credential AND derive a fresh STANDARD attach bearer.
+  Without it: attach-only with a typed reason, zero side effects — a
+  first-class outcome. The peers + machine-credential routes are NOT gated
+  on the `roaming` flag; pairing is what turns it on.
+- The handshake session IS retired: `POST /api/roaming/handshake-complete`
+  self-revokes it (the generic revoke endpoint forbids self-revocation;
+  this route exists for exactly this). One pairing leaves no stray admin
+  session. (Corrects the original build's "cannot be revoked".)
+- Peer-introduction seam: `PeerIntroduction` + `registerBearerGrant` in
+  `packages/client-runtime`; manual dialog is producer #1, relay/cloud
+  discovery later constructs the same value.
+- Credential hygiene: bearer responses carry `cache-control: no-store`;
+  tokens never logged; the attach grant names the reachable base URL; all
+  network steps complete before anything persists locally.
+
+Product model — LOCKED by the user across the 2026-07-06 two-machine
+sessions; these OVERRIDE earlier M2/M2.5 wording:
+- **Sync on/off is a PAUSE, never a pairing code.** `sync_enabled` on the
+  peer row (migration 036) gates outbound passes AND inbound mirror RPCs
+  (paused peer → 403 by session subject) while the credential survives. A
+  one-time code is needed ONLY for the first enable on a machine with no
+  pairing at all. `POST /api/roaming/peers/{list,sync,remove}` back the
+  per-environment controls; Remove is full teardown (row + credential +
+  revoke the peer's inbound sessions).
+- **ONE secrets decision for the pairing.** The dialog's "Secret files"
+  choice ALWAYS applies to the paired-into machine (not first-pairing-only)
+  — the machine holding a project captures its secrets with no second
+  toggle anywhere. Overrides M2's "each machine consents to its own files".
+- **ONE device = ONE row** in Authorized clients: all credentials behind a
+  paired machine collapse to a single entry named after the machine, whose
+  Revoke tears them all down. Session labels inherit the name the user
+  typed on the pairing link ("Laptop"), never a hostname.
+- **Materialize** shows on every live remote-only row; it's ENABLED when it
+  can work (peer sync on, or a retained local copy) and DISABLED-with-reason
+  otherwise — never hidden on invisible state, never a doomed click. It
+  fetches the registry AND vault blobs on demand from the reachable peer
+  (no dependence on background-sync timing), auto-trusts well-known SSH host
+  keys on first clone (github/gitlab/bitbucket/azure; others surface the
+  real git error), and prompts once for a projects folder when none is
+  configured (saved as the default).
+- **Revoked / auth-failed remotes count as dead:** their rows leave the
+  merged list and the mirrored offline+Materialize rows surface (rows from
+  a connection in phase `error`, plus the `live`/`synchronizing`-only
+  liveness filter; primary and desktopLocal exempt).
+- **Scope shipped today:** materialize = clone + synced secret files +
+  register. Syncing the uncommitted working tree (staged/unstaged/untracked)
+  is milestone **M3**, NOT built — materialize does not restore dirty work
+  yet, by design.
+- `MachineSyncSettings` deleted; no user-visible "roaming"/"machine sync"
+  concept anywhere.
+
+Accepted risks (rationale in history file): initiator-side environmentId
+clobber; first-pairing settings TOCTOU.
+
+Acceptance: `accept-m2.5.mjs` (transport chain) + the canonical-workflow
+browser walk + `round3` field-sequence walk (standard-then-upgrade pairing,
+live-row materialize, revoke→offline flip), all green on the M0 harness.
+
+### WIP snapshots (M3, PRs #32–#37)
+
+- Capture = the temp-index recipe reimplemented in `roaming/WipSnapshots.ts`
+  (NOT the driver op): WIP commits carry **parent=HEAD** (thin bundles are
+  ancestry-based — spiked; also M5's common ancestor) and return
+  `{ commitOid, treeOid }`. The effective vault set is subtracted from the
+  temp index before `write-tree` (vault content is P2P-only; only untracked
+  candidates — removing a tracked path would make restore delete it);
+  fail-closed when git can't distinguish tracked/untracked. Ref components
+  validated `[A-Za-z0-9._-]`.
+- The WIP ref mirrors the worktree TREE even when clean (a stale dirty
+  snapshot must never shadow committed work). No-op baseline = last SHIPPED
+  tree: marker ref `refs/t3/wip-pushed/<wsid>/<envid>` in origin mode
+  (written only after a successful push — never by bundle mode, or a mode
+  flip would push with a never-pushed lease), the wip blob's `treeOid` in
+  bundle mode.
+- Push = `--force-with-lease` with the marker as lease (empty = expect
+  absent), adopt-remote-and-retry-once on lease failure. Permission-shaped
+  stderr classifies BEFORE lease-shaped (git prints lease-shaped lines on
+  denials too). Permission → bundle mode, in-memory only, re-probed each
+  boot; other failures stay origin mode and surface.
+- Bundle fallback: `git bundle create <ref> --not --remotes=<remote>` →
+  blob `kind=wip`, payload `{ schemaVersion, capturedAt, refName, commitOid,
+  treeOid, bundleBase64 }`, capped by `ROAMING_WIP_BUNDLE_MAX_BYTES`
+  (contracts constant, 8 MiB); oversize skipped with a surfaced warning.
+- `roamingWipSync` defaults false — WIP reaches the project's ORIGIN HOST,
+  unlike vault data, so the pre-checked pairing-dialog row is the consent
+  (one decision, applied to both machines like Secret files). Machines
+  paired before M3 opt in via the ordinary settings row. Reactor gates
+  `roaming && roamingWipSync` per pass; statuses clear on disable.
+- Reactor triggers: 2-min interval (covers startup), settings enable,
+  `thread.turn-diff-completed`; keyed-coalesced per project; skips while
+  MERGE/REBASE/CHERRY_PICK markers exist; thread worktrees excluded by
+  construction (they live under `<baseDir>/worktrees/`, outside roots).
+- `roamingWipStatus` (per-project `{ mode, lastCapturedAt, lastPushedAt,
+  lastError }`) is reactor state merged at BOTH shell surfaces — the ws
+  subscribe point and the HTTP `/api/orchestration/shell` route (the
+  HTTP-first shell load would otherwise miss it); flag-off = empty.
+- Materialize: restore-wip runs BEFORE apply-vault; `restoreWip` request
+  flag defaults ON (pre-checked checkbox in the materialize prompt);
+  sources = origin `refs/t3/wip/<wsid>/*` (explicit fetch) then wip blobs
+  (with one on-demand mirror pull); newest committer date across
+  environments wins; skip-not-fail on dirty target / equal tree / nothing
+  found / disabled; staged-vs-unstaged is flattened on restore (checkpoint
+  semantics).
+- A completed materialization record short-circuits ONLY while its
+  targetPath still holds a git checkout AND the registered project is live;
+  otherwise materialize resets to a fresh run (2026-07-07 field bug: the
+  unconditional short-circuit returned success while materializing
+  nothing).
+- Retention: 20 local rolling history refs per (project, machine); the
+  origin holds only the newest snapshot.
+- Accepted risks: cloned-state-dir environmentId collision (WIP ref
+  ping-pong); re-install orphans one origin ref per abandoned
+  environmentId; a manual CLI commit leaves a stale dirty snapshot for up
+  to one interval tick (restore-side age notice keeps it honest).
+- Acceptance: `accept-m3.mjs` (three-project matrix: origin-refs with A
+  killed, bundle fallback end-to-end, push-failure surfacing, field-bug
+  regression) + the canonical-workflow re-run.
+
+### Sync completion (M3.5, PRs #38–#42)
+
+- **Auto-apply (delivery):** a peer's newer snapshot fast-forwards a
+  checkout ONLY when it provably carries no local edits — its
+  vault-subtracted worktree tree equals HEAD's tree or the
+  `refs/t3/wip-applied/<wsid>` marker's tree (stamped by every auto-apply
+  and by materialize restore-wip). Anything else is blocked, never touched
+  (M5 owns divergence). The judgment is re-verified against a fresh
+  worktree tree in the last instant before the destructive restore (TOCTOU
+  guard); locally-present vault files are preserved across the restore from
+  the WORKTREE's copies, never from a possibly-stale blob. A snapshot older
+  than HEAD or the applied marker never applies (no stale-echo
+  resurrection). REVISED M3.7: committer stamps are 1-second and the fast
+  path is sub-second, so applied-marker TIES evaluate (identical commit
+  still skips; the per-file merge's base-diff/local-edit/Based-On gates own
+  safety); HEAD ties keep the conservative `<=` skip — with no marker the
+  merge base falls back to HEAD and a tied-but-stale snapshot lacking a
+  just-committed file would read as a peer deletion.
+- **Freshness beacon:** origin-mode pushes ALSO write an empty-bundle wip
+  blob (metadata only — refName/commitOid/treeOid, `bundleBase64: ""`);
+  the mirror pushes on every blob write, and peers run the project's pass
+  on any arriving wip blob — end-to-end delivery is seconds, not the
+  2-minute tick. Importers skip empty-bundle payloads (the origin fetch is
+  their transport). This supersedes M3's "origin-refs mode ships no blob".
+- **Instant capture:** recursive filesystem watch per enrolled root
+  (node `fs.watch` wrapped as a stream; `.git`/`node_modules`/build-dir
+  noise filtered at source; 5s debounce; dead watchers self-evict so scans
+  re-install them). The 2-minute interval is the fallback sweep — also the
+  only trigger under sustained sub-5s write storms (debounce never goes
+  quiet) and on platforms without recursive watch. Graceful shutdown runs
+  one final bounded capture+ship per project (10s cap, 4-wide).
+- **Size guard:** untracked files over `ROAMING_WIP_MAX_FILE_BYTES`
+  (50 MiB) are excluded from snapshots with a surfaced warning that
+  survives real push errors (origin mode previously had NO cap).
+- **t3sync manifests (user decision, supersedes vaultOverrides):** global
+  `<stateDir>/t3sync` written once with the defaults + optional repo-root
+  `.t3sync` (user-created only — the app never writes into repos), matched
+  by git's exclude engine, project lines win (incl. `!` negation). Vault
+  cap 16 MiB. Full statement under Step 2's Manifest paragraph.
+- **Consent trap (field):** the per-environment settings row writes
+  `roamingWipSync` on ITS machine only (copy now says so); the one-decision
+  propagation runs only in the pairing handshake. Machines paired before
+  M3 must enable the row on BOTH machines (or re-pair). The
+  paired-into machine still has no settings UI for this — flagged for a
+  future Authorized-clients sync row.
+- Accepted risks: peer clock skew can defeat the stale-echo timestamp
+  guard (only ever affects edit-free checkouts; recoverable via refs); the
+  laptop's first post-apply capture echoes an identical-tree snapshot once
+  (settles via tree-equality skips).
+- Acceptance: `accept-m35.mjs` (1-second A→B delivery onto a clean
+  checkout, no-clobber of locally-edited FILES — step 5 revised by M3.7's
+  per-file merge, same as accept-m36 step 6: a local edit no longer blocks
+  the whole tree, a same-file conflict keeps ours on both sides —
+  `.t3sync` `.idea/` round-trip with origin hygiene, oversize warning) +
+  the canonical-workflow re-run.
+
+### Field round 2 (M3.6, PRs #43–#47)
+
+- HTTP `GET /api/orchestration/shell` strips ALL roaming fields when the
+  roaming setting is off, mirroring the ws path (closes the M2.5
+  reconciliation gap; `accept-m35.mjs` carries the invariant step).
+- **Vault delivery:** vault blobs apply on arrival (blob-arrival trigger +
+  startup catch-up) to the linked checkout. Per file: missing → write;
+  equal to incoming → align; equal to what WE last applied (per-file
+  sha256 record under `<stateDir>/vault-applied/<wsid>.json`) → update;
+  anything else is a local edit — never overwritten. Peer-dropped files
+  are NOT deleted locally (v1: the overwritten bundle may hold the only
+  other copy). Materialize's apply-vault uses the same recording variant
+  so its files stay updatable. Receiver gate = `roaming` only (the
+  capturing machine's consent decided the bundle's contents).
+- **Based-on fast-forward:** snapshot commits carry a `T3-Based-On`
+  trailer (the applied-marker commit at capture). Apply allows an incoming
+  snapshot whose based-on TREE equals the current worktree tree — the peer
+  built on exactly this state, so the incoming tree is a superset and
+  nothing local is unique. Self-gating: the based-on commit must resolve
+  locally (deleted content stays recoverable from it); missing/legacy
+  trailer, or any local movement since, stays blocked (M5 owns
+  divergence). The TOCTOU recheck covers this path like the others.
+- **Visibility:** `blockedReason` on the wip status entry, published when
+  an apply is held back and cleared when the state resolves; the project
+  list shows a per-project dot — red (error) / amber (blocked, with
+  plain-language guidance) / brief green (recent send/receive) / nothing
+  when idle. No new concepts, no roaming wording.
+- Applied marker is project-scoped (not per-peer): fine at 2 machines,
+  revisit if a third machine ever joins (marker thrash, not a safety
+  issue — the tree-equality checks govern safety regardless).
+- Acceptance: `accept-m36.mjs` (post-materialize vault delivery, secret
+  update + no-clobber, based-on backflow onto a dirty-but-unchanged
+  author, divergence blocked + surfaced) + `accept-m35.mjs` + canonical.
+- ~~Flagged follow-ups~~ Both M3.6 flags became M3.7 and are CLOSED there:
+  the latency variance had three distinct causes (one-directional mirror
+  connectivity, the missing enrollment trigger, the staleness tie-skip),
+  and watcher budgeting landed as per-directory registration + cap +
+  surfaced fallback — see Sync hardening (M3.7) below.
+
+### Sync hardening (M3.7)
+
+- **Per-file WIP merge:** apply moves exactly the files the peer changed
+  relative to the base; a file changed on both sides is kept ours and
+  surfaced (`blockedReason` → "Waiting"); everything else crosses even
+  while local edits exist. Whole-tree blocking is gone.
+- **No-op baseline (REVISED in the criteria session — deletion deadlock):**
+  the applied-marker tree counts as a capture no-op baseline ONLY while it
+  equals the last-shipped tree (their agreement is what ends the idle-ACK
+  ping-pong). Unconditional, it deadlocked deletions: a worktree returning
+  to an OLD applied state while the shipped ref still advertised the
+  deleted file skipped capture forever (measured: the author-side delete
+  never propagated, >300s; field report "deletion took minutes"). A
+  worktree the shipped ref does not match must always ship. After the fix,
+  deletions propagate in ~5.5s in both directions (timed harness test);
+  unit regression fails on the old baseline.
+- **Deletion model (three invariants, each a field bug):** (1) the applied
+  marker advances EVERY apply pass — clean applies to the peer snapshot,
+  conflicted passes to a synthetic commit with only the conflicted paths
+  pinned to base — so one conflict can no longer unrecord another file's
+  arrival (that unrecorded arrival is what resurrected deleted files).
+  (2) Peer-absence counts as a deletion beyond the marker diff only for
+  paths we SHIPPED, and only when the peer's snapshot `T3-Based-On` state
+  provably contained the file — an out-of-order snapshot that merely
+  predates the file can never delete it. (3) A tree identical to the last
+  shipped one still ships ONCE when the applied marker has moved (the
+  Based-On update is how a receiver-side delete that returns the tree to
+  an already-shipped state reaches the author), and settles the next
+  pass — no ACK ping-pong.
+- **Sync pill:** shell projections carry `workspaceProjectId` (four query/
+  mapping sites had silently dropped it — also re-arming the decider's
+  double-enrollment invariant); statuses publish a baseline on a project's
+  first pass, seed into resumed ws subscriptions, and after a server
+  restart the activity timestamps are reconstructed from the marker refs'
+  commit dates (git is the durable store; no status table).
+- **Titles roam:** a rename rewrites the registry blob's title (other
+  fields preserved) and mirrors; peers apply an arrived registry title to
+  the linked local project. Event-triggered in both directions (never
+  pass-based reconciliation, which could undo an in-flight remote rename);
+  the grouped sidebar label prefers a shared member title over the
+  repository name.
+- **Mirror wait long-poll (formal-criteria session, 2026-07-10):** mirror
+  connectivity is ONE-directional by design (M2.5 tamper resistance: the
+  callee holds no credential/URL for the initiator, and the server cannot
+  discover its own reachable URLs) — so the callee's write-trigger pass is
+  a no-op and its beacons used to wait for the initiator's 60s interval
+  (the measured ~52s phase-locked deliveries). `POST
+  /api/roaming/mirror/wait` (same gating as every mirror route: roaming
+  flag 404, `roaming:mirror` scope, paused-peer 403) holds up to 25s
+  against an in-memory per-boot blob-store change revision (compared only
+  for inequality; restart wakes the waiter into one no-op pass). PeerMirror
+  runs one waiter fiber per reachable enabled peer (atomic claim; waiters
+  self-terminate when the peer is paused/removed/roaming off; reconciled
+  every drain pass + a 30s scan; 15s backoff on failure, 40s client cap).
+  The 60s interval remains the delivery guarantee; the waiter is the fast
+  path and self-heals for pre-M3.7 pairings without re-pairing.
+- **Enrollment trigger:** `project.meta-updated` carrying a
+  `workspaceProjectId` runs a reactor scan — a fresh pairing's projects get
+  watchers and a first snapshot immediately, not on the next 2-min sweep.
+- **Watcher budget (Linux):** tree watching registers PER DIRECTORY,
+  skipping `.git`/`node_modules`/`dist`/`build`/`target`/`out`/`.venv`/
+  `__pycache__` at REGISTRATION (libuv shares one inotify instance per
+  process; the watches budget is what recursive fs.watch exhausted —
+  ~167k watches measured for one desktop instance), capped at 4096
+  dirs/project; macOS/Windows keep native recursive. A single dead
+  directory no longer kills a project's watch (this was the silent
+  watcher-death mechanism: git's transient `.git` churn erroring the
+  recursive watcher). Watch death or cap → per-project fallback: 10s
+  capture sweep + `notice` on the status entry (amber "Sync on" pill,
+  concept-free copy) + a real-watch retry every ~5 min — NEVER a silent
+  fall to the 2-min interval. Notices live in reactor state merged into
+  every published entry; passes cannot wipe them.
+- **Settings freshness guarantee:** an unconditional 2s mtime poll backs
+  the settings watcher (upstream file, minimal diff) — an external
+  settings.json edit is honored within ~2-4s even with ZERO inotify
+  budget; watch death also logs a warning instead of ending silently.
+- **Timing instrumentation is permanent:** every delivery stage logs a
+  `roaming timing:` line keyed by commitOid/blob version (watch-trigger,
+  captured, origin-pushed, beacon-written, mirror-exchange with trigger
+  source, blobs-pushed-to-peer, wip-blob-ingested, arrival trigger,
+  peer-refs-fetched, apply) — slow deliveries are attributable from the
+  two server.log files alone. Beacon write failure is a WARNING (it
+  silently costs the fast path). `accept-m37.mjs` prints a per-stage
+  table per delivery.
+- Known limits (accepted): total inotify-INSTANCE exhaustion at server
+  boot crashes UPSTREAM watch paths (git driver, atomic-write temp files)
+  before roaming code runs — out of M3.7's blast radius; M3.7 removes the
+  dominant watch consumer, making that state unlikely. Base-diff peer
+  deletions when NO applied marker exists yet are not Based-On-gated
+  (pre-existing, narrow: markers appear on first exchange; HEAD-tie `<=`
+  covers the same-second case). The M3.5 "~1s A→B" acceptance number rode
+  adjacent-trigger luck; the honest steady-state fast path is ~5.5s
+  (5s watch debounce + ~0.5s chain), ~0.5s when riding another trigger.
+- Acceptance: unit suite (deletion-model + tie-deadlock regression tests
+  fail on the old code) + `accept-m37.mjs` (ten consecutive A→B
+  deliveries, all ≤10s, max 5.8s) + `accept-m37-stress.mjs` (12 live
+  projects + an over-cap 13th: notice surfaced, fallback-sweep delivery,
+  healthy projects unaffected, settings edit ≤5s in both phases) +
+  `accept-m36.mjs` step 6 updated for per-file merge + `accept-m35.mjs` +
+  canonical re-run.
+
