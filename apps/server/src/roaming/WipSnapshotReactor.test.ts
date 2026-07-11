@@ -190,7 +190,7 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
-  it.effect("skips commit when the tree matches skipIfTreeOid", () =>
+  it.effect("skips commit when the full snapshot identity matches", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-wip-noop");
       const fs = yield* FileSystem.FileSystem;
@@ -211,9 +211,36 @@ testLayer("WipSnapshotReactor", (it) => {
         workspaceProjectId: wsid,
         environmentId: LOCAL_ENVIRONMENT_ID,
         vaultExcludePaths: [],
-        skipIfTreeOids: [first!.treeOid],
+        skipIfSnapshots: [first!],
       });
       assert.isNull(second);
+    }),
+  );
+
+  it.effect("captures a branch move even when the tree is unchanged", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-wip-branch-move");
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-branch-move-" });
+      const { workPath } = yield* initRepoWithOrigin(root);
+      const first = yield* captureWipSnapshot({
+        cwd: workPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(first);
+      yield* git(workPath, ["switch", "-c", "feature/same-tree"]);
+      const second = yield* captureWipSnapshot({
+        cwd: workPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+        skipIfSnapshots: [first!],
+      });
+      assert.isNotNull(second);
+      assert.strictEqual(second!.branchRef, "refs/heads/feature/same-tree");
+      assert.strictEqual(second!.treeOid, first!.treeOid);
     }),
   );
 
@@ -414,7 +441,10 @@ testLayer("WipSnapshotReactor", (it) => {
       });
       assert.isNotNull(blob);
       const payload = yield* decodeWipPayloadJson(blob!.payload);
+      assert.strictEqual(payload.schemaVersion, 2);
       assert.strictEqual(payload.refName, `refs/t3/wip/${wsid}/${LOCAL_ENVIRONMENT_ID}`);
+      assert.strictEqual(payload.branchRef, "refs/heads/main");
+      assert.strictEqual(payload.headOid, yield* gitStdout(workPath, ["rev-parse", "HEAD"]));
 
       // The bundle must apply against a fresh clone of the origin.
       const clonePath = pathService.join(root, "clone");

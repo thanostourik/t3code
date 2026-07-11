@@ -335,7 +335,7 @@ const oversizeUntrackedPaths = (cwd: string) =>
 
 const decodeWipPayloadJson = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingWipPayload));
 
-/** Tree the current wip blob carries, or null (no blob / undecodable). */
+/** The current WIP blob payload, or null (no blob / undecodable). */
 const bundleShipped = (workspaceProjectId: WorkspaceProjectId, environmentId: string) =>
   Effect.gen(function* () {
     const blobStore = yield* RoamingBlobStore;
@@ -348,9 +348,7 @@ const bundleShipped = (workspaceProjectId: WorkspaceProjectId, environmentId: st
     const payload = yield* decodeWipPayloadJson(blob.payload).pipe(
       Effect.orElseSucceed(() => null),
     );
-    return payload === null
-      ? null
-      : { treeOid: payload.treeOid, commitOid: payload.commitOid, capturedAt: payload.capturedAt };
+    return payload;
   });
 
 /** Committer date of a commit-ish as ISO, or null when it does not resolve. */
@@ -491,9 +489,8 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     oversizeWarning === null ? message : `${message}; ${oversizeWarning}`;
 
   const markerTree = yield* resolveOid(cwd, `${markerRef}^{tree}`);
-  const shippedBundle =
-    mode === "bundle" ? yield* bundleShipped(target.workspaceProjectId, environmentId) : null;
-  const shippedTree = mode === "bundle" ? (shippedBundle?.treeOid ?? null) : markerTree;
+  const shippedPayload = yield* bundleShipped(target.workspaceProjectId, environmentId);
+  const shippedTree = mode === "bundle" ? (shippedPayload?.treeOid ?? null) : markerTree;
   // An identical tree may still NEED to ship: if the applied marker moved
   // since the last ship (we consumed a peer snapshot), the fresh snapshot's
   // Based-On is the only signal telling the peer "this is still my tree
@@ -507,7 +504,11 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   //    consumed, so a re-ship says nothing — this is also what stops two
   //    idle machines from ACKing each other's ACKs forever.
   const shippedCommitSpec =
-    mode === "bundle" ? (shippedBundle?.commitOid ?? null) : markerTree === null ? null : markerRef;
+    mode === "bundle"
+      ? (shippedPayload?.commitOid ?? null)
+      : markerTree === null
+        ? null
+        : markerRef;
   const appliedMarkerRef = yield* wipAppliedMarkerRefName(target.workspaceProjectId);
   const appliedNow = yield* resolveOid(cwd, appliedMarkerRef);
   const appliedTree =
@@ -522,25 +523,22 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   // old marker tree → capture skipped forever while A's shipped ref still
   // advertises the deleted file. A worktree the shipped ref does not match
   // must always ship.
-  const noOpTrees = [
-    ...(shippedTree !== null && appliedNow === shippedBasedOn ? [shippedTree] : []),
-    ...(appliedTree !== null && appliedTree === shippedTree ? [appliedTree] : []),
+  const shippedIdentity =
+    shippedPayload?.branchRef === undefined || shippedPayload.headOid === undefined
+      ? null
+      : {
+          branchRef: shippedPayload.branchRef,
+          headOid: shippedPayload.headOid,
+          treeOid: shippedPayload.treeOid,
+        };
+  const noOpSnapshots = [
+    ...(shippedIdentity !== null && shippedTree !== null && appliedNow === shippedBasedOn
+      ? [shippedIdentity]
+      : []),
+    ...(shippedIdentity !== null && appliedTree !== null && appliedTree === shippedTree
+      ? [{ ...shippedIdentity, treeOid: appliedTree }]
+      : []),
   ];
-
-  // Fast path: clean worktree whose HEAD tree is already a no-op baseline.
-  if (noOpTrees.length > 0) {
-    const status = yield* git.execute({
-      operation: "WipSnapshotReactor.statusPorcelain",
-      cwd,
-      args: ["status", "--porcelain"],
-    });
-    if (status.stdout.trim().length === 0) {
-      const headTree = yield* resolveOid(cwd, "HEAD^{tree}");
-      if (headTree !== null && noOpTrees.includes(headTree)) {
-        return { _tag: "skipped" } as WipPassOutcome;
-      }
-    }
-  }
 
   const captureStartedMs = yield* Clock.currentTimeMillis;
   const captured = yield* captureWipSnapshot({
@@ -548,7 +546,7 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     workspaceProjectId: target.workspaceProjectId,
     environmentId,
     vaultExcludePaths: captureExcludePaths,
-    skipIfTreeOids: noOpTrees,
+    skipIfSnapshots: noOpSnapshots,
   });
   if (captured === null) {
     // An oversized file may be the ONLY change — the capture no-ops (its
@@ -626,11 +624,13 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
       }
       const content = yield* fs.readFile(bundlePath);
       const payload = yield* encodeWipPayloadJson({
-        schemaVersion: 1,
+        schemaVersion: 2,
         capturedAt,
         refName: captured.refName,
         commitOid: captured.commitOid,
         treeOid: captured.treeOid,
+        branchRef: captured.branchRef,
+        headOid: captured.headOid,
         bundleBase64: Buffer.from(content).toString("base64"),
       });
       yield* blobStore.writeLocal({
@@ -711,11 +711,13 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
     yield* Effect.gen(function* () {
       const blobStore = yield* RoamingBlobStore;
       const payload = yield* encodeWipPayloadJson({
-        schemaVersion: 1,
+        schemaVersion: 2,
         capturedAt,
         refName: captured.refName,
         commitOid: captured.commitOid,
         treeOid: captured.treeOid,
+        branchRef: captured.branchRef,
+        headOid: captured.headOid,
         bundleBase64: "",
       });
       yield* blobStore.writeLocal({
