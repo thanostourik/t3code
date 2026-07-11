@@ -194,12 +194,13 @@ yet built.
   mirrored beacon only on an exact `(refName, commitOid)` match; a ref with
   no matching v2 metadata is legacy. Legacy payloads never auto-apply.
 - The WIP ref mirrors the worktree tree even when clean (a stale dirty
-  snapshot must never shadow committed work). No-op baseline = last SHIPPED
-  tree (`wip-pushed` marker in origin mode; the wip blob's `treeOid` in
-  bundle mode). The applied-marker tree counts as a no-op baseline ONLY
-  while it equals the last-shipped tree (unconditional, it deadlocked
-  deletions). A tree identical to the last shipped one still ships ONCE
-  when the applied marker has moved (causality re-ship), then settles.
+  snapshot must never shadow committed work). No-op identity is
+  `(branchRef, headOid, treeOid)`; branch/HEAD moves ship even when the tree
+  is unchanged. The baseline is the last SHIPPED payload plus the
+  `wip-pushed` marker in origin mode. The applied-marker tree counts as a
+  no-op baseline ONLY while it equals the last-shipped tree (unconditional,
+  it deadlocked deletions). An identical tuple still ships ONCE when the
+  applied marker has moved (causality re-ship), then settles.
 - Untracked files over `ROAMING_WIP_MAX_FILE_BYTES` (50 MiB) are excluded
   with a surfaced warning that survives real push errors.
 - Triggers: per-directory fs watch (5s debounce), 2-min interval sweep

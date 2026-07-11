@@ -194,8 +194,10 @@ trailer, written to `refs/t3/wip/<wsid>/<envid>`, shipped via origin push
 (force-with-lease) or bundle blob fallback. Payload v2 adds `branchRef`
 (symbolic HEAD; sentinel for detached/unborn) and `headOid`. Snapshots
 capture the clean state too (a stale dirty snapshot must never shadow
-committed work). Triggers: fs watch (debounced), 2-min sweep, turn
-completion, enrollment, graceful shutdown.
+committed work). Capture no-op identity is the full
+`(branchRef, headOid, treeOid)` tuple, so a branch/HEAD move with an unchanged
+tree still ships. Triggers: fs watch (debounced), 2-min sweep, turn completion,
+enrollment, graceful shutdown.
 
 Origin-ref snapshots join branch context from the mirrored v2 beacon by an
 exact `(refName, commitOid)` match. A fetched ref without matching v2 metadata
