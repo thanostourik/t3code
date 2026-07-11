@@ -49,6 +49,7 @@ import {
   type ResolvedKeybindingsConfig,
   type SidebarProjectGroupingMode,
   ThreadId,
+  WorkspaceProjectId,
 } from "@t3tools/contracts";
 import {
   parseScopedThreadKey,
@@ -90,7 +91,11 @@ import {
   useThreadShellsForProjectRefs,
 } from "../state/entities";
 import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
-import { listRoamingPeers, materializeRoamingProject } from "../environments/primary/roaming";
+import {
+  listRoamingPeers,
+  materializeRoamingProject,
+  takeoverRoamingWip,
+} from "../environments/primary/roaming";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
@@ -3020,6 +3025,26 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
   const entry = props.workspaceProjectId
     ? wipStatus.find((candidate) => candidate.workspaceProjectId === props.workspaceProjectId)
     : undefined;
+  const [takingOver, setTakingOver] = useState(false);
+  const takeOver = useCallback(() => {
+    if (!props.workspaceProjectId || takingOver) return;
+    setTakingOver(true);
+    void takeoverRoamingWip({
+      workspaceProjectId: WorkspaceProjectId.make(props.workspaceProjectId),
+    })
+      .then(({ applied }) => {
+        if (!applied) throw new Error("The other machine's state is no longer available.");
+        toastManager.add({ type: "success", title: "Switched to the other machine's work" });
+      })
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: "Could not switch project state",
+          description: error instanceof Error ? error.message : "Try again in a moment.",
+        });
+      })
+      .finally(() => setTakingOver(false));
+  }, [props.workspaceProjectId, takingOver]);
 
   // Re-render on a clock so "Syncing…" clears and "Synced 3m" stays fresh even
   // when no new status arrives. 1s while activity is recent, 20s once idle.
@@ -3071,10 +3096,10 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
     };
   } else if (entry.blockedReason) {
     pill = {
-      icon: "dot",
+      icon: takingOver ? "spinner" : "dot",
       dotClass: "bg-amber-500",
-      text: "Waiting",
-      tip: "Sync waiting: this machine and the other one both changed the same files — commit or discard on one side to continue",
+      text: takingOver ? "Switching…" : "Take over",
+      tip: `${entry.blockedReason}. Take over to park this machine's work and switch to the other machine's state.`,
     };
   } else if (entry.notice) {
     // Degraded but working (e.g. file watching unavailable): sync still
@@ -3117,7 +3142,22 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       <TooltipTrigger
         render={
           <span
+            role={entry.takeoverAvailable ? "button" : undefined}
+            tabIndex={entry.takeoverAvailable ? 0 : undefined}
             aria-label={pill.tip}
+            aria-disabled={takingOver || undefined}
+            onPointerDown={(event) => entry.takeoverAvailable && event.stopPropagation()}
+            onClick={(event) => {
+              if (!entry.takeoverAvailable) return;
+              event.stopPropagation();
+              takeOver();
+            }}
+            onKeyDown={(event) => {
+              if (!entry.takeoverAvailable || (event.key !== "Enter" && event.key !== " ")) return;
+              event.preventDefault();
+              event.stopPropagation();
+              takeOver();
+            }}
             className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
           >
             {pill.icon === "spinner" ? (

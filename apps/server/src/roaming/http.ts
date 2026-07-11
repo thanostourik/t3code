@@ -19,6 +19,7 @@ import {
   ROAMING_ENROLL_PROJECT_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
   ROAMING_MATERIALIZE_PATH,
+  ROAMING_WIP_TAKEOVER_PATH,
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
   ROAMING_MIRROR_PUSH_PATH,
@@ -53,6 +54,8 @@ import {
   RoamingSyncManifestResponse,
   RoamingWaitChangesRequest,
   RoamingWaitChangesResponse,
+  RoamingWipTakeoverRequest,
+  RoamingWipTakeoverResponse,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -72,6 +75,7 @@ import { Materializer } from "./Materializer.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingService } from "./RoamingService.ts";
+import { WipSnapshotReactor } from "./WipSnapshotReactor.ts";
 
 class RoamingRouteRejection extends Schema.TaggedErrorClass<RoamingRouteRejection>()(
   "RoamingRouteRejection",
@@ -493,6 +497,21 @@ const materializeRoute = HttpRouter.add(
   ),
 );
 
+const wipTakeoverRoute = HttpRouter.add(
+  "POST",
+  ROAMING_WIP_TAKEOVER_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingWipTakeoverRequest);
+      const reactor = yield* WipSnapshotReactor;
+      return yield* respondJson(RoamingWipTakeoverResponse, {
+        applied: yield* reactor.takeover(body.workspaceProjectId),
+      });
+    }),
+  ),
+);
+
 const conflictGetRoute = HttpRouter.add(
   "POST",
   ROAMING_CONFLICT_GET_PATH,
@@ -571,6 +590,7 @@ export const roamingRoutesLayer = Layer.mergeAll(
   handshakeCompleteRoute,
   enrollProjectRoute,
   materializeRoute,
+  wipTakeoverRoute,
   conflictGetRoute,
   conflictResolveRoute,
 );
