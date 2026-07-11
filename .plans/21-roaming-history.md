@@ -1721,3 +1721,43 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   `accept-m36.mjs` step 6 updated for per-file merge + `accept-m35.mjs` +
   canonical re-run.
 
+### Branch-aware sync model (M3.8)
+
+- Replaced tree-only snapshot identity with payload v2
+  `(branchRef, headOid, treeOid)`. Origin refs require an exact metadata
+  beacon join; legacy/mismatched snapshots block or skip without touching the
+  checkout. Capture no-op detection uses the full tuple, so same-tree branch
+  and HEAD moves still ship.
+- Replaced timestamp-vs-HEAD apply gates with ancestry classification:
+  same context keeps M3.7 per-file merge; clean same-branch descendants
+  fast-forward; clean different-branch snapshots switch only when the target
+  branch is fast-forward-safe; behind snapshots skip; divergence, detached,
+  legacy, local edits, and in-flight turns block with specific reasons.
+- Every HEAD move parks the local snapshot under its branch. The minimal
+  takeover action parks and reproduces peer branch + HEAD + dirty tree; a
+  clean return to the parked branch restores its tree. The project pill is
+  the only UI action—no new project list or sync surface.
+- Materialize now requires v2 context, checks out the snapshot branch at its
+  HEAD, restores the dirty diff, and writes the applied marker. Legacy WIP is
+  skipped with a notice.
+- Analysis corrections found during the milestone: origin metadata must join
+  refs exactly; untouched falls back to HEAD when no marker exists; active
+  turns needed a project-level projection query; tree-only no-op detection
+  hid branch moves; `.git` exclusion required a 10s branch/HEAD poll.
+- Field runs found three forms of branch feedback: pre-apply capture shipped
+  stale receiver context; an applied peer tuple was re-shipped as locally
+  authored; and an incoming snapshot could race a local CLI switch before the
+  10s poll captured it. Reactor ordering is apply-then-capture, exact applied
+  tuples suppress acknowledgments until local work ships, exact provenance
+  echoes only advance marker bookkeeping, and untouched now requires captured
+  branch/HEAD context. The canonical four-stage run then stayed clean after
+  branch creation, commit, return, and merge.
+- Acceptance on fresh M0 harness state: `accept-m38.mjs` passed the canonical
+  branch workflow, dirty-main block, touched-own-branch block, takeover with
+  restorable parking, return restoration, and branch materialization;
+  `accept-m35.mjs`, `accept-m36.mjs`, and `accept-m37.mjs` stayed green (M3.7:
+  10/10 deliveries ≤10s, max 5.7s); `accept-m2.5.mjs` passed pairing, live
+  attach, mirror, offline transition, and materialize. The collaborative UI
+  preview could not run in this session because both preview status/open
+  returned `Auth required`; no product criterion was redefined around that
+  tooling limitation.

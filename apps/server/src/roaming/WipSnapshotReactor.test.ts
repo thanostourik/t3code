@@ -22,7 +22,12 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { GitVcsDriver, layer as GitVcsDriverLayer, vcsLayer } from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
-import { runWipApplyForTarget, runWipPassForTarget, type WipTarget } from "./WipSnapshotReactor.ts";
+import {
+  restoreParkedWipForTarget,
+  runWipApplyForTarget,
+  runWipPassForTarget,
+  type WipTarget,
+} from "./WipSnapshotReactor.ts";
 import {
   captureWipSnapshot,
   resolveOid,
@@ -666,6 +671,73 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect("does not let a clean peer echo undo a newer local branch switch", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-echo");
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-echo-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+      const store = yield* RoamingBlobStore;
+      const localSnapshot = yield* captureWipSnapshot({
+        cwd: localPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(localSnapshot);
+      const pushedMarker = yield* wipPushedMarkerRefName(wsid, LOCAL_ENVIRONMENT_ID);
+      yield* git(localPath, ["update-ref", pushedMarker, localSnapshot!.commitOid]);
+      yield* store.writeLocal({
+        kind: "wip",
+        key: `${wsid}/${LOCAL_ENVIRONMENT_ID}`,
+        workspaceProjectId: wsid,
+        payload: yield* encodeWipPayloadJson({
+          schemaVersion: 2,
+          capturedAt: minutesFromNow(30),
+          ...localSnapshot!,
+          bundleBase64: "",
+        }),
+      });
+      yield* git(localPath, [
+        "push",
+        "origin",
+        `+${localSnapshot!.refName}:${localSnapshot!.refName}`,
+      ]);
+      yield* git(peerPath, [
+        "fetch",
+        "origin",
+        `+${localSnapshot!.refName}:${localSnapshot!.refName}`,
+      ]);
+      const peerMarker = yield* wipAppliedMarkerRefName(wsid);
+      yield* git(peerPath, ["update-ref", peerMarker, localSnapshot!.commitOid]);
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+
+      yield* git(localPath, ["switch", "-c", "feature/new-local"]);
+      const outcome = yield* runWipApplyForTarget(
+        target(wsid, localPath),
+        localSnapshot!.commitOid,
+      );
+      assert.strictEqual(outcome._tag, "skipped");
+      assert.strictEqual(
+        yield* gitStdout(localPath, ["branch", "--show-current"]),
+        "feature/new-local",
+      );
+
+      const pathService = yield* Path.Path;
+      yield* fs.writeFileString(pathService.join(peerPath, "peer-main.txt"), "peer\n");
+      yield* git(peerPath, ["add", "peer-main.txt"]);
+      yield* git(peerPath, ["commit", "-m", "peer main moved"]);
+      yield* git(peerPath, ["push", "origin", "main"]);
+      yield* peerSnapshot(peerPath, wsid, minutesFromNow(90));
+      const moved = yield* runWipApplyForTarget(target(wsid, localPath), localSnapshot!.commitOid);
+      assert.strictEqual(moved._tag, "blocked");
+      assert.strictEqual(
+        yield* gitStdout(localPath, ["branch", "--show-current"]),
+        "feature/new-local",
+      );
+    }),
+  );
+
   it.effect("fast-forwards a clean checkout before applying peer WIP", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-apply-ff");
@@ -738,6 +810,8 @@ testLayer("WipSnapshotReactor", (it) => {
         "dirty\n",
       );
       assert.isNotNull(yield* resolveOid(localPath, `refs/t3/wip-parked/${wsid}/main`));
+      const echo = yield* runWipPassForTarget(target(wsid, localPath), "origin-refs");
+      assert.strictEqual(echo._tag, "skipped");
     }),
   );
 
@@ -768,6 +842,15 @@ testLayer("WipSnapshotReactor", (it) => {
       assert.strictEqual(
         yield* fs.readFileString(pathService.join(localPath, "peer.txt")),
         "peer dirty\n",
+      );
+
+      yield* git(localPath, ["reset", "--hard"]);
+      yield* git(localPath, ["clean", "-fd"]);
+      yield* git(localPath, ["switch", "main"]);
+      assert.isTrue(yield* restoreParkedWipForTarget(target(wsid, localPath)));
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "mine.txt")),
+        "local dirty\n",
       );
     }),
   );

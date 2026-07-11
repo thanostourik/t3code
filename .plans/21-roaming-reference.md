@@ -3,8 +3,7 @@
 Current-state mechanics that bind future work: schemas, ref namespaces,
 invariants, harness facts. Updated alongside code changes (document-hygiene
 step of the plan's execution process). No narrative — results and rationale
-live in `21-roaming-history.md`. Items marked **(M3.8)** are decided but not
-yet built.
+live in `21-roaming-history.md`.
 
 ## Harness + acceptance
 
@@ -16,8 +15,9 @@ yet built.
 - The harness serves the PREBUILT `apps/web/dist` bundle — rebuild
   (`cd apps/web && pnpm run build`) after web changes or browser walks test
   stale UI. Headless web login: the `/pair` page + a one-time admin code.
-- Acceptance scripts: `accept-m1/m2/m2.5/m3/m35/m36/m37/m37-stress.mjs`
-  (+ `accept-m38.mjs` arriving with M3.8). `accept-m2.5.mjs` is the
+- Acceptance scripts: `accept-m1.mjs`, `accept-m2.mjs`, `accept-m2.5.mjs`,
+  `accept-m3.mjs`, `accept-m35.mjs`, `accept-m36.mjs`, `accept-m37.mjs`,
+  `accept-m37-stress.mjs`, `accept-m38.mjs`. `accept-m2.5.mjs` is the
   canonical-workflow re-run every milestone ends with. Server-to-server auth
   smoke test: `scripts/roaming/spike-server-to-server.mjs`.
 - Run discipline: scripts and logs under /tmp, fresh harness state per
@@ -70,9 +70,10 @@ yet built.
   commit with conflicted paths pinned to base.
 - `refs/t3/wip-history/<wsid>/<envid>/<slot>` — 20 local rolling retention
   slots, oldest overwritten; never pushed.
-- `refs/t3/wip-parked/<wsid>/<branch>` — **(M3.8)** per-branch parked local
-  state, written before any auto/explicit branch switch; restored on return
-  to that branch.
+- `refs/t3/wip-parked/<wsid>/<branch>` — per-branch parked local
+  state, written before any auto/explicit branch switch. On return, a clean
+  checkout whose HEAD equals the parked snapshot parent restores that tree;
+  advanced/dirty branches leave the ref untouched and recoverable.
 - `refs/t3/checkpoints/<base64url-threadId>/turn/<n>` — thread-turn
   checkpoints (upstream checkpointing subsystem, not roaming's).
 - The origin holds only the newest WIP snapshot per (project, machine); the
@@ -189,7 +190,7 @@ yet built.
   ancestor) and `T3-Based-On: <applied-marker oid>` trailer; returns
   `{ commitOid, treeOid }`. Real index and worktree untouched. Fixed
   author/committer identity.
-- **(M3.8)** payload v2 adds `branchRef` (symbolic HEAD; sentinel for
+- Payload v2 adds `branchRef` (symbolic HEAD; sentinel for
   detached/unborn) and `headOid`. Origin refs get this context from the
   mirrored beacon only on an exact `(refName, commitOid)` match; a ref with
   no matching v2 metadata is legacy. Legacy payloads never auto-apply.
@@ -197,20 +198,21 @@ yet built.
   snapshot must never shadow committed work). No-op identity is
   `(branchRef, headOid, treeOid)`; branch/HEAD moves ship even when the tree
   is unchanged. The baseline is the last SHIPPED payload plus the
-  `wip-pushed` marker in origin mode. The applied-marker tree counts as a
-  no-op baseline ONLY while it equals the last-shipped tree (unconditional,
-  it deadlocked deletions). An identical tuple still ships ONCE when the
-  applied marker has moved (causality re-ship), then settles.
+  `wip-pushed` marker in origin mode. The exact applied peer tuple is
+  suppressed until our shipped snapshot names that applied commit in
+  `T3-Based-On`; after locally-authored work ships, that suppression turns
+  off so deletion causality still propagates.
 - Untracked files over `ROAMING_WIP_MAX_FILE_BYTES` (50 MiB) are excluded
   with a surfaced warning that survives real push errors.
 - Triggers: per-directory fs watch (5s debounce), 2-min interval sweep
   (also the only trigger under sustained sub-5s write storms), settings
   enable, `thread.turn-diff-completed`, `project.meta-updated` carrying a
-  workspaceProjectId (enrollment), graceful shutdown (one bounded final
-  capture+ship per project, 10s cap, 4-wide). Keyed-coalesced per project;
-  skips while MERGE/REBASE/CHERRY_PICK markers exist. Thread worktrees live
-  under `<baseDir>/worktrees/`, outside project roots — excluded by
-  construction.
+  workspaceProjectId (enrollment), a 10s `(branchRef, headOid)` poll for
+  clean CLI switches/commits (`.git` is not watched), graceful shutdown (one
+  bounded final capture+ship per project, 10s cap, 4-wide). Keyed-coalesced
+  per project; skips while MERGE/REBASE/CHERRY_PICK markers exist. Thread
+  worktrees live under `<baseDir>/worktrees/`, outside project roots —
+  excluded by construction.
 - Watcher budget (Linux): per-DIRECTORY registration skipping
   `.git`/`node_modules`/`dist`/`build`/`target`/`out`/`.venv`/`__pycache__`
   at registration; 4096-dir cap per project; macOS/Windows keep native
@@ -231,24 +233,30 @@ yet built.
   pass on any arriving wip blob; importers skip empty-bundle payloads.
 - Bundle mode (fallback): `git bundle create <ref> --not --remotes=<remote>`
   → blob kind=wip, payload `{ schemaVersion, capturedAt, refName,
-  commitOid, treeOid, bundleBase64 }` (+ v2 fields, M3.8), capped by
+  commitOid, treeOid, branchRef, headOid, bundleBase64 }`, capped by
   `ROAMING_WIP_BUNDLE_MAX_BYTES` (8 MiB); oversize skipped with a surfaced
   warning.
 
 ### Apply
 
-- **(M3.8 — replaces the shipped timestamp gates)** Context classifier by
+- Context classifier by
   ancestry: same-context → per-file merge below; fast-forward (same branch,
   peer HEAD descendant, untouched checkout) → `merge --ff-only` + diff on
   top; different branch (untouched, ff-safe) → park, switch, apply;
   peer-behind → skip; diverged/detached/legacy → blocked. Untouched =
   worktree tree equals applied-marker tree (or HEAD when no marker exists) +
-  no in-progress git op + no in-flight agent turn. The in-flight guard uses
-  a project-level projection query joining threads to sessions. Every blocked
-  case sets a specific `blockedReason` and surfaces the takeover action. The
-  shipped "strictly newer than HEAD" committer-timestamp staleness gate is
-  DELETED with M3.8, not kept alongside. Newest-peer selection across
-  environments stays committer-timestamp (fine at 2 machines).
+  local branch/HEAD matches this machine's latest payload (or the applied
+  payload before first local capture) + no in-progress git op + no in-flight
+  agent turn. The in-flight guard uses a project-level projection query
+  joining threads to sessions. Every blocked case sets a specific
+  `blockedReason` and surfaces the takeover action. The
+  former "strictly newer than HEAD" committer-timestamp staleness gate is
+  deleted, not kept alongside. Newest-peer selection across
+  environments stays committer-timestamp (fine at 2 machines). An exact
+  provenance echo (Based-On + branch/HEAD/tree all match our last shipped
+  payload) advances marker bookkeeping but never reverses a newer local
+  branch switch. Reactor passes apply before capture so a receiver never
+  ships stale pre-apply context back to the author.
 - Per-file merge (M3.7, survives as the same-context path): base =
   applied marker, else HEAD, else empty tree; peer changes via
   `git diff --name-status --no-renames <base> <peer>`. Per path with
@@ -256,9 +264,12 @@ yet built.
   changed + peer unchanged → keep local silently; both changed → conflict,
   keep ours, surface; local untouched + peer deleted → remove; local
   untouched + peer content → `git restore --source=<peer> --worktree`;
-  path occupied by a directory/conflicting parent → conflict. Apply never
-  touches HEAD, branch refs, or the real index (pre-M3.8; M3.8 adds the
-  explicit ff/switch cases above).
+  path occupied by a directory/conflicting parent → conflict. Same-context
+  apply never touches HEAD, branch refs, or the real index; only classified
+  fast-forward, switch, and takeover paths move HEAD.
+- `POST /api/roaming/wip/takeover` reclassifies the newest snapshot, parks
+  local state, reproduces the peer branch/HEAD/tree, and returns whether it
+  applied. The blocked project pill is the action; no separate sync UI.
 - Deletion invariants (each was a field bug): (1) the applied marker
   advances EVERY pass that applies or records conflicts — clean passes to
   the peer snapshot, conflicted passes to a synthetic commit with only the
@@ -273,7 +284,8 @@ yet built.
 ### Status surfacing
 
 - `roamingWipStatus` per project: `{ mode, lastCapturedAt, lastPushedAt,
-  lastError?, blockedReason?, notice?, lastAppliedAt?, lastAppliedFrom? }`,
+  lastError?, blockedReason?, takeoverAvailable?, notice?, lastAppliedAt?,
+  lastAppliedFrom? }`,
   merged at BOTH shell surfaces (ws subscribe point and HTTP shell route);
   flag-off = empty. Baseline publish on a project's first pass; seeds into
   resumed ws subscriptions; after restart, activity timestamps reconstruct
@@ -281,7 +293,8 @@ yet built.
 - Sync pill priority: error (red) > blocked (amber, plain-language
   guidance) > notice (amber) > recent activity (brief green) > idle.
   Concept-free copy — no "roaming"/"sync engine" wording.
-- `blockedReason` is cleared on every non-blocked pass. **(M3.8)** adds the
+- `blockedReason` and `takeoverAvailable` clear on every non-blocked pass.
+  Branch-context reasons include
   enumerated branch-context reasons ("peer is on <branch>", "peer moved
   <branch> forward; you have local edits", divergence, legacy snapshot).
 
@@ -305,8 +318,9 @@ yet built.
   notice with age + authoring machine). Restore goes through checkpoint
   restore (whole tree; staged/unstaged flattened; `git clean -fd`; index
   reset to HEAD; HEAD itself never moves) and then writes the applied
-  marker. **(M3.8)** if the snapshot's branch differs from the clone's
-  default branch, create + switch to it at the snapshot's `headOid` first.
+  marker. Payload v2 is required; create + switch the snapshot branch to its
+  `headOid` before restoring the dirty diff. Legacy snapshots skip with a
+  notice.
 - apply-vault never overwrites an existing differing file (notice;
   interactive overwrite belongs to the on-demand "pull vault files" path),
   and uses the recording variant so its files stay updatable by later
@@ -317,11 +331,10 @@ yet built.
 - Cloned state dir (two machines, one environmentId) → WIP ref ping-pong;
   re-install orphans one origin ref per abandoned environmentId (prunable
   by hand).
-- A manual CLI commit fires no domain event: a stale dirty snapshot can
-  outlive it by up to one interval tick.
+- A manual CLI branch/HEAD move is detected by the 10s context poll; a dirty
+  tree under a sustained sub-5s write storm still waits for the interval.
 - Peer clock skew can defeat timestamp-based newest-peer selection
-  (recoverable via refs; the dangerous decisions move to ancestry with
-  M3.8).
+  (recoverable via refs; apply safety decisions use ancestry).
 - Two machines materializing from the same registry version → equal-version
   conflict (disjoint perMachineRoots not auto-merged).
 - Initiator-side environmentId clobber; first-pairing settings TOCTOU
@@ -332,6 +345,6 @@ yet built.
 - Base-diff peer deletions with NO applied marker yet are not
   Based-On-gated (narrow: markers appear on first exchange).
 - Stashes, in-progress rebases, the staged/unstaged split, reflog, and
-  other local branches do not roam **(scope, restated by M3.8)**. Both
+  other local branches do not roam. Both
   machines must run ≥M3.8 builds before branch-aware behavior holds
   end-to-end.
