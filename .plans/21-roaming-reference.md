@@ -197,6 +197,11 @@ live in `21-roaming-history.md`.
 
 ### Capture
 
+- Server file layout (split 2026-07-16): `WipSnapshots.ts` git primitives;
+  `WipShared.ts` types/codecs/guards/blob reads; `WipCapture.ts` snapshot +
+  origin push/bundle transport; `WipApply.ts` classifier + per-file merge +
+  parking/takeover; `treeWatcher.ts` fs-watch stream; `WipSnapshotReactor.ts`
+  triggers/coalescing/status only.
 - Temp-index recipe in `roaming/WipSnapshots.ts` (NOT the driver op): seed
   from HEAD, `add -A`, subtract vault set, `write-tree`, `commit-tree` with
   **parent = HEAD** (thin bundles are ancestry-based; also M5's common
