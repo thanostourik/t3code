@@ -21,7 +21,13 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { GitVcsDriver, layer as GitVcsDriverLayer, vcsLayer } from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
-import { restoreParkedWipForTarget, runWipApplyForTarget } from "./WipApply.ts";
+import {
+  classifyWipApply,
+  restoreParkedWipForTarget,
+  resolveWipPathAction,
+  runWipApplyForTarget,
+  type WipContextFacts,
+} from "./WipApply.ts";
 import { runWipPassForTarget } from "./WipCapture.ts";
 import { type WipTarget } from "./WipShared.ts";
 import {
@@ -1828,4 +1834,168 @@ testLayer("WipSnapshotReactor", (it) => {
       );
     }),
   );
+});
+
+// ── Pure decision-core invariants ───────────────────────────────────────
+// The incident-replay tests above pin exact field states; these enumerate
+// the whole fact space so ADJACENT states hold the safety invariants too —
+// all three 2026-07-15 audit bugs sat in states no incident had replayed.
+
+const enumerateConsistentFacts = (): WipContextFacts[] => {
+  const bools = [false, true];
+  const all: WipContextFacts[] = [];
+  for (const sameBranch of bools)
+    for (const sameHead of bools)
+      for (const conflictAlreadyResolved of bools)
+        for (const exactShippedEcho of bools)
+          for (const newestIsApplied of bools)
+            for (const newestTreeIsWorktree of bools)
+              // Derived-fact consistency: staleBasedOn/provenEcho only exist
+              // for different-branch snapshots (and an exact shipped echo
+              // means the peer's Based-On EQUALS our shipment — it cannot
+              // simultaneously be stale); peer ancestry only for same
+              // branch; a local copy of the peer branch only when it differs.
+              for (const staleBasedOn of sameBranch || exactShippedEcho ? [false] : bools)
+                for (const provenEcho of staleBasedOn ? bools : [false])
+                  for (const peerBehind of sameBranch ? bools : [false])
+                    for (const fastForwardSafe of sameBranch ? bools : [false])
+                      for (const untouched of bools)
+                        for (const hasInFlightTurn of bools)
+                          for (const peerBranchHasLocalCommits of sameBranch ? [false] : bools) {
+                            all.push({
+                              branchName: "peer-branch",
+                              sameBranch,
+                              sameHead,
+                              conflictAlreadyResolved,
+                              exactShippedEcho,
+                              newestIsApplied,
+                              newestTreeIsWorktree,
+                              staleBasedOn,
+                              provenEcho,
+                              peerBehind,
+                              fastForwardSafe,
+                              untouched,
+                              hasInFlightTurn,
+                              peerBranchHasLocalCommits,
+                            });
+                          }
+  return all;
+};
+
+it("classifyWipApply: safety invariants hold over the whole fact space", () => {
+  const movers = new Set(["fastForward", "reproduceReset", "switchBranch"]);
+  for (const facts of enumerateConsistentFacts()) {
+    for (const takeover of [false, true]) {
+      const decision = classifyWipApply(facts, takeover);
+      const label = `${JSON.stringify(facts)} takeover=${takeover} -> ${decision._tag}`;
+      // 1. Nothing moves HEAD unless the checkout is untouched or the user
+      //    explicitly took over.
+      if (movers.has(decision._tag)) {
+        assert.isTrue(takeover || facts.untouched, `mover without consent: ${label}`);
+      }
+      // 2. Nothing moves HEAD while an agent turn is in flight — takeover
+      //    included.
+      if (movers.has(decision._tag)) {
+        assert.isFalse(facts.hasInFlightTurn, `mover during turn: ${label}`);
+      }
+      // 3. Plain fast-forward only along proven same-branch ancestry.
+      if (decision._tag === "fastForward") {
+        assert.isTrue(facts.sameBranch && facts.fastForwardSafe && !takeover, label);
+      }
+      // 4. reset --hard + clean -fd is exclusively a takeover action.
+      if (decision._tag === "reproduceReset") {
+        assert.isTrue(takeover, `destructive reset without takeover: ${label}`);
+      }
+      if (decision._tag === "switchBranch") {
+        assert.strictEqual(decision.clean, takeover, label);
+      }
+      // 5. An unproven causally-stale different-branch snapshot must block
+      //    (takeover offered) — never silently skip, never auto-switch
+      //    (both halves of the 2026-07-15 audit findings). Sole exemption:
+      //    a snapshot whose conflict this machine already resolved (pinned
+      //    marker names exactly this peer commit) stays resolved — blocking
+      //    it again would recreate the infinite Take over of field fix #4.
+      if (
+        !takeover &&
+        !facts.sameBranch &&
+        facts.staleBasedOn &&
+        !facts.provenEcho &&
+        !facts.conflictAlreadyResolved
+      ) {
+        assert.strictEqual(decision._tag, "blocked", label);
+      }
+      // 6. A proven echo never blocks and never moves anything.
+      if (!takeover && facts.staleBasedOn && facts.provenEcho && !facts.conflictAlreadyResolved) {
+        assert.strictEqual(decision._tag, "skip", label);
+      }
+      // 7. Takeover never dead-ends except for an in-flight turn.
+      if (takeover && decision._tag === "blocked") {
+        assert.isTrue(facts.hasInFlightTurn, `takeover blocked without turn: ${label}`);
+      }
+      // 8. Same context never blocks and never moves HEAD.
+      if (!takeover && facts.sameBranch && facts.sameHead) {
+        assert.isTrue(
+          decision._tag === "skip" ||
+            decision._tag === "advanceMarker" ||
+            decision._tag === "mergeSameContext",
+          label,
+        );
+      }
+      // 9. Every blocked state carries a user-facing reason.
+      if (decision._tag === "blocked") {
+        assert.isAbove(decision.reason.length, 0, label);
+      }
+    }
+  }
+});
+
+it("resolveWipPathAction: the causality/deletion decision table", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  const Z = "z".repeat(40);
+  const base = {
+    cleanAtHead: false,
+    peerSawOurShipment: false,
+    shippedOnlyDelete: false,
+    markerBaseOid: null,
+    shippedPathOid: null,
+  };
+  const act = (input: Partial<Parameters<typeof resolveWipPathAction>[0]>) =>
+    resolveWipPathAction({ ourOid: null, peerOid: null, ...base, ...input }).action;
+
+  // Identical content (or absent on both sides) is a no-op.
+  assert.strictEqual(act({ ourOid: A, peerOid: A }), "skip");
+  assert.strictEqual(act({ ourOid: null, peerOid: null }), "skip");
+  // m35 no-clobber: our shipped-but-unacknowledged edit vs concurrent peer
+  // bytes at a marker-less path is a CONFLICT, never an overwrite.
+  assert.strictEqual(act({ ourOid: A, peerOid: B, shippedPathOid: A }), "conflict");
+  // ...but a peer edit that provably saw our shipment is a reply and applies
+  // (M3.6 based-on delivery).
+  assert.strictEqual(
+    act({ ourOid: A, peerOid: B, shippedPathOid: A, peerSawOurShipment: true }),
+    "applyPeer",
+  );
+  // Delete flap: we deleted a file we authored; the peer's stale copy must
+  // not resurrect it.
+  assert.strictEqual(act({ ourOid: null, peerOid: A, shippedPathOid: A }), "keepOurs");
+  // Proof-gated peer deletion of a file we shipped and left untouched.
+  assert.strictEqual(
+    act({ ourOid: A, peerOid: null, shippedPathOid: A, shippedOnlyDelete: true }),
+    "deleteLocal",
+  );
+  // Clean checkout: an exact peer echo of deleted shipped bytes stays
+  // deleted; different bytes are a recreated file and apply.
+  assert.strictEqual(
+    act({ ourOid: null, peerOid: A, shippedPathOid: A, cleanAtHead: true }),
+    "skip",
+  );
+  assert.strictEqual(
+    act({ ourOid: null, peerOid: B, shippedPathOid: A, cleanAtHead: true }),
+    "applyPeer",
+  );
+  // Marker-based per-file merge triangle.
+  assert.strictEqual(act({ ourOid: A, peerOid: B, markerBaseOid: Z }), "conflict");
+  assert.strictEqual(act({ ourOid: A, peerOid: Z, markerBaseOid: Z }), "keepOurs");
+  assert.strictEqual(act({ ourOid: Z, peerOid: B, markerBaseOid: Z }), "applyPeer");
+  assert.strictEqual(act({ ourOid: Z, peerOid: null, markerBaseOid: Z }), "deleteLocal");
 });
