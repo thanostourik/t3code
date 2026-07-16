@@ -1721,3 +1721,229 @@ live-row materialize, revoke→offline flip), all green on the M0 harness.
   `accept-m36.mjs` step 6 updated for per-file merge + `accept-m35.mjs` +
   canonical re-run.
 
+### Branch-aware sync model (M3.8)
+
+- Replaced tree-only snapshot identity with payload v2
+  `(branchRef, headOid, treeOid)`. Origin refs require an exact metadata
+  beacon join; legacy/mismatched snapshots block or skip without touching the
+  checkout. Capture no-op detection uses the full tuple, so same-tree branch
+  and HEAD moves still ship.
+- Replaced timestamp-vs-HEAD apply gates with ancestry classification:
+  same context keeps M3.7 per-file merge; clean same-branch descendants
+  fast-forward; clean different-branch snapshots switch only when the target
+  branch is fast-forward-safe; behind snapshots skip; divergence, detached,
+  legacy, local edits, and in-flight turns block with specific reasons.
+- Every HEAD move parks the local snapshot under its branch. The minimal
+  takeover action parks and reproduces peer branch + HEAD + dirty tree; a
+  clean return to the parked branch restores its tree. The project pill is
+  the only UI action—no new project list or sync surface.
+- Materialize now requires v2 context, checks out the snapshot branch at its
+  HEAD, restores the dirty diff, and writes the applied marker. Legacy WIP is
+  skipped with a notice.
+- Analysis corrections found during the milestone: origin metadata must join
+  refs exactly; untouched falls back to HEAD when no marker exists; active
+  turns needed a project-level projection query; tree-only no-op detection
+  hid branch moves; `.git` exclusion required a 10s branch/HEAD poll.
+- Field runs found three forms of branch feedback: pre-apply capture shipped
+  stale receiver context; an applied peer tuple was re-shipped as locally
+  authored; and an incoming snapshot could race a local CLI switch before the
+  10s poll captured it. Reactor ordering is apply-then-capture, exact applied
+  tuples suppress acknowledgments until local work ships, exact provenance
+  echoes only advance marker bookkeeping, and untouched now requires captured
+  branch/HEAD context. The canonical four-stage run then stayed clean after
+  branch creation, commit, return, and merge.
+- A later field reset exposed two retained-state paths. First, a Git-clean
+  checkout could be classified as edited solely because its applied marker
+  still described earlier WIP; untouched now accepts either the applied tree
+  or `HEAD^{tree}`. The exact field state then exposed the decisive second
+  path: A had already kept `advance.txt` and `b-local.txt` deleted and captured
+  that resolution, while B's unchanged older payload still contained them.
+  The synthetic conflict marker preserved deletion safety but originally did
+  not record which peer snapshot it represented, so every startup recreated
+  `Take over`. Naming the peer fixed that display loop but exposed a transport
+  hole: A's deletion snapshot named the local-only marker in `T3-Based-On`, so
+  B could not resolve the marker's files and therefore could not prove that A
+  had seen B's `advance.txt` and `b-local.txt`. B retained and republished both.
+  Conflict markers now name the exact peer commit, and the next single-parent
+  snapshot transports that acknowledgement as `T3-Based-On-Peer` in the same
+  trailer paragraph as `T3-Based-On`. B can validate the exact match against
+  its own shipped snapshot and accept the deletions without importing A's
+  synthetic marker. A timestamp/subject migration recognizes pre-fix pinned
+  markers, and missing transported proof forces exactly one re-capture.
+- The same exact A installation exposed a third retained-state path in the
+  desktop client. Its IndexedDB shell cache repeatedly contained the old
+  `blockedReason: "changed on both machines, kept yours: b-local.txt"` and
+  `takeoverAvailable: true` row, so merely opening A could render `Take over`
+  before B was running even after the server stopped recreating the conflict.
+  WIP status is now live-only: cache hydration discards the array and cache
+  persistence omits it; warm resume authoritatively replaces it from the
+  reactor. A regression starts from that exact cached takeover shape and
+  asserts an empty rendered status.
+- Acceptance on fresh M0 harness state: `accept-m38.mjs` passed the canonical
+  branch workflow, dirty-main block, touched-own-branch block, takeover with
+  restorable parking, return restoration, and branch materialization;
+  `accept-m35.mjs`, `accept-m36.mjs`, and `accept-m37.mjs` stayed green (M3.7:
+  10/10 deliveries ≤10s, max 5.7s); `accept-m2.5.mjs` passed pairing, live
+  attach, mirror, offline transition, and materialize. The collaborative UI
+  preview could not run in this session because both preview status/open
+  returned `Auth required`; no product criterion was redefined around that
+  tooling limitation.
+- The final field-state replay used the preserved commits directly: A started
+  from applied marker `1955fd`, stale deletion snapshot `bd8166`, and B's peer
+  snapshot `989c15`. Current code emitted one-parent snapshot `876733` with
+  both trailers; an isolated B containing the two untracked files applied two
+  deletions, stayed on `testing`, and ended clean. A single regression now
+  reproduces that entire private-marker transport/deletion chain and passed 20
+  consecutive randomized repository runs. Then 36 reactor tests, 14 client
+  cache/reducer tests, three additional fresh `accept-m38.mjs` runs, and a
+  separate fresh canonical `accept-m2.5.mjs` all passed. The packaged AppImage
+  server itself also passed the complete M3.8 acceptance, and its served web
+  bundle contains none of the removed fake-`Syncing` copy. `vp run typecheck`
+  passed. Repository formatting passed; repository-wide lint remained red on
+  unrelated existing files, while every changed implementation/test/harness
+  file linted cleanly.
+- The next real installation exposed a fourth retained-state failure. A was
+  clean at `HEAD` but its old applied marker still contained `b-local.txt`.
+  When B created a new file at that path (`4fb0a0`), A used the stale marker as
+  its same-context merge base, falsely classified A's clean absence plus B's
+  new bytes as a both-sides conflict, emitted `Take over`, and then published
+  the absence as a deletion. B deleted the new file; its still-retained
+  `advance.txt` reappeared on both machines. Clean worktrees now rebase the
+  per-file merge to HEAD. The last-shipped fallback remains only for dirty
+  worktrees, except that a clean local deletion still wins when the peer
+  carries the exact last-shipped bytes; different peer bytes at the same path
+  are treated as a new file. An isolated replay using the actual `1955fd`,
+  `7fe98e`, and `4fb0a0` objects applied `B local` to A, created no synthetic
+  marker or deletion snapshot, and stayed stable across restart. The exact
+  regression passed 20 consecutive runs; all 37 reactor and 14 client tests,
+  fresh M3.8 acceptance, and fresh canonical M2.5 acceptance passed. The
+  fork.41 packaged server then passed both the exact real-object replay and
+  the complete fresh M3.8 acceptance suite.
+- Pre-Test-5 cleanup then exposed a fifth retained-state path: both visible
+  repositories were clean while T3 was closed, yet opening fork.41 restored
+  `advance.txt` and `b-local.txt`. A first captured clean snapshot `f05312`;
+  B then published both files as `1f5db5`, explicitly based on `f05312`, and A
+  correctly applied that causally-new state. The files had already been
+  resurrected on B by `restoreParkedWipForTarget`: it ran unconditionally on
+  every pass/startup and never consumed a successfully restored parked ref.
+  Parked restoration is now restricted to a branch transition observed in the
+  running process and consumes the ref after success. Each pass detects the
+  transition directly in addition to the 10s poll, closing a peer-event race
+  found by the first acceptance rerun. An exact startup replay with a clean
+  `testing` checkout and parked `1f5db5` stayed clean while keeping the ref
+  recoverable; a live branch-away/return restored both files once and consumed
+  it. All 51 focused tests and the complete M3.8 harness then passed.
+- Test 6 then exposed a sixth classifier failure. With A on `a-work` plus
+  `a-wip.txt` and B on `b-work` plus `b-wip.txt`, both machines initially
+  blocked, but a later pass dismissed the same peer state as a delayed branch
+  echo because its `T3-Based-On` named an older local shipment. Status is
+  pass-authoritative, so that incorrect `skipped` result cleared `Take over`
+  and both machines settled on `Synced` while still divergent. The echo guard
+  now applies only when the peer snapshot tree equals its HEAD; a peer tree
+  containing WIP is genuine active work and returns `blocked` on every pass.
+  The exact two-active-branch regression asserts two consecutive blocked
+  outcomes and untouched local branch/files. All 52 focused tests, fresh M3.8
+  acceptance, and fresh canonical M2.5 acceptance passed from source.
+- Continuing the same field workflow exposed one Test 7 hole and one mistaken
+  test expectation. After A took over B, A never emitted its resulting
+  `b-work`/`b-wip.txt` tuple because exact applied tuples were treated as
+  no-op echoes, so B remained on `Take over`; successful takeover now forces
+  one causal acknowledgement capture. Ordinary `git switch a-work` correctly
+  carried the untracked `b-wip.txt` across. Expecting T3 to delete that file
+  and restore `a-wip.txt` was wrong: a manual Git switch is not an implicit
+  destructive recovery command. Dirty checkouts remain untouched and blocked,
+  while the parked ref remains recoverable; restoration occurs only after the
+  returned checkout is clean. The unit and M3.8 acceptance previously hid this
+  distinction by cleaning before the switch. They now switch back dirty first,
+  assert Git's carryover survives and the parked work stays hidden, then clean
+  and assert the parked work restores. The peer-clear acknowledgement is also
+  asserted. All 53 focused tests, revised fresh M3.8 acceptance, and fresh
+  canonical M2.5 acceptance passed from source.
+- Preparing to rerun Test 6 exposed a seventh classifier path. Both visible
+  repositories had been reset while T3 was closed, but the mirror still
+  carried B's last published dirty `b-work` snapshot. A opened first on clean
+  `testing`: the first pass blocked and captured the reset, then the next pass
+  treated the older B snapshot as eligible for clean different-branch
+  auto-switch and moved A to `b-work` with `b-wip.txt`. A dirty
+  different-branch snapshot whose `T3-Based-On` does not equal this machine's
+  latest shipment now remains blocked on every pass; only explicit takeover
+  may apply it. The exact clean-reset/old-dirty-peer regression asserts two
+  blocked passes, unchanged `testing`, and no peer file. M3.8 acceptance now
+  repeats the field sequence and waits beyond the second pass before asserting
+  that the branch and tree remain unchanged. Its first run still failed in
+  bundle fallback: the pre-apply baseline read only the origin pushed marker,
+  which does not exist in bundle mode, so the causal guard was bypassed. Bundle
+  mode now uses the current locally mirrored payload commit as its baseline.
+  All 54 focused tests, the revised M3.8 acceptance, and fresh canonical M2.5
+  acceptance passed from source.
+
+## 2026-07-15 — Independent post-fix audit (regression found and fixed)
+
+After the seventh fix, an independent review session audited the accumulated
+uncommitted diff: full re-read of the reactor, an adversarial opus-4.8 pass
+over the classifier, and the complete acceptance ladder on fresh harness
+state — the first re-run of the PRE-M3.8 suites since fix #3 (fixes #4–#7
+had only re-run `accept-m38` + canonical M2.5; the older suites are where
+the earlier guarantees live).
+
+**Regression found: `accept-m35` no-clobber FAILED (reproduced twice).**
+"B's change was applied over A's locally-edited file" — the oldest guarantee
+of the sync feature (M3.5: local edits are never overwritten). Forensics on
+preserved harness state: in the per-file merge, a path missing from the
+merge base fell back to using OUR OWN last-shipped snapshot as its base on
+dirty checkouts. A file this machine authored and shipped therefore compared
+equal to "its base" (own copy == own shipment), read as locally untouched,
+and a peer's CONCURRENT different bytes at the same path overwrote the local
+edit silently — no conflict, applied marker advanced to the raw peer commit.
+The fallback was added for the M3.7 delete flap and also serves the M3.6
+"peer edited the file we shipped" delivery, so it could not simply be
+removed. Fix: the own-shipment base applies only when it is provably common
+history — the local path is absent (our own deletion), the path is a
+proof-gated shipped-only delete, or the peer snapshot's `T3-Based-On` /
+`T3-Based-On-Peer` names our shipment (a reply, not a concurrent write).
+Three unit regressions pin the triangle: concurrent same-path bytes now
+conflict-keep-ours; a Based-On reply still applies; the delete flap stays
+fixed. Root-cause window: opened by the fix #4–#7 interplay (prompt
+post-conflict acknowledgement re-captures made the concurrent-snapshot
+timing routine), which is why the M3.8-close ladder run had still passed.
+
+**Review finding (opus-4.8, confirmed): silent divergence via the clean echo
+arm.** The fix #6/#7 delayed-echo guard dismissed ANY clean different-branch
+snapshot whose Based-On predated our latest shipment as an echo — including
+a peer that committed real work on a new branch and went clean. Both
+machines then settled on "Synced" while on different branches forever (the
+fix #6 pathology, re-opened for the clean case). Fix: a clean snapshot is
+dismissible only when the echo is PROVEN — the peer's HEAD is an ancestor of
+ours (its position is already contained in our history); otherwise blocked
+with takeover offered. The fix #6 branch-switch echo (same HEAD) still
+skips; unit regression added.
+
+**Takeover edge fixed:** `takeover()` treated `applied-with-conflicts` as
+failure and returned `applied: false` — but the branch switch, reset, and
+clean had already happened by the time conflicts are known (an ignored file
+colliding with a peer path, a failed restore). The UI toasted an error over
+a successfully mutated worktree and the acknowledgement capture was skipped,
+so the peer stayed on "Take over" (the Test 7 disease through an edge path).
+Both applied tags now count as success.
+
+**Transport coverage restored:** the fix #7 revision had added
+`receive.hideRefs refs/t3` to every `accept-m38` test origin, silently
+flipping the ENTIRE branch-aware suite to bundle fallback and leaving
+origin-refs — the transport of any GitHub-backed project per the M0 spike —
+uncovered. The script now takes `T3_M38_TRANSPORT=origin`; closing state
+requires BOTH runs green.
+
+**Verdict on the code's state (review + audit):** coherent enough to keep —
+no guard contradiction, park-before-destructive-move holds on every path,
+capture no-op baselines neither deadlock nor ping-pong; the migration shims
+(legacy conflict marker, ±1s heuristic) are fresh-install-safe and should be
+deleted once the field machines have cycled past them. Standing debt, not
+blocking: the classifier re-derives overlapping provenance in six separate
+guards and would benefit from one computed peer-relationship classification;
+the unit suite is incident-replay-heavy and light on invariants (all three
+of this session's regressions sat exactly in states no incident replayed).
+
+Validation: 80 roaming unit tests (3 new), 113 client-runtime state tests,
+typecheck across 15 workspaces, and the full fresh-state ladder —
+`accept-m35`, `accept-m38` (bundle AND origin transports), `accept-m36`,
+`accept-m37`, `accept-m2.5`.

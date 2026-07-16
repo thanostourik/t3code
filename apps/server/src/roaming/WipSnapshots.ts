@@ -22,6 +22,8 @@ import * as Schema from "effect/Schema";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 
 export const WIP_HISTORY_SLOTS = 20;
+export const WIP_BRANCH_DETACHED = "T3:detached";
+export const WIP_BRANCH_UNBORN = "T3:unborn";
 
 const REF_SAFE_ID = /^[A-Za-z0-9._-]+$/;
 
@@ -70,6 +72,18 @@ export const wipRefGlob = (workspaceProjectId: WorkspaceProjectId) =>
 export const wipAppliedMarkerRefName = (workspaceProjectId: WorkspaceProjectId) =>
   refSafe(workspaceProjectId).pipe(Effect.map((id) => `refs/t3/wip-applied/${id}`));
 
+export const wipParkedRefName = (
+  workspaceProjectId: WorkspaceProjectId,
+  branchRef: string,
+): Effect.Effect<string, WipRefIdError> =>
+  Effect.gen(function* () {
+    yield* refSafe(workspaceProjectId);
+    if (!branchRef.startsWith("refs/heads/") || branchRef.length === "refs/heads/".length) {
+      return yield* new WipRefIdError({ id: branchRef });
+    }
+    return `refs/t3/wip-parked/${workspaceProjectId}/${branchRef.slice("refs/heads/".length)}`;
+  });
+
 export const COMMIT_ENV_IDENTITY = {
   GIT_AUTHOR_NAME: "T3 Code",
   GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
@@ -111,19 +125,54 @@ export const readBasedOn = (cwd: string, spec: string) =>
     return /^[0-9a-f]{40,64}$/.test(value) ? value : null;
   });
 
+/** Peer snapshot recorded by a synthetic conflict marker, or null. */
+export const readConflictPeer = (cwd: string, spec: string) =>
+  Effect.gen(function* () {
+    const git = yield* GitVcsDriver;
+    const result = yield* git.execute({
+      operation: "WipSnapshots.readConflictPeer",
+      cwd,
+      args: ["show", "-s", "--format=%(trailers:key=T3-Peer-Snapshot,valueonly)", spec],
+      allowNonZeroExit: true,
+    });
+    if (result.exitCode !== 0) return null;
+    const value = result.stdout.trim();
+    return /^[0-9a-f]{40,64}$/.test(value) ? value : null;
+  });
+
+/** Peer snapshot acknowledged by a captured conflict resolution, or null. */
+export const readBasedOnPeer = (cwd: string, spec: string) =>
+  Effect.gen(function* () {
+    const git = yield* GitVcsDriver;
+    const result = yield* git.execute({
+      operation: "WipSnapshots.readBasedOnPeer",
+      cwd,
+      args: ["show", "-s", "--format=%(trailers:key=T3-Based-On-Peer,valueonly)", spec],
+      allowNonZeroExit: true,
+    });
+    if (result.exitCode !== 0) return null;
+    const value = result.stdout.trim();
+    return /^[0-9a-f]{40,64}$/.test(value) ? value : null;
+  });
+
 export interface CaptureWipInput {
   readonly cwd: string;
   readonly workspaceProjectId: WorkspaceProjectId;
   readonly environmentId: EnvironmentId;
   /** Repo-relative paths subtracted from the snapshot (the vault set). */
   readonly vaultExcludePaths: ReadonlyArray<string>;
-  /** Skip commit + ref moves when the written tree equals this tree. */
-  readonly skipIfTreeOids?: ReadonlyArray<string>;
+  /** Skip commit + ref moves when the full working-state identity matches. */
+  readonly skipIfSnapshots?: ReadonlyArray<WipSnapshotIdentity>;
 }
 
-export interface CaptureWipResult {
-  readonly commitOid: string;
+export interface WipSnapshotIdentity {
+  readonly branchRef: string;
+  readonly headOid: string;
   readonly treeOid: string;
+}
+
+export interface CaptureWipResult extends WipSnapshotIdentity {
+  readonly commitOid: string;
   readonly refName: string;
 }
 
@@ -209,6 +258,18 @@ export const writeWorktreeTree = Effect.fn("WipSnapshots.writeWorktreeTree")(fun
 
   return yield* Effect.gen(function* () {
     const headOid = yield* resolveOid(input.cwd, "HEAD");
+    const symbolicHead = yield* git.execute({
+      operation: "WipSnapshots.symbolicHead",
+      cwd: input.cwd,
+      args: ["symbolic-ref", "-q", "HEAD"],
+      allowNonZeroExit: true,
+    });
+    const branchRef =
+      headOid === null
+        ? WIP_BRANCH_UNBORN
+        : symbolicHead.exitCode === 0
+          ? symbolicHead.stdout.trim()
+          : WIP_BRANCH_DETACHED;
     if (headOid !== null) {
       yield* git.execute({
         operation: "WipSnapshots.readTree",
@@ -244,7 +305,7 @@ export const writeWorktreeTree = Effect.fn("WipSnapshots.writeWorktreeTree")(fun
       args: ["write-tree"],
       env: commitEnv,
     });
-    return { treeOid: writeTreeResult.stdout.trim(), headOid };
+    return { treeOid: writeTreeResult.stdout.trim(), headOid: headOid ?? "", branchRef };
   }).pipe(Effect.ensuring(cleanupTempIndex));
 });
 
@@ -256,11 +317,18 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
   const historyPrefix = yield* wipHistoryRefPrefix(input.workspaceProjectId, input.environmentId);
   const appliedMarker = yield* wipAppliedMarkerRefName(input.workspaceProjectId);
 
-  const { treeOid, headOid } = yield* writeWorktreeTree({
+  const { treeOid, headOid, branchRef } = yield* writeWorktreeTree({
     cwd: input.cwd,
     vaultExcludePaths: input.vaultExcludePaths,
   });
-  if (input.skipIfTreeOids !== undefined && input.skipIfTreeOids.includes(treeOid)) {
+  if (
+    input.skipIfSnapshots?.some(
+      (snapshot) =>
+        snapshot.treeOid === treeOid &&
+        snapshot.headOid === headOid &&
+        snapshot.branchRef === branchRef,
+    )
+  ) {
     return null;
   }
 
@@ -268,6 +336,11 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
   // edits started from the snapshot it last auto-applied. A peer whose
   // worktree still IS that snapshot can apply this one safely.
   const basedOn = yield* resolveOid(input.cwd, appliedMarker);
+  const basedOnPeer = basedOn === null ? null : yield* readConflictPeer(input.cwd, basedOn);
+  const trailers = [
+    ...(basedOn !== null ? [`T3-Based-On: ${basedOn}`] : []),
+    ...(basedOnPeer !== null ? [`T3-Based-On-Peer: ${basedOnPeer}`] : []),
+  ];
 
   const commitTreeResult = yield* git.execute({
     operation: "WipSnapshots.commitTree",
@@ -275,10 +348,10 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
     args: [
       "commit-tree",
       treeOid,
-      ...(headOid !== null ? ["-p", headOid] : []),
+      ...(headOid.length > 0 ? ["-p", headOid] : []),
       "-m",
       "t3 wip snapshot",
-      ...(basedOn !== null ? ["-m", `T3-Based-On: ${basedOn}`] : []),
+      ...(trailers.length > 0 ? ["-m", trailers.join("\n")] : []),
     ],
     env: { ...process.env, ...COMMIT_ENV_IDENTITY },
   });
@@ -291,5 +364,5 @@ export const captureWipSnapshot = Effect.fn("WipSnapshots.captureWipSnapshot")(f
   });
   yield* writeHistorySlot(input.cwd, historyPrefix, commitOid);
 
-  return { commitOid, treeOid, refName } satisfies CaptureWipResult;
+  return { commitOid, treeOid, refName, branchRef, headOid } satisfies CaptureWipResult;
 });
