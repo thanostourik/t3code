@@ -21,12 +21,9 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { GitVcsDriver, layer as GitVcsDriverLayer, vcsLayer } from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
-import {
-  restoreParkedWipForTarget,
-  runWipApplyForTarget,
-  runWipPassForTarget,
-  type WipTarget,
-} from "./WipSnapshotReactor.ts";
+import { restoreParkedWipForTarget, runWipApplyForTarget } from "./WipApply.ts";
+import { runWipPassForTarget } from "./WipCapture.ts";
+import { type WipTarget } from "./WipShared.ts";
 import {
   captureWipSnapshot,
   readBasedOn,
