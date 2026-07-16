@@ -564,32 +564,6 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
       : yield* readBasedOn(cwd, ownPayload.commitOid);
   const recordedConflictPeer =
     appliedCommit === null ? null : yield* readConflictPeer(cwd, appliedCommit);
-  // Migration shim: pinned markers written before the T3-Peer-Snapshot
-  // trailer existed are recognized by their subject + the marker's fixed
-  // "1 second before the peer snapshot" dating. Delete once both field
-  // machines' markers carry the trailer.
-  let legacyRecordedConflictPeer: string | null = null;
-  if (
-    recordedConflictPeer === null &&
-    appliedCommit !== null &&
-    ownBasedOn === appliedCommit &&
-    localContextCaptured
-  ) {
-    const marker = yield* git.execute({
-      operation: "WipSnapshotReactor.readLegacyConflictMarker",
-      cwd,
-      args: ["show", "-s", "--format=%s%x00%ct", appliedCommit],
-      allowNonZeroExit: true,
-    });
-    const [subject, timestamp] = marker.stdout.trim().split("\0");
-    if (
-      marker.exitCode === 0 &&
-      subject === "t3 wip applied marker (conflicts pinned to base)" &&
-      Number(timestamp) + 1 === newestUnix
-    ) {
-      legacyRecordedConflictPeer = newestCommit;
-    }
-  }
   // Ancestry facts are consulted (and were historically computed) only once
   // same-context handling has been passed; gather them under the same
   // conditions so the pass cost is unchanged.
@@ -615,9 +589,7 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     sameBranch,
     sameHead,
     conflictAlreadyResolved:
-      ownBasedOn === appliedCommit &&
-      localContextCaptured &&
-      (recordedConflictPeer === newestCommit || legacyRecordedConflictPeer === newestCommit),
+      ownBasedOn === appliedCommit && localContextCaptured && recordedConflictPeer === newestCommit,
     exactShippedEcho:
       shippedBase !== null &&
       peerBasedOn === shippedBase &&
