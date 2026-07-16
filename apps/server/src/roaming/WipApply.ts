@@ -73,6 +73,173 @@ const validBranchRef = (cwd: string, branchRef: string) =>
 /** Git's canonical empty-tree object — the diff base when a snapshot has no parent. */
 const EMPTY_TREE_OID = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/**
+ * Everything the apply classifier consults, gathered by one effectful pass
+ * over git/blob state so the decision itself (classifyWipApply) is pure and
+ * exhaustively testable. Field semantics:
+ *
+ * - `conflictAlreadyResolved` — this machine captured its kept-local result
+ *   for exactly this peer snapshot (marker's T3-Peer-Snapshot names it, our
+ *   shipment's T3-Based-On names the marker); reprocessing would recreate a
+ *   false Take over on every boot.
+ * - `exactShippedEcho` — the peer snapshot is byte-for-byte our own last
+ *   shipment coming back (its T3-Based-On names our shipped commit and
+ *   branch/HEAD/tree all match): marker bookkeeping only.
+ * - `staleBasedOn` — different-branch snapshot whose T3-Based-On predates
+ *   our latest shipment (the peer has not seen our current state).
+ * - `provenEcho` — ...and it is clean AND its position is already contained
+ *   in our history (peer HEAD is our ancestor): a delayed echo of a branch
+ *   move we made, safe to ignore. An UNPROVEN stale snapshot is a real
+ *   divergence and must block, never silently skip (audit 2026-07-15).
+ * - `untouched` — worktree equals the applied-marker tree or the HEAD tree,
+ *   and our latest captured payload still matches this branch/HEAD.
+ * - `peerBehind` / `fastForwardSafe` — same-branch ancestry between the two
+ *   HEADs; meaningful only once same-context handling has been passed.
+ * - `peerBranchHasLocalCommits` — a local branch with the peer's name exists
+ *   and is not fast-forward-safe to the peer's HEAD.
+ */
+export interface WipContextFacts {
+  readonly branchName: string;
+  readonly sameBranch: boolean;
+  readonly sameHead: boolean;
+  readonly conflictAlreadyResolved: boolean;
+  readonly exactShippedEcho: boolean;
+  readonly newestIsApplied: boolean;
+  readonly newestTreeIsWorktree: boolean;
+  readonly staleBasedOn: boolean;
+  readonly provenEcho: boolean;
+  readonly peerBehind: boolean;
+  readonly fastForwardSafe: boolean;
+  readonly untouched: boolean;
+  readonly hasInFlightTurn: boolean;
+  readonly peerBranchHasLocalCommits: boolean;
+}
+
+export type WipApplyDecision =
+  | { readonly _tag: "skip" }
+  | { readonly _tag: "advanceMarker" }
+  | { readonly _tag: "mergeSameContext" }
+  | { readonly _tag: "fastForward" }
+  | { readonly _tag: "reproduceReset" }
+  | { readonly _tag: "switchBranch"; readonly clean: boolean }
+  | { readonly _tag: "blocked"; readonly reason: string };
+
+/**
+ * The apply decision table (.plans/21-roaming-workspace.md "Apply —
+ * reproduce completely or touch nothing"), pure over gathered facts. Row
+ * order IS the semantics — echo/bookkeeping rows fire before same-context
+ * handling, which fires before any HEAD-moving classification; takeover
+ * bypasses every guard except an in-flight agent turn.
+ */
+export const classifyWipApply = (facts: WipContextFacts, takeover: boolean): WipApplyDecision => {
+  const onPeerBranch = `the other machine is on ${facts.branchName}`;
+  if (!takeover && facts.conflictAlreadyResolved) {
+    return { _tag: "skip" };
+  }
+  if (facts.exactShippedEcho) {
+    return { _tag: "advanceMarker" };
+  }
+  if (facts.sameBranch && facts.sameHead && !takeover) {
+    if (facts.newestIsApplied) return { _tag: "skip" };
+    if (facts.newestTreeIsWorktree) return { _tag: "advanceMarker" };
+    return { _tag: "mergeSameContext" };
+  }
+  if (!takeover && !facts.sameBranch && facts.staleBasedOn) {
+    return facts.provenEcho ? { _tag: "skip" } : { _tag: "blocked", reason: onPeerBranch };
+  }
+  if (!takeover && facts.peerBehind) {
+    return { _tag: "skip" };
+  }
+  if (facts.hasInFlightTurn) {
+    return {
+      _tag: "blocked",
+      reason: "an agent is working in this project; try again when it finishes",
+    };
+  }
+  if (!takeover && !facts.untouched) {
+    return {
+      _tag: "blocked",
+      reason: facts.sameBranch
+        ? `the other machine moved ${facts.branchName} forward; you have local edits`
+        : onPeerBranch,
+    };
+  }
+  if (!takeover && facts.sameBranch && !facts.fastForwardSafe) {
+    return { _tag: "blocked", reason: `${facts.branchName} has diverged between your machines` };
+  }
+  if (!takeover && !facts.sameBranch && facts.peerBranchHasLocalCommits) {
+    return { _tag: "blocked", reason: `${facts.branchName} has local commits on this machine` };
+  }
+  if (facts.sameBranch) {
+    return facts.fastForwardSafe && !takeover
+      ? { _tag: "fastForward" }
+      : { _tag: "reproduceReset" };
+  }
+  return { _tag: "switchBranch", clean: takeover };
+};
+
+/**
+ * Per-path merge decision, pure over the four content oids and the causality
+ * facts. `baseSource` names which tree supplied the merge base so conflict
+ * pins stay diffable. The own-shipment fallback base is causality-gated: it
+ * applies only when the path is absent locally (a local deletion of a file we
+ * authored must not read as untouched absence), the peer's deletion of it
+ * carried Based-On proof, or the peer snapshot descends from our shipment
+ * (its edit is a reply, not a concurrent write). An unproven concurrent
+ * snapshot must NOT use our own shipment as base: our unacknowledged edit
+ * would compare equal to it, read "untouched", and the peer's bytes would
+ * silently overwrite local work (accept-m35 no-clobber regression,
+ * 2026-07-15).
+ */
+export const resolveWipPathAction = (input: {
+  readonly ourOid: string | null;
+  readonly peerOid: string | null;
+  readonly markerBaseOid: string | null;
+  readonly shippedPathOid: string | null;
+  readonly cleanAtHead: boolean;
+  readonly peerSawOurShipment: boolean;
+  readonly shippedOnlyDelete: boolean;
+}): {
+  readonly action: "skip" | "keepOurs" | "conflict" | "deleteLocal" | "applyPeer";
+  readonly baseSource: "marker" | "shipped" | null;
+} => {
+  const shippedBaseUsable =
+    input.ourOid === null || input.peerSawOurShipment || input.shippedOnlyDelete;
+  const baseOid =
+    input.markerBaseOid ?? (input.cleanAtHead || !shippedBaseUsable ? null : input.shippedPathOid);
+  const baseSource = baseOid === null ? null : input.markerBaseOid !== null ? "marker" : "shipped";
+  if (input.ourOid === input.peerOid) {
+    // Already at the peer's state (same content, or deleted on both).
+    return { action: "skip", baseSource };
+  }
+  // A clean checkout can mean an intentional deletion of a file we authored.
+  // Preserve it while the peer merely echoes the exact shipped bytes. If the
+  // peer has DIFFERENT bytes at the same path, it recreated the filename from
+  // clean state; apply that new file instead of manufacturing a conflict.
+  if (
+    input.cleanAtHead &&
+    input.markerBaseOid === null &&
+    input.ourOid === null &&
+    input.shippedPathOid !== null &&
+    input.peerOid === input.shippedPathOid
+  ) {
+    return { action: "skip", baseSource };
+  }
+  if (input.ourOid !== baseOid) {
+    // WE changed this file since the last sync (edited or deleted it). If the
+    // peer still holds exactly the synced version they did NOT touch it — our
+    // change wins silently and our next capture propagates it (a clean local
+    // delete, not a conflict). Only a genuine both-sides change surfaces.
+    return input.peerOid !== baseOid
+      ? { action: "conflict", baseSource }
+      : { action: "keepOurs", baseSource };
+  }
+  if (input.peerOid === null) {
+    return { action: "deleteLocal", baseSource };
+  }
+  return { action: "applyPeer", baseSource };
+};
+
 export type WipApplyOutcome =
   | { readonly _tag: "skipped" }
   | { readonly _tag: "blocked"; readonly reason: string }
@@ -362,6 +529,17 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     } as WipApplyOutcome;
   }
 
+  // ── Gather the classifier facts ────────────────────────────────────────
+  // Provenance glossary — four trailers answer four questions:
+  //   peerBasedOn          what peer state did THIS SNAPSHOT consume?
+  //                        (T3-Based-On of the peer snapshot)
+  //   ownBasedOn           what peer state did OUR last shipment consume?
+  //                        (T3-Based-On of our shipped commit)
+  //   recordedConflictPeer which exact peer commit did our pinned conflict
+  //                        resolution answer? (marker's T3-Peer-Snapshot)
+  //   shippedBase          what did we last ship? (pushed marker / bundle
+  //                        payload, read PRE-capture by the reactor)
+  const takeover = options.takeover === true;
   const sameBranch = payload.branchRef === localState.branchRef;
   const sameHead = payload.headOid === localState.headOid;
   const shippedBase =
@@ -372,24 +550,24 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
           yield* wipPushedMarkerRefName(target.workspaceProjectId, environmentId),
         );
   const ownPayload = yield* bundleShipped(target.workspaceProjectId, environmentId);
-  const localAppliedCommit = yield* resolveOid(cwd, appliedMarker);
-  const appliedContextPayload = yield* payloadForCommit(
-    target.workspaceProjectId,
-    localAppliedCommit,
-  );
+  const appliedContextPayload = yield* payloadForCommit(target.workspaceProjectId, appliedCommit);
   const localContextBaseline = ownPayload ?? appliedContextPayload;
   const localContextCaptured =
     localContextBaseline === null ||
     localContextBaseline === undefined ||
     (localContextBaseline.branchRef === localState.branchRef &&
       localContextBaseline.headOid === localState.headOid);
-  const basedOn = yield* readBasedOn(cwd, newest.refName);
+  const peerBasedOn = yield* readBasedOn(cwd, newest.refName);
   const ownBasedOn =
     ownPayload === null || ownPayload === undefined
       ? null
       : yield* readBasedOn(cwd, ownPayload.commitOid);
   const recordedConflictPeer =
     appliedCommit === null ? null : yield* readConflictPeer(cwd, appliedCommit);
+  // Migration shim: pinned markers written before the T3-Peer-Snapshot
+  // trailer existed are recognized by their subject + the marker's fixed
+  // "1 second before the peer snapshot" dating. Delete once both field
+  // machines' markers carry the trailer.
   let legacyRecordedConflictPeer: string | null = null;
   if (
     recordedConflictPeer === null &&
@@ -412,25 +590,64 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
       legacyRecordedConflictPeer = newestCommit;
     }
   }
-  // Once this machine has captured its kept-local result after a conflict,
-  // the exact peer snapshot is resolved here. Reprocessing it on every boot
-  // recreates a false Take over forever; a new peer commit still re-evaluates.
-  if (
-    !options.takeover &&
-    ownBasedOn === appliedCommit &&
-    localContextCaptured &&
-    (recordedConflictPeer === newestCommit || legacyRecordedConflictPeer === newestCommit)
-  ) {
+  // Ancestry facts are consulted (and were historically computed) only once
+  // same-context handling has been passed; gather them under the same
+  // conditions so the pass cost is unchanged.
+  const contextDiffers = !(sameBranch && sameHead && !takeover);
+  const staleBasedOn =
+    !sameBranch && peerBasedOn !== null && shippedBase !== null && peerBasedOn !== shippedBase;
+  const peerHeadInLocalHistory =
+    contextDiffers && (sameBranch || staleBasedOn)
+      ? yield* isAncestor(cwd, payload.headOid, localState.headOid)
+      : false;
+  const fastForwardSafe =
+    contextDiffers && sameBranch
+      ? yield* isAncestor(cwd, localState.headOid, payload.headOid)
+      : false;
+  const markerTree = contextDiffers ? yield* resolveOid(cwd, `${appliedMarker}^{tree}`) : null;
+  const localPeerBranchOid =
+    contextDiffers && !sameBranch ? yield* resolveOid(cwd, payload.branchRef) : null;
+  const peerBranchHasLocalCommits =
+    localPeerBranchOid !== null && !(yield* isAncestor(cwd, localPeerBranchOid, payload.headOid));
+
+  const facts: WipContextFacts = {
+    branchName: payload.branchRef.slice("refs/heads/".length),
+    sameBranch,
+    sameHead,
+    conflictAlreadyResolved:
+      ownBasedOn === appliedCommit &&
+      localContextCaptured &&
+      (recordedConflictPeer === newestCommit || legacyRecordedConflictPeer === newestCommit),
+    exactShippedEcho:
+      shippedBase !== null &&
+      peerBasedOn === shippedBase &&
+      ownPayload?.commitOid === shippedBase &&
+      ownPayload.branchRef === payload.branchRef &&
+      ownPayload.headOid === payload.headOid &&
+      ownPayload.treeOid === payload.treeOid,
+    newestIsApplied: newestCommit === appliedCommit,
+    newestTreeIsWorktree: newestTree === worktreeTree,
+    staleBasedOn,
+    provenEcho: staleBasedOn && newestTree === peerHeadTree && peerHeadInLocalHistory,
+    peerBehind: contextDiffers && sameBranch && peerHeadInLocalHistory,
+    fastForwardSafe,
+    // A user may deliberately clean/reset an earlier synchronized WIP tree.
+    // Git-clean at HEAD is still an untouched checkout for branch movement;
+    // a retained applied marker must not manufacture local edits forever.
+    untouched: (markerTree === worktreeTree || headTree === worktreeTree) && localContextCaptured,
+    hasInFlightTurn: options.hasInFlightTurn === true,
+    peerBranchHasLocalCommits,
+  };
+
+  // ── Decide, then execute ───────────────────────────────────────────────
+  const decision = classifyWipApply(facts, takeover);
+  if (decision._tag === "skip") {
     return { _tag: "skipped" } as WipApplyOutcome;
   }
-  if (
-    shippedBase !== null &&
-    basedOn === shippedBase &&
-    ownPayload?.commitOid === shippedBase &&
-    ownPayload.branchRef === payload.branchRef &&
-    ownPayload.headOid === payload.headOid &&
-    ownPayload.treeOid === payload.treeOid
-  ) {
+  if (decision._tag === "blocked") {
+    return { _tag: "blocked", reason: decision.reason } as WipApplyOutcome;
+  }
+  if (decision._tag === "advanceMarker") {
     yield* git.execute({
       operation: "WipSnapshotReactor.updateAppliedMarker",
       cwd,
@@ -438,92 +655,11 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     });
     return { _tag: "skipped" } as WipApplyOutcome;
   }
+
   let mergeBaseOverride: string | null = null;
-
-  if (sameBranch && sameHead && !options.takeover) {
-    if (newestCommit === appliedCommit) {
-      return { _tag: "skipped" } as WipApplyOutcome;
-    }
-    if (newestTree === worktreeTree) {
-      yield* git.execute({
-        operation: "WipSnapshotReactor.updateAppliedMarker",
-        cwd,
-        args: ["update-ref", appliedMarker, newestCommit],
-      });
-      return { _tag: "skipped" } as WipApplyOutcome;
-    }
-  } else {
-    const branchName = payload.branchRef.slice("refs/heads/".length);
-    // A peer can publish its pre-apply branch just after this machine ships a
-    // newer branch transition. Its Based-On then names an older local
-    // snapshot. Never let that delayed echo reverse the newer branch; a real
-    // concurrent branch choice must be explicit through takeover.
-    if (
-      !options.takeover &&
-      !sameBranch &&
-      basedOn !== null &&
-      shippedBase !== null &&
-      basedOn !== shippedBase
-    ) {
-      // A clean snapshot is dismissible as a delayed echo ONLY when proven:
-      // its position must already be contained in our history (peer HEAD is
-      // an ancestor of ours). An unproven clean different-branch snapshot is
-      // a real divergence — dismissing it as an echo would settle both
-      // machines on "Synced" while they silently drift apart (review
-      // finding 2026-07-15); block so takeover stays offered.
-      return newestTree === peerHeadTree &&
-        (yield* isAncestor(cwd, payload.headOid, localState.headOid))
-        ? ({ _tag: "skipped" } as WipApplyOutcome)
-        : ({
-            _tag: "blocked",
-            reason: `the other machine is on ${branchName}`,
-          } as WipApplyOutcome);
-    }
-
-    const peerBehind = sameBranch && (yield* isAncestor(cwd, payload.headOid, localState.headOid));
-    if (peerBehind && !options.takeover) {
-      return { _tag: "skipped" } as WipApplyOutcome;
-    }
-
-    const fastForward = sameBranch && (yield* isAncestor(cwd, localState.headOid, payload.headOid));
-    const markerTree = yield* resolveOid(cwd, `${appliedMarker}^{tree}`);
-    // A user may deliberately clean/reset an earlier synchronized WIP tree.
-    // Git-clean at HEAD is still an untouched checkout for branch movement;
-    // a retained applied marker must not manufacture local edits forever.
-    const untouched =
-      (markerTree === worktreeTree || headTree === worktreeTree) && localContextCaptured;
-
-    if (options.hasInFlightTurn === true) {
-      return {
-        _tag: "blocked",
-        reason: "an agent is working in this project; try again when it finishes",
-      } as WipApplyOutcome;
-    }
-    if (!options.takeover && !untouched) {
-      return {
-        _tag: "blocked",
-        reason: sameBranch
-          ? `the other machine moved ${branchName} forward; you have local edits`
-          : `the other machine is on ${branchName}`,
-      } as WipApplyOutcome;
-    }
-    if (!options.takeover && sameBranch && !fastForward) {
-      return {
-        _tag: "blocked",
-        reason: `${branchName} has diverged between your machines`,
-      } as WipApplyOutcome;
-    }
-
-    if (!sameBranch && !options.takeover) {
-      const localBranchOid = yield* resolveOid(cwd, payload.branchRef);
-      if (localBranchOid !== null && !(yield* isAncestor(cwd, localBranchOid, payload.headOid))) {
-        return {
-          _tag: "blocked",
-          reason: `${branchName} has local commits on this machine`,
-        } as WipApplyOutcome;
-      }
-    }
-
+  if (decision._tag !== "mergeSameContext") {
+    // Park before ANY HEAD move — per-branch parked refs make auto-switch
+    // and takeover lossless, and multi-branch WIP survives switching.
     const parked = yield* captureWipSnapshot({
       cwd,
       workspaceProjectId: target.workspaceProjectId,
@@ -541,38 +677,35 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
         ],
       });
     }
-
-    if (sameBranch) {
-      if (fastForward && !options.takeover) {
-        yield* git.execute({
-          operation: "WipSnapshotReactor.fastForward",
-          cwd,
-          // The untouched-tree guard above proves the checkout still equals
-          // the last applied snapshot. Reproduce the peer's committed state
-          // first; the per-file pass below then reapplies its WIP tree on top.
-          // This handles both newly committed files and files that already
-          // arrived as untracked WIP before becoming committed.
-          args: ["reset", "--hard", payload.headOid],
-        });
-      } else {
-        yield* git.execute({
-          operation: "WipSnapshotReactor.takeoverReset",
-          cwd,
-          args: ["reset", "--hard", payload.headOid],
-        });
-        yield* git.execute({
-          operation: "WipSnapshotReactor.takeoverClean",
-          cwd,
-          args: ["clean", "-fd"],
-        });
-      }
+    if (decision._tag === "fastForward") {
+      yield* git.execute({
+        operation: "WipSnapshotReactor.fastForward",
+        cwd,
+        // The untouched fact proved the checkout still equals the last
+        // applied snapshot. Reproduce the peer's committed state first; the
+        // per-file pass below then reapplies its WIP tree on top. This
+        // handles both newly committed files and files that already arrived
+        // as untracked WIP before becoming committed.
+        args: ["reset", "--hard", payload.headOid],
+      });
+    } else if (decision._tag === "reproduceReset") {
+      yield* git.execute({
+        operation: "WipSnapshotReactor.takeoverReset",
+        cwd,
+        args: ["reset", "--hard", payload.headOid],
+      });
+      yield* git.execute({
+        operation: "WipSnapshotReactor.takeoverClean",
+        cwd,
+        args: ["clean", "-fd"],
+      });
     } else {
       yield* git.execute({
         operation: "WipSnapshotReactor.switchBranch",
         cwd,
-        args: ["switch", "-C", branchName, payload.headOid],
+        args: ["switch", "-C", facts.branchName, payload.headOid],
       });
-      if (options.takeover) {
+      if (decision.clean) {
         yield* git.execute({
           operation: "WipSnapshotReactor.takeoverClean",
           cwd,
@@ -600,7 +733,7 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   const base =
     mergeBaseOverride ??
     (cleanAtHead ? yield* resolveOid(cwd, "HEAD") : null) ??
-    localAppliedCommit ??
+    appliedCommit ??
     (yield* resolveOid(cwd, "HEAD")) ??
     EMPTY_TREE_OID;
   // Our last-shipped snapshot: knows about files we authored (the applied
@@ -649,12 +782,12 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
       }
     }
   }
-  const basedOnPeer = yield* readBasedOnPeer(cwd, newest.refName);
+  const peerBasedOnPeer = yield* readBasedOnPeer(cwd, newest.refName);
   // The peer snapshot provably descends from our last shipment: its Based-On
   // (or the transported conflict proof) names that exact commit. Only then is
   // our shipped snapshot common history usable as a per-file merge base.
   const peerSawOurShipment =
-    shippedBase !== null && (basedOn === shippedBase || basedOnPeer === shippedBase);
+    shippedBase !== null && (peerBasedOn === shippedBase || peerBasedOnPeer === shippedBase);
 
   const hashWorking = (relativePath: string) =>
     git
@@ -715,7 +848,7 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     // the peer's snapshot provably descends from a state that had the file;
     // otherwise the peer simply hasn't seen it yet and absence means nothing.
     if (shippedOnlyDeletes.has(relativePath)) {
-      const seenState = basedOnPeer === shippedBase ? shippedBase : basedOn;
+      const seenState = peerBasedOnPeer === shippedBase ? shippedBase : peerBasedOn;
       const seenByPeer =
         seenState === null ? null : yield* resolveOid(cwd, `${seenState}:${relativePath}`);
       if (seenByPeer === null) {
@@ -727,51 +860,29 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     const shippedPathOid =
       shippedBase === null ? null : yield* resolveOid(cwd, `${shippedBase}:${relativePath}`);
     const ourOid = yield* hashWorking(relativePath); // null = absent locally
-    // Last-synced version: the selected merge base's copy. Dirty checkouts
-    // additionally fall back to what we last shipped — but ONLY when that
-    // shipment is provably common history: the path is absent locally (a
-    // local deletion of a file we authored must not read as untouched
-    // absence), the peer's deletion of it carried Based-On proof, or the
-    // peer snapshot descends from our shipment (its edit is a reply, not a
-    // concurrent write). An unproven concurrent snapshot must NOT use our
-    // own shipment as base: our unacknowledged edit would compare equal to
-    // it, read "untouched", and the peer's bytes would silently overwrite
-    // local work (accept-m35 no-clobber regression, 2026-07-15).
-    const shippedBaseUsable =
-      ourOid === null || peerSawOurShipment || shippedOnlyDeletes.has(relativePath);
-    const baseOid = markerBaseOid ?? (cleanAtHead || !shippedBaseUsable ? null : shippedPathOid);
-    const baseSourceTree = baseOid === null ? null : markerBaseOid !== null ? base : shippedBase;
-
-    if (ourOid === peerOid) {
-      continue; // already at the peer's state (same content, or deleted on both)
-    }
-    // A clean checkout can mean an intentional deletion of a file we authored.
-    // Preserve it while the peer merely echoes the exact shipped bytes. If the
-    // peer has DIFFERENT bytes at the same path, it recreated the filename from
-    // clean state; apply that new file instead of manufacturing a conflict.
-    if (
-      cleanAtHead &&
-      markerBaseOid === null &&
-      ourOid === null &&
-      shippedPathOid !== null &&
-      peerOid === shippedPathOid
-    ) {
+    const resolution = resolveWipPathAction({
+      ourOid,
+      peerOid,
+      markerBaseOid,
+      shippedPathOid,
+      cleanAtHead,
+      peerSawOurShipment,
+      shippedOnlyDelete: shippedOnlyDeletes.has(relativePath),
+    });
+    const baseSourceTree =
+      resolution.baseSource === "marker"
+        ? base
+        : resolution.baseSource === "shipped"
+          ? shippedBase
+          : null;
+    if (resolution.action === "skip" || resolution.action === "keepOurs") {
       continue;
     }
-    const localUntouched = ourOid === baseOid; // both null (absent both) counts as untouched
-    if (!localUntouched) {
-      // WE changed this file since the last sync (edited or deleted it). If the
-      // peer still holds exactly the synced version (peerOid === baseOid) they
-      // did NOT touch it — our change wins silently and our next capture
-      // propagates it (this is a clean local delete, not a conflict). Only a
-      // genuine both-sides change is surfaced as a conflict.
-      if (peerOid !== baseOid) {
-        holdConflict(relativePath, baseSourceTree);
-      }
+    if (resolution.action === "conflict") {
+      holdConflict(relativePath, baseSourceTree);
       continue;
     }
-
-    if (peerOid === null) {
+    if (resolution.action === "deleteLocal") {
       // Peer deleted a file we hadn't touched: remove it locally.
       yield* fs.remove(absolutePath, { force: true }).pipe(
         Effect.catchCause((cause) =>
