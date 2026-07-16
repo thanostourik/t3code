@@ -48,6 +48,12 @@ function shellStatusForSnapshot(
 
 const SHELL_SYNCHRONIZATION_ERROR_MESSAGE = "Could not synchronize environment data.";
 
+function withoutCachedRoamingWipStatus(
+  snapshot: OrchestrationShellSnapshot,
+): OrchestrationShellSnapshot {
+  return snapshot.roamingWipStatus.length === 0 ? snapshot : { ...snapshot, roamingWipStatus: [] };
+}
+
 export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")(function* () {
   const supervisor = yield* EnvironmentSupervisor;
   const cache = yield* EnvironmentCacheStore;
@@ -64,6 +70,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         Effect.as(Option.none<OrchestrationShellSnapshot>()),
       ),
     ),
+    Effect.map(Option.map(withoutCachedRoamingWipStatus)),
   );
   const state = yield* SubscriptionRef.make<EnvironmentShellState>({
     snapshot: cachedSnapshot,
@@ -76,7 +83,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   const persist = Effect.fn("EnvironmentShellState.persist")(function* (
     snapshot: OrchestrationShellSnapshot,
   ) {
-    yield* cache.saveShell(environmentId, snapshot).pipe(
+    yield* cache.saveShell(environmentId, withoutCachedRoamingWipStatus(snapshot)).pipe(
       Effect.catch((error) =>
         Effect.logWarning("Could not persist environment shell cache.").pipe(
           Effect.annotateLogs({
