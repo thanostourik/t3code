@@ -659,6 +659,7 @@ const make = Effect.gen(function* () {
 
       // Mirrored bundle blobs (the no-push-rights transport) import into the
       // same local namespace, then both sources compete on committer date.
+      const payloads = new Map<string, RoamingWipPayload>();
       const importBundles = Effect.gen(function* () {
         const manifest = yield* blobStore
           .manifest()
@@ -681,6 +682,7 @@ const make = Effect.gen(function* () {
             imported = addNotice(imported, `undecodable work-in-progress blob: ${ref.key}`);
             continue;
           }
+          payloads.set(`${payload.refName}\0${payload.commitOid}`, payload);
           // Origin-mode freshness beacons carry no pack — the origin fetch
           // above is their transport.
           if (payload.bundleBase64.length === 0) {
@@ -731,11 +733,72 @@ const make = Effect.gen(function* () {
         (left, right) => right.committedAtUnix - left.committedAtUnix,
       )[0]!;
       const environment = newest.refName.split("/").pop() ?? "unknown";
+      const payload = payloads.get(`${newest.refName}\0${newest.commitOid}`);
+      if (
+        payload === undefined ||
+        payload.schemaVersion < 2 ||
+        payload.branchRef === undefined ||
+        payload.headOid === undefined ||
+        !payload.branchRef.startsWith("refs/heads/")
+      ) {
+        return {
+          status: "skipped",
+          detail: "legacy work in progress has no branch context",
+          record: addNotice(
+            next,
+            "work in progress not applied: update the project on the other machine first",
+          ),
+        };
+      }
 
       const newestTree = yield* gitExec(
         ["rev-parse", "-q", "--verify", `${newest.refName}^{tree}`],
         "roaming.materializer.wip-tree",
       );
+      const snapshotParent = yield* gitExec(
+        ["rev-parse", "-q", "--verify", `${newest.refName}^`],
+        "roaming.materializer.wip-parent",
+      );
+      const validBranch = yield* gitExec(
+        ["check-ref-format", payload.branchRef],
+        "roaming.materializer.wip-branch",
+      );
+      if (
+        newestTree.exitCode !== 0 ||
+        newestTree.stdout.trim() !== payload.treeOid ||
+        snapshotParent.exitCode !== 0 ||
+        snapshotParent.stdout.trim() !== payload.headOid ||
+        validBranch.exitCode !== 0
+      ) {
+        return {
+          status: "skipped",
+          detail: "work-in-progress metadata does not match its ref",
+          record: addNotice(next, "work in progress not applied: snapshot metadata mismatch"),
+        };
+      }
+
+      const branchName = payload.branchRef.slice("refs/heads/".length);
+      const branchBefore = yield* gitExec(
+        ["symbolic-ref", "-q", "HEAD"],
+        "roaming.materializer.wip-current-branch",
+      );
+      const headBefore = yield* gitExec(
+        ["rev-parse", "-q", "--verify", "HEAD"],
+        "roaming.materializer.wip-current-head",
+      );
+      if (
+        branchBefore.stdout.trim() !== payload.branchRef ||
+        headBefore.stdout.trim() !== payload.headOid
+      ) {
+        const switched = yield* gitExec(
+          ["switch", "-C", branchName, payload.headOid],
+          "roaming.materializer.wip-switch",
+        );
+        if (switched.exitCode !== 0) {
+          return yield* stepError("internal", "work-in-progress branch could not be checked out");
+        }
+      }
+
       const headTree = yield* gitExec(
         ["rev-parse", "-q", "--verify", "HEAD^{tree}"],
         "roaming.materializer.head-tree",
@@ -745,9 +808,24 @@ const make = Effect.gen(function* () {
         headTree.exitCode === 0 &&
         newestTree.stdout.trim() === headTree.stdout.trim()
       ) {
+        const appliedMarker = yield* wipAppliedMarkerRefName(record.workspaceProjectId).pipe(
+          Effect.mapError(internalError("applied marker name failed")),
+        );
+        yield* gitExec(
+          ["update-ref", appliedMarker, newest.commitOid],
+          "roaming.materializer.wip-applied-marker",
+        );
         return {
-          status: "skipped",
-          detail: "work in progress already matches the checkout",
+          status:
+            branchBefore.stdout.trim() === payload.branchRef &&
+            headBefore.stdout.trim() === payload.headOid
+              ? "skipped"
+              : "completed",
+          detail:
+            branchBefore.stdout.trim() === payload.branchRef &&
+            headBefore.stdout.trim() === payload.headOid
+              ? "work in progress already matches the checkout"
+              : `checked out ${branchName}; no uncommitted changes to restore`,
           record: next,
         };
       }

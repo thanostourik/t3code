@@ -42,10 +42,9 @@ dead.
 
 ## Status
 
-M0–M3.7 done (2026-07-04 → 2026-07-10; results in the history file).
-**M3.8 (branch-aware sync model) is the active milestone and a SHIP GATE:
-nothing in the sync feature ships until it lands.** Model decided by the
-user 2026-07-11 (see Binding decisions). M4–M7 queue behind it.
+M0–M3.8 done (2026-07-04 → 2026-07-11; results in the history file).
+The branch-aware ship gate is closed. M4–M7 remain queued; no later milestone
+is active.
 
 ## Thesis
 
@@ -109,6 +108,7 @@ history file.
   untouched checkout; every blocked state gets a minimal explicit takeover
   action (pulled forward from M5); local work parks per branch in hidden
   refs before any switch. Legacy (branch-blind) snapshots never auto-apply.
+  Takeover status is live-only and never restored from the client shell cache.
 
 ## Architecture
 
@@ -180,7 +180,7 @@ restore-WIP is branch-aware: if the newest snapshot's branch differs from
 the clone's default branch, materialize creates and checks out that branch
 at the snapshot's HEAD before restoring the dirty diff.
 
-### WIP sync — branch-aware model (M3.8)
+### WIP sync — branch-aware model
 
 **The unit of sync is the full git working state: branch + HEAD commit +
 dirty tree.** A snapshot without its branch/HEAD context is meaningless —
@@ -194,8 +194,17 @@ trailer, written to `refs/t3/wip/<wsid>/<envid>`, shipped via origin push
 (force-with-lease) or bundle blob fallback. Payload v2 adds `branchRef`
 (symbolic HEAD; sentinel for detached/unborn) and `headOid`. Snapshots
 capture the clean state too (a stale dirty snapshot must never shadow
-committed work). Triggers: fs watch (debounced), 2-min sweep, turn
-completion, enrollment, graceful shutdown.
+committed work). Capture no-op identity is the full
+`(branchRef, headOid, treeOid)` tuple, so a branch/HEAD move with an unchanged
+tree still ships. Triggers: fs watch (debounced), 2-min sweep, turn completion,
+enrollment, graceful shutdown, plus a lightweight branch/HEAD poll so clean
+CLI switches and commits do not wait for the sweep (`.git` is intentionally
+outside the filesystem watcher).
+
+Origin-ref snapshots join branch context from the mirrored v2 beacon by an
+exact `(refName, commitOid)` match. A fetched ref without matching v2 metadata
+is legacy context and never auto-applies; ref ancestry alone cannot recover
+the checked-out branch.
 
 **Apply — reproduce completely or touch nothing.** Given peer snapshot
 `{branch Bp, head Hp, tree Tp}` and local `{branch Bl, head Hl}`, classify
@@ -209,16 +218,20 @@ by ancestry (merge-base), never wall clock:
 | Peer behind | Hp ancestor of Hl | Skip (marker bookkeeping only). |
 | Diverged / detached / legacy payload | everything else | **Blocked.** Divergence resolution UI is M5. |
 
-**Untouched** = worktree tree equals the applied-marker tree, no
-merge/rebase/cherry-pick in progress, no in-flight agent turn in the
-project. Auto-switch on an untouched checkout is accepted behavior (user
-decision 2026-07-11): it is the roaming promise, and parking makes it
-lossless.
+**Untouched** = worktree tree equals either the applied-marker tree or the
+current HEAD tree (a Git-clean checkout stays untouched when retained sync
+metadata describes earlier WIP); no merge/rebase/cherry-pick in progress; no
+in-flight agent turn in the project; local branch/HEAD still matches this
+machine's latest captured payload (or the applied payload before its first
+local capture). The turn guard uses a project-level projection query (the
+current thread repository has no session-state query).
+Auto-switch on an untouched checkout is accepted behavior (user decision
+2026-07-11): it is the roaming promise, and parking makes it lossless.
 
 **Parked refs:** before any HEAD move, local state snapshots to
 `refs/t3/wip-parked/<wsid>/<branch>` (per branch — work on multiple branches
-survives switching). Returning to a branch with a parked snapshot restores
-it.
+survives switching). A branch return observed while T3 is running restores
+the snapshot once. Startup alone never restores a parked ref.
 
 **Takeover (minimal, pulled forward from M5):** every blocked state surfaces
 one explicit action — park local state, switch/create the peer's branch at
@@ -294,7 +307,7 @@ detail live in the history and reference files.
 | M3.5 — Sync completion | Auto-apply delivery, fs-watch capture, freshness beacon, shutdown snapshot, t3sync manifests, size guards. | ✅ 2026-07-07. |
 | M3.6 — Field round 2 | Vault delivery on arrival, based-on fast-forward, sync visibility (blockedReason + pill). | ✅ 2026-07-07. |
 | M3.7 — Sync hardening | Per-file WIP merge, two-machine deletion model, sync pill data path, title propagation, vault interval backbone, watcher budget, mirror/wait long-poll, delivery-latency exit criteria. | ✅ 2026-07-10. |
-| **M3.8 — Branch-aware sync model (SHIP GATE)** | Model decided 2026-07-11 (see Binding decisions and the WIP design section). Slices, each a PR into `feature/roaming`: (1) contracts + capture payload v2 (`branchRef`, `headOid`, legacy tolerance); (2) apply classifier + guards replacing the timestamp-vs-HEAD staleness gate — same-context keeps per-file merge, every other case blocks with a specific reason (*this slice alone ends the soup; safety ships before convenience*); (3) auto fast-forward + auto branch-switch on untouched checkouts, per-branch parked refs; (4) minimal takeover command + pill action; (5) branch-aware materialize restore; (6) acceptance + plan/reference update. Migration: legacy snapshots never auto-apply (surfaced notice, age out on next capture); both machines must run the new build before behavior changes end-to-end; no ref renames or marker migration. | **ACTIVE.** `accept-m38.mjs` on the harness, field scenario verbatim: A creates a branch, commits, merges to master, pushes — B, clean on master, ends checked out on master at the merge commit with clean `git status`, asserting no uncommitted soup after *each* stage. Variants: B dirty on master → blocked + reason, tree untouched; B on its own branch → blocked; takeover from B lands on A's branch with A's WIP, B's work parked and restorable; materialize of a branch-WIP project checks out that branch. `accept-m35/m36/m37` + canonical re-run stay green (scripts asserting branch-blind apply get revised with the milestone, not worked around). |
+| M3.8 — Branch-aware sync model (SHIP GATE) | Full working-state snapshots, ancestry classifier, safe HEAD transitions, parking/takeover, branch-aware materialize. | ✅ 2026-07-11. |
 | M4 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M5 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | Takeover applies newest snapshot and moves the lease; two-sided divergence shows diff-and-choose; the losing side stays recoverable. Canonical re-run. |
 | M6 — Briefs + transcripts | Step 7 + "Conversations" pairing row. | Threads from A readable on B; park produces an editable brief; resume seeds a new local thread. Canonical re-run. |
