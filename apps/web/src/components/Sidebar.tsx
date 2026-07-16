@@ -19,12 +19,23 @@ import { SortableContext, useSortable } from "@dnd-kit/sortable";
 import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
+<<<<<<< HEAD
   canSnooze,
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+=======
+  type ContextMenuItem,
+  ProjectId,
+  type ScopedThreadRef,
+  type ResolvedKeybindingsConfig,
+  type SidebarProjectGroupingMode,
+  ThreadId,
+  WorkspaceProjectId,
+} from "@t3tools/contracts";
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
 import {
   parseScopedThreadKey,
   scopeProjectRef,
@@ -87,6 +98,40 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import { isElectron } from "../env";
+<<<<<<< HEAD
+=======
+import { useOpenPrLink } from "../lib/openPullRequestLink";
+import { isTerminalFocused } from "../lib/terminalFocus";
+import { isMacPlatform } from "../lib/utils";
+import {
+  readThreadShell,
+  useProject,
+  useProjects,
+  useEnvironmentRoamingWipStatus,
+  useRoamingMaterializations,
+  useRoamingProjects,
+  useServerConfigs,
+  useThreadShells,
+  useThreadShellsForProjectRefs,
+} from "../state/entities";
+import type { EnvironmentRoamingProject } from "@t3tools/client-runtime/state/projects";
+import {
+  listRoamingPeers,
+  materializeRoamingProject,
+  takeoverRoamingWip,
+} from "../environments/primary/roaming";
+import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
+import { useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { useThreadDiscoveredPorts } from "../portDiscoveryState";
+import { openDiscoveredPort } from "./preview/openDiscoveredPort";
+import { useAtomCommand } from "../state/use-atom-command";
+import { previewEnvironment } from "../state/preview";
+import {
+  legacyProjectCwdPreferenceKey,
+  resolveProjectExpanded,
+  useUiStateStore,
+} from "../uiStateStore";
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
 import {
   resolveShortcutCommand,
   shortcutLabelForCommand,
@@ -2259,10 +2304,9 @@ const joinTargetPath = (baseDirectory: string, dirName: string): string => {
  * setting is never modified from here.
  */
 /**
- * Per-project sync health (M3.6): silent while everything is fine, a dot +
- * tooltip when the user should know something — recent activity, a blocked
- * apply (changes on both machines), or an error. Data is the wip status the
- * server already streams; no new concepts, no "roaming" wording.
+ * Per-project sync health: a persistent state for enabled, completed,
+ * blocked, and failed sync. Data is the wip status the server already
+ * streams; no new concepts, no "roaming" wording.
  */
 function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undefined }) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -2271,18 +2315,36 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
   const entry = props.workspaceProjectId
     ? wipStatus.find((candidate) => candidate.workspaceProjectId === props.workspaceProjectId)
     : undefined;
+  const [takingOver, setTakingOver] = useState(false);
+  const takeOver = useCallback(() => {
+    if (!props.workspaceProjectId || takingOver) return;
+    setTakingOver(true);
+    void takeoverRoamingWip({
+      workspaceProjectId: WorkspaceProjectId.make(props.workspaceProjectId),
+    })
+      .then(({ applied }) => {
+        if (!applied) throw new Error("The other machine's state is no longer available.");
+        toastManager.add({ type: "success", title: "Switched to the other machine's work" });
+      })
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: "Could not switch project state",
+          description: error instanceof Error ? error.message : "Try again in a moment.",
+        });
+      })
+      .finally(() => setTakingOver(false));
+  }, [props.workspaceProjectId, takingOver]);
 
-  // Re-render on a clock so "Syncing…" clears and "Synced 3m" stays fresh even
-  // when no new status arrives. 1s while activity is recent, 20s once idle.
+  // Re-render on a clock so "Synced 3m" stays fresh even when no new status
+  // arrives. Capture/apply timestamps record completed operations; they must
+  // never be presented as work still in progress.
   const lastActivityIso = entry?.lastAppliedAt ?? entry?.lastPushedAt;
   const [now, setNow] = useState(() => Date.now());
-  const syncingWindowMs = 6_000;
-  const recentlyActive =
-    lastActivityIso !== undefined && now - Date.parse(lastActivityIso) < syncingWindowMs;
   useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), recentlyActive ? 1_000 : 20_000);
+    const interval = window.setInterval(() => setNow(Date.now()), 20_000);
     return () => window.clearInterval(interval);
-  }, [recentlyActive]);
+  }, []);
 
   if (!entry) {
     // Enrolled + WIP sync on, but no status row in the shell snapshot yet
@@ -2310,7 +2372,7 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
 
   // A persistent pill so "sync is on and healthy" is always visible — not a
   // dot that vanishes after two minutes. States, most-urgent first:
-  //   error → red · blocked → amber · in-flight → spinner · idle → green.
+  //   error → red · blocked → amber · completed activity → green · idle.
   type Pill = { icon: "spinner" | "dot"; dotClass: string; text: string; tip: string };
   let pill: Pill;
   if (entry.lastError) {
@@ -2322,10 +2384,10 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
     };
   } else if (entry.blockedReason) {
     pill = {
-      icon: "dot",
+      icon: takingOver ? "spinner" : "dot",
       dotClass: "bg-amber-500",
-      text: "Waiting",
-      tip: "Sync waiting: this machine and the other one both changed the same files — commit or discard on one side to continue",
+      text: takingOver ? "Switching…" : "Take over",
+      tip: `${entry.blockedReason}. Take over to park this machine's work and switch to the other machine's state.`,
     };
   } else if (entry.notice) {
     // Degraded but working (e.g. file watching unavailable): sync still
@@ -2335,15 +2397,6 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       dotClass: "bg-amber-500",
       text: "Sync on",
       tip: entry.notice,
-    };
-  } else if (recentlyActive) {
-    pill = {
-      icon: "spinner",
-      dotClass: "",
-      text: "Syncing…",
-      tip: entry.lastAppliedAt
-        ? `Receiving changes from your other machine (${formatRelativeTimeLabel(entry.lastAppliedAt)})`
-        : "Sending your changes to your other machine",
     };
   } else if (lastActivityIso !== undefined) {
     pill = {
@@ -2368,7 +2421,22 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       <TooltipTrigger
         render={
           <span
+            role={entry.takeoverAvailable ? "button" : undefined}
+            tabIndex={entry.takeoverAvailable ? 0 : undefined}
             aria-label={pill.tip}
+            aria-disabled={takingOver || undefined}
+            onPointerDown={(event) => entry.takeoverAvailable && event.stopPropagation()}
+            onClick={(event) => {
+              if (!entry.takeoverAvailable) return;
+              event.stopPropagation();
+              takeOver();
+            }}
+            onKeyDown={(event) => {
+              if (!entry.takeoverAvailable || (event.key !== "Enter" && event.key !== " ")) return;
+              event.preventDefault();
+              event.stopPropagation();
+              takeOver();
+            }}
             className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
           >
             {pill.icon === "spinner" ? (

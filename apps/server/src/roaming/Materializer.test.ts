@@ -32,7 +32,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import * as GitVcsDriverModule from "../vcs/GitVcsDriver.ts";
 import { Materializer, layer as MaterializerLayer } from "./Materializer.ts";
-import { captureWipSnapshot } from "./WipSnapshots.ts";
+import { captureWipSnapshot, type CaptureWipResult } from "./WipSnapshots.ts";
 import { PeerMirror } from "./PeerMirror.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as RoamingBlobStoreLayer } from "./RoamingBlobStore.ts";
@@ -42,6 +42,7 @@ const WORKSPACE_PROJECT_ID = WorkspaceProjectId.make("wp-materializer");
 const REMOTE_URL = "https://example.test/owner/materializer.git";
 
 const encodeRegistryPayload = Schema.encodeEffect(Schema.fromJsonString(RoamingRegistryPayload));
+const encodeWipPayload = Schema.encodeEffect(Schema.fromJsonString(RoamingWipPayload));
 
 const peerMirrorStub = Layer.succeed(PeerMirror, {
   start: () => Effect.void,
@@ -599,6 +600,30 @@ const setupAuthorAndOrigin = (input: { readonly workspaceProjectId: WorkspacePro
 
 const AUTHOR_ENVIRONMENT_ID = EnvironmentId.make("env-author");
 
+const writeWipMetadata = Effect.fn("MaterializerTest.writeWipMetadata")(function* (
+  workspaceProjectId: WorkspaceProjectId,
+  captured: CaptureWipResult,
+  bundleBase64 = "",
+) {
+  const store = yield* RoamingBlobStore;
+  const payload = yield* encodeWipPayload({
+    schemaVersion: 2,
+    capturedAt: "2026-07-11T00:00:00.000Z",
+    refName: captured.refName,
+    commitOid: captured.commitOid,
+    treeOid: captured.treeOid,
+    branchRef: captured.branchRef,
+    headOid: captured.headOid,
+    bundleBase64,
+  });
+  yield* store.writeLocal({
+    kind: "wip",
+    key: `${workspaceProjectId}/${AUTHOR_ENVIRONMENT_ID}`,
+    workspaceProjectId,
+    payload,
+  });
+});
+
 it.effect("Materializer restore-wip applies the newest origin snapshot", () =>
   Effect.gen(function* () {
     const dispatches = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
@@ -620,6 +645,7 @@ it.effect("Materializer restore-wip applies the newest origin snapshot", () =>
         });
         assert.isNotNull(captured);
         yield* rawGit(authorPath, ["push", "origin", `${captured!.refName}:${captured!.refName}`]);
+        yield* writeWipMetadata(wsid, captured!);
 
         const target = path.join(root, "materialized");
         const materializer = yield* Materializer;
@@ -633,6 +659,55 @@ it.effect("Materializer restore-wip applies the newest origin snapshot", () =>
         assert.match(wipStep?.detail ?? "", /applied work in progress from env-author/);
         assert.equal(yield* fs.readFileString(path.join(target, "tracked.txt")), "dirty\n");
         assert.equal(yield* fs.readFileString(path.join(target, "scratch.txt")), "untracked\n");
+      }),
+    );
+
+    yield* program.pipe(Effect.provide(makeRealGitLayer({ dispatches, projectRows })));
+  }),
+);
+
+it.effect("Materializer restore-wip checks out the snapshot branch", () =>
+  Effect.gen(function* () {
+    const dispatches = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+    const projectRows = yield* Ref.make<ReadonlyArray<ProjectionProject>>([]);
+    const wsid = WorkspaceProjectId.make("wp-mat-wip-branch");
+
+    const program = Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { root, authorPath } = yield* setupAuthorAndOrigin({ workspaceProjectId: wsid });
+        yield* rawGit(authorPath, ["switch", "-c", "feature/materialized"]);
+        yield* fs.writeFileString(path.join(authorPath, "branch.txt"), "committed\n");
+        yield* rawGit(authorPath, ["add", "branch.txt"]);
+        yield* rawGit(authorPath, ["commit", "-m", "branch commit"]);
+        yield* fs.writeFileString(path.join(authorPath, "wip.txt"), "dirty\n");
+        const captured = yield* captureWipSnapshot({
+          cwd: authorPath,
+          workspaceProjectId: wsid,
+          environmentId: AUTHOR_ENVIRONMENT_ID,
+          vaultExcludePaths: [],
+        });
+        assert.isNotNull(captured);
+        yield* rawGit(authorPath, ["push", "origin", `${captured!.refName}:${captured!.refName}`]);
+        yield* writeWipMetadata(wsid, captured!);
+
+        const target = path.join(root, "materialized");
+        const materializer = yield* Materializer;
+        const record = yield* materializer.materialize({
+          workspaceProjectId: wsid,
+          targetPath: target,
+        });
+        assert.equal(record.status, "completed");
+        assert.equal(
+          (yield* rawGit(target, ["branch", "--show-current"])).stdout.trim(),
+          "feature/materialized",
+        );
+        assert.equal(
+          (yield* rawGit(target, ["rev-parse", "HEAD"])).stdout.trim(),
+          captured!.headOid,
+        );
+        assert.equal(yield* fs.readFileString(path.join(target, "wip.txt")), "dirty\n");
       }),
     );
 
@@ -659,6 +734,7 @@ it.effect("Materializer restore-wip skips when the snapshot matches the checkout
         });
         assert.isNotNull(captured);
         yield* rawGit(authorPath, ["push", "origin", `${captured!.refName}:${captured!.refName}`]);
+        yield* writeWipMetadata(wsid, captured!);
 
         const target = path.join(root, "materialized");
         const materializer = yield* Materializer;
@@ -708,21 +784,7 @@ it.effect("Materializer restore-wip restores from a mirrored bundle blob", () =>
           "--remotes=origin",
         ]);
         const bundleBytes = yield* fs.readFile(bundlePath);
-        const store = yield* RoamingBlobStore;
-        const wipPayload = yield* Schema.encodeEffect(Schema.fromJsonString(RoamingWipPayload))({
-          schemaVersion: 1,
-          capturedAt: "2026-07-07T00:00:00.000Z",
-          refName: captured!.refName,
-          commitOid: captured!.commitOid,
-          treeOid: captured!.treeOid,
-          bundleBase64: Buffer.from(bundleBytes).toString("base64"),
-        });
-        yield* store.writeLocal({
-          kind: "wip",
-          key: `${wsid}/${AUTHOR_ENVIRONMENT_ID}`,
-          workspaceProjectId: wsid,
-          payload: wipPayload,
-        });
+        yield* writeWipMetadata(wsid, captured!, Buffer.from(bundleBytes).toString("base64"));
 
         const target = path.join(root, "materialized");
         const materializer = yield* Materializer;

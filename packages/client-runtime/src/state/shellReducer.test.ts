@@ -169,6 +169,14 @@ describe("applyShellStreamEvent", () => {
     expect(errored.roamingWipStatus).toHaveLength(1);
     expect(errored.roamingWipStatus[0]?.mode).toBe("bundle");
     expect(errored.roamingWipStatus[0]?.lastError).toBe("push failed");
+
+    const replaced = applyShellStreamEvent(errored, {
+      kind: "roaming-wip-status-replaced",
+      sequence: 0,
+      wipStatuses: [],
+    });
+    expect(replaced.roamingWipStatus).toEqual([]);
+    expect(replaced.snapshotSequence).toBe(10);
   });
 
   it("ignores stale project upserts without mutating the snapshot", () => {

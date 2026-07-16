@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import {
   ProjectId,
   ThreadId,
@@ -5,6 +6,9 @@ import {
   ProviderInstanceId,
   OrchestrationProposedPlanId,
 } from "@t3tools/contracts";
+=======
+import { ProjectId, ThreadId, ProviderInstanceId, TurnId } from "@t3tools/contracts";
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -469,6 +473,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
     }),
   );
 
+<<<<<<< HEAD
   it.effect("round-trips manual and branch pull requests through the thread row", () =>
     Effect.gen(function* () {
       const threads = yield* ProjectionThreadRepository;
@@ -492,28 +497,49 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5.4",
         },
+=======
+  it.effect("reports active turns by project", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("project-active-turn");
+      const threadId = ThreadId.make("thread-active-turn");
+      yield* threads.upsert({
+        threadId,
+        projectId,
+        title: "Active turn",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
         runtimeMode: "full-access",
         interactionMode: "default",
         branch: null,
         worktreePath: null,
+<<<<<<< HEAD
         linkedPullRequest,
         branchPullRequest,
         latestTurnId: null,
+=======
+        latestTurnId: TurnId.make("turn-active"),
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
         createdAt: "2026-03-24T00:00:00.000Z",
         updatedAt: "2026-03-24T00:00:00.000Z",
         archivedAt: null,
         settledOverride: null,
         settledAt: null,
+<<<<<<< HEAD
         unsettledAt: null,
         snoozedUntil: null,
         snoozedAt: null,
         pinnedAt: null,
+=======
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
         latestUserMessageAt: null,
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         deletedAt: null,
       });
+<<<<<<< HEAD
 
       const persisted = yield* threads.getById({ threadId: ThreadId.make("thread-linked-pr") });
       assert.deepStrictEqual(Option.getOrNull(persisted)?.linkedPullRequest, linkedPullRequest);
@@ -534,6 +560,21 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       const branchCleared = yield* threads.getById({ threadId: row.threadId });
       assert.strictEqual(Option.getOrNull(branchCleared)?.branchPullRequest, null);
       assert.deepStrictEqual(Option.getOrNull(branchCleared)?.linkedPullRequest, linkedPullRequest);
+=======
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_instance_id, runtime_mode,
+          active_turn_id, last_error, updated_at
+        ) VALUES (
+          ${threadId}, 'running', 'codex', 'codex', 'full-access',
+          'turn-active', NULL, '2026-03-24T00:00:00.000Z'
+        )
+      `;
+
+      assert.isTrue(yield* threads.hasActiveTurnByProjectId({ projectId }));
+      yield* sql`UPDATE projection_thread_sessions SET active_turn_id = NULL WHERE thread_id = ${threadId}`;
+      assert.isFalse(yield* threads.hasActiveTurnByProjectId({ projectId }));
+>>>>>>> 3b8cc1c27 (Roaming M3.8: branch-aware sync model — implementation, field hardening 1-7, audit fixes)
     }),
   );
 

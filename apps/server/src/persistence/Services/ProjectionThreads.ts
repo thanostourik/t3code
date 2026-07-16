@@ -100,6 +100,11 @@ export interface ProjectionThreadRepositoryShape {
     input: ListProjectionThreadsByProjectInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThread>, ProjectionRepositoryError>;
 
+  /** Whether any thread in the project currently has an active provider turn. */
+  readonly hasActiveTurnByProjectId: (
+    input: ListProjectionThreadsByProjectInput,
+  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
+
   /**
    * Soft-delete a projected thread row by id.
    */

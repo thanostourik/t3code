@@ -369,6 +369,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
         Layer.succeed(WipSnapshotReactor, {
           start: () => Effect.void,
           snapshotProject: () => Effect.void,
+          takeover: () => Effect.succeed(false),
           snapshotAll: () => Effect.void,
           listStatuses: () => Effect.succeed([]),
           subscribeUpdates: Effect.die("unused in cli tests"),
