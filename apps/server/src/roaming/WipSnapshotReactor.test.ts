@@ -1365,21 +1365,6 @@ testLayer("WipSnapshotReactor", (it) => {
         peer.commitOid,
       );
 
-      // Field-state migration: builds before this fix wrote the same pinned
-      // marker without the peer trailer. Preserve its exact tree/timestamp.
-      const markerTree = yield* gitStdout(localPath, ["rev-parse", `${appliedMarker}^{tree}`]);
-      const markerDate = yield* gitStdout(localPath, ["show", "-s", "--format=%cI", appliedMarker]);
-      const legacyMarker = yield* withCommitterDate(
-        markerDate,
-        gitStdout(localPath, [
-          "commit-tree",
-          markerTree,
-          "-m",
-          "t3 wip applied marker (conflicts pinned to base)",
-        ]),
-      );
-      yield* git(localPath, ["update-ref", appliedMarker, legacyMarker]);
-
       // Capturing the kept-local result acknowledges this exact conflict.
       // Relaunch/re-scan must not recreate Take over for the same peer commit;
       // a later peer commit remains eligible for evaluation.
