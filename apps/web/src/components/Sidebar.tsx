@@ -3013,10 +3013,9 @@ const joinTargetPath = (baseDirectory: string, dirName: string): string => {
  * setting is never modified from here.
  */
 /**
- * Per-project sync health (M3.6): silent while everything is fine, a dot +
- * tooltip when the user should know something — recent activity, a blocked
- * apply (changes on both machines), or an error. Data is the wip status the
- * server already streams; no new concepts, no "roaming" wording.
+ * Per-project sync health: a persistent state for enabled, completed,
+ * blocked, and failed sync. Data is the wip status the server already
+ * streams; no new concepts, no "roaming" wording.
  */
 function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undefined }) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -3046,17 +3045,15 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       .finally(() => setTakingOver(false));
   }, [props.workspaceProjectId, takingOver]);
 
-  // Re-render on a clock so "Syncing…" clears and "Synced 3m" stays fresh even
-  // when no new status arrives. 1s while activity is recent, 20s once idle.
+  // Re-render on a clock so "Synced 3m" stays fresh even when no new status
+  // arrives. Capture/apply timestamps record completed operations; they must
+  // never be presented as work still in progress.
   const lastActivityIso = entry?.lastAppliedAt ?? entry?.lastPushedAt;
   const [now, setNow] = useState(() => Date.now());
-  const syncingWindowMs = 6_000;
-  const recentlyActive =
-    lastActivityIso !== undefined && now - Date.parse(lastActivityIso) < syncingWindowMs;
   useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), recentlyActive ? 1_000 : 20_000);
+    const interval = window.setInterval(() => setNow(Date.now()), 20_000);
     return () => window.clearInterval(interval);
-  }, [recentlyActive]);
+  }, []);
 
   if (!entry) {
     // Enrolled + WIP sync on, but no status row in the shell snapshot yet
@@ -3084,7 +3081,7 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
 
   // A persistent pill so "sync is on and healthy" is always visible — not a
   // dot that vanishes after two minutes. States, most-urgent first:
-  //   error → red · blocked → amber · in-flight → spinner · idle → green.
+  //   error → red · blocked → amber · completed activity → green · idle.
   type Pill = { icon: "spinner" | "dot"; dotClass: string; text: string; tip: string };
   let pill: Pill;
   if (entry.lastError) {
@@ -3109,15 +3106,6 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       dotClass: "bg-amber-500",
       text: "Sync on",
       tip: entry.notice,
-    };
-  } else if (recentlyActive) {
-    pill = {
-      icon: "spinner",
-      dotClass: "",
-      text: "Syncing…",
-      tip: entry.lastAppliedAt
-        ? `Receiving changes from your other machine (${formatRelativeTimeLabel(entry.lastAppliedAt)})`
-        : "Sending your changes to your other machine",
     };
   } else if (lastActivityIso !== undefined) {
     pill = {

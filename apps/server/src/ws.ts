@@ -1150,12 +1150,14 @@ const makeWsRpcLayer = (
                 ),
               );
 
-              const liveStream = roamingEnabled
-                ? Stream.merge(
-                    domainLiveStream,
-                    Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
-                  )
-                : domainLiveStream;
+              // Pairing turns roaming on after the shell subscription already
+              // exists. Keep the live sources attached so that transition can
+              // publish registry, materialization, and WIP status immediately;
+              // the producers themselves are gated while roaming is off.
+              const liveStream = Stream.merge(
+                domainLiveStream,
+                Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
+              );
 
               // When the client already holds a shell snapshot (cached, or loaded
               // over HTTP) it passes that snapshot's sequence, and we resume by
@@ -1196,9 +1198,9 @@ const makeWsRpcLayer = (
                             }),
                         ),
                       );
-                    const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> =
+                    const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = yield* (
                       roamingEnabled
-                        ? yield* Effect.gen(function* () {
+                        ? Effect.gen(function* () {
                             const [shell, wipStatuses] = yield* Effect.all([
                               projectionSnapshotQuery.getShellSnapshot(),
                               wipSnapshotReactor.listStatuses(),
@@ -1218,24 +1220,29 @@ const makeWsRpcLayer = (
                                 materialization,
                               });
                             }
-                            for (const wipStatus of wipStatuses) {
-                              items.push({
-                                kind: "roaming-wip-status-updated",
-                                sequence: 0,
-                                wipStatus,
-                              });
-                            }
+                            items.push({
+                              kind: "roaming-wip-status-replaced",
+                              sequence: 0,
+                              wipStatuses,
+                            });
                             return items;
-                          }).pipe(
-                            Effect.mapError(
-                              (cause) =>
-                                new OrchestrationGetSnapshotError({
-                                  message: "Failed to seed roaming shell overlay on resume",
-                                  cause,
-                                }),
-                            ),
-                          )
-                        : [];
+                          })
+                        : Effect.succeed([
+                            {
+                              kind: "roaming-wip-status-replaced" as const,
+                              sequence: 0,
+                              wipStatuses: [],
+                            },
+                          ])
+                    ).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new OrchestrationGetSnapshotError({
+                            message: "Failed to seed roaming shell overlay on resume",
+                            cause,
+                          }),
+                      ),
+                    );
                     return Stream.concat(
                       Stream.fromIterable(roamingCatchUp),
                       Stream.concat(catchUpStream, Stream.fromQueue(liveBuffer)),

@@ -64,6 +64,8 @@ import {
   COMMIT_ENV_IDENTITY,
   captureWipSnapshot,
   readBasedOn,
+  readBasedOnPeer,
+  readConflictPeer,
   resolveOid,
   wipAppliedMarkerRefName,
   wipParkedRefName,
@@ -263,7 +265,7 @@ export class WipSnapshotReactor extends Context.Service<
 const encodeWipPayloadJson = Schema.encodeEffect(Schema.fromJsonString(RoamingWipPayload));
 
 const PERMISSION_STDERR =
-  /permission denied|403|forbidden|not authorized|access denied|read.?only|protected ref|pre-receive hook declined/i;
+  /permission denied|403|forbidden|not authorized|access denied|read.?only|protected ref|hidden ref|remote rejected|pre-receive hook declined/i;
 
 const LEASE_STDERR = /stale info|\[rejected\]|fetch first|failed to push some refs/i;
 
@@ -472,6 +474,7 @@ export type WipPassOutcome =
 export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTarget")(function* (
   target: WipTarget,
   mode: WipTransportMode,
+  options: { readonly acknowledgeApplied?: boolean } = {},
 ) {
   const git = yield* GitVcsDriver;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -537,6 +540,11 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
   const appliedNow = yield* resolveOid(cwd, appliedMarkerRef);
   const shippedBasedOn =
     shippedCommitSpec === null ? null : yield* readBasedOn(cwd, shippedCommitSpec);
+  const appliedConflictPeer = appliedNow === null ? null : yield* readConflictPeer(cwd, appliedNow);
+  const shippedBasedOnPeer =
+    shippedCommitSpec === null ? null : yield* readBasedOnPeer(cwd, shippedCommitSpec);
+  const conflictProofRecorded =
+    appliedConflictPeer === null || shippedBasedOnPeer === appliedConflictPeer;
   const appliedPayload = yield* payloadForCommit(target.workspaceProjectId, appliedNow);
   const shippedIdentity =
     shippedPayload?.branchRef === undefined || shippedPayload.headOid === undefined
@@ -547,10 +555,14 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
           treeOid: shippedPayload.treeOid,
         };
   const noOpSnapshots = [
-    ...(shippedIdentity !== null && shippedTree !== null && appliedNow === shippedBasedOn
+    ...(shippedIdentity !== null &&
+    shippedTree !== null &&
+    appliedNow === shippedBasedOn &&
+    conflictProofRecorded
       ? [shippedIdentity]
       : []),
-    ...(appliedPayload?.branchRef !== undefined &&
+    ...(!options.acknowledgeApplied &&
+    appliedPayload?.branchRef !== undefined &&
     appliedPayload.headOid !== undefined &&
     appliedNow !== shippedBasedOn
       ? [
@@ -640,9 +652,15 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         } satisfies RoamingWipStatusEntry;
       }
       // The origin→bundle flip captures before knowing the blob baseline:
-      // skip the write when the blob already carries this exact tree.
+      // skip the write only when the blob already carries this exact working
+      // state. Branch and HEAD are part of the identity even when the tree is
+      // unchanged.
       const shippedBlob = yield* bundleShipped(target.workspaceProjectId, environmentId);
-      if (shippedBlob?.treeOid === captured.treeOid) {
+      if (
+        shippedBlob?.treeOid === captured.treeOid &&
+        shippedBlob.branchRef === captured.branchRef &&
+        shippedBlob.headOid === captured.headOid
+      ) {
         return { ...entryBase, mode: "bundle" } satisfies RoamingWipStatusEntry;
       }
       const content = yield* fs.readFile(bundlePath);
@@ -862,10 +880,17 @@ export const restoreParkedWipForTarget = Effect.fn("WipSnapshotReactor.restorePa
     if (status.stdout.trim().length > 0) return false;
     const checkpoints = vcs.checkpoints;
     if (checkpoints === undefined) return false;
-    return yield* checkpoints.restoreCheckpoint({
+    const restored = yield* checkpoints.restoreCheckpoint({
       cwd: target.workspaceRoot,
       checkpointRef: CheckpointRef.make(parkedRef),
     });
+    if (!restored) return false;
+    yield* git.execute({
+      operation: "WipSnapshotReactor.consumeParkedRef",
+      cwd: target.workspaceRoot,
+      args: ["update-ref", "-d", parkedRef, parkedOid],
+    });
+    return true;
   },
 );
 
@@ -967,12 +992,36 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     yield* Effect.gen(function* () {
       const bundlePath = pathService.join(tempDir, "wip.bundle");
       yield* fs.writeFile(bundlePath, Buffer.from(payload.bundleBase64, "base64"));
-      yield* git.execute({
+      let imported = yield* git.execute({
         operation: "WipSnapshotReactor.fetchPeerWipBundle",
         cwd,
         args: ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
         allowNonZeroExit: true,
       });
+      // Bundle creation omits objects advertised by the normal remote. The
+      // receiver may not have fetched a newly pushed branch/merge yet, so an
+      // otherwise valid bundle can report a missing prerequisite. Refresh
+      // ordinary remote refs and retry once before rejecting the payload.
+      if (imported.exitCode !== 0 && remote !== null) {
+        yield* git.execute({
+          operation: "WipSnapshotReactor.fetchBundlePrerequisites",
+          cwd,
+          args: ["fetch", remote],
+          allowNonZeroExit: true,
+        });
+        imported = yield* git.execute({
+          operation: "WipSnapshotReactor.retryPeerWipBundle",
+          cwd,
+          args: ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
+          allowNonZeroExit: true,
+        });
+      }
+      if (imported.exitCode !== 0) {
+        yield* Effect.logWarning("roaming wip: peer bundle import failed", {
+          workspaceProjectId: target.workspaceProjectId,
+          stderr: imported.stderr.trim().slice(0, 200),
+        });
+      }
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logDebug("roaming wip: peer bundle import failed", { cause }),
@@ -1012,15 +1061,29 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   if (candidates.length === 0) {
     return { _tag: "skipped" } as WipApplyOutcome;
   }
-  const newest = [...candidates].sort((left, right) => right.unix - left.unix)[0]!;
+  // Reinstalls and interrupted bundle imports can leave orphan refs behind.
+  // Never let an unmatched stale ref outrank the current mirrored snapshot
+  // and manufacture a false legacy/takeover state.
+  let newest: (typeof candidates)[number] | undefined;
+  let newestCommit: string | null = null;
+  let payload: RoamingWipPayload | undefined;
+  for (const candidate of [...candidates].sort((left, right) => right.unix - left.unix)) {
+    const commit = yield* resolveOid(cwd, candidate.refName);
+    const candidatePayload =
+      commit === null ? undefined : payloads.get(`${candidate.refName}\0${commit}`);
+    if (candidatePayload !== undefined) {
+      newest = candidate;
+      newestCommit = commit;
+      payload = candidatePayload;
+      break;
+    }
+  }
+  if (newest === undefined || newestCommit === null || payload === undefined) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
   const newestUnix = newest.unix;
   const fromEnvironmentId = EnvironmentId.make(newest.refName.split("/").pop() ?? "unknown");
-
-  const newestCommit = yield* resolveOid(cwd, newest.refName);
-  const payload =
-    newestCommit === null ? undefined : payloads.get(`${newest.refName}\0${newestCommit}`);
   if (
-    payload === undefined ||
     payload.schemaVersion < 2 ||
     payload.branchRef === undefined ||
     payload.headOid === undefined
@@ -1040,12 +1103,16 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     vaultExcludePaths: excludePaths,
   });
   const worktreeTree = localState.treeOid;
+  const headTree = yield* resolveOid(cwd, "HEAD^{tree}");
+  const cleanAtHead = headTree === worktreeTree;
   const newestTree = yield* resolveOid(cwd, `${newest.refName}^{tree}`);
+  const peerHeadTree = yield* resolveOid(cwd, `${payload.headOid}^{tree}`);
   const peerParent = yield* resolveOid(cwd, `${newest.refName}^`);
   const appliedCommit = yield* resolveOid(cwd, appliedMarker);
   if (
     newestCommit === null ||
     newestTree === null ||
+    peerHeadTree === null ||
     newestTree !== payload.treeOid ||
     peerParent !== payload.headOid ||
     !(yield* validBranchRef(cwd, payload.branchRef)) ||
@@ -1079,6 +1146,45 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     (localContextBaseline.branchRef === localState.branchRef &&
       localContextBaseline.headOid === localState.headOid);
   const basedOn = yield* readBasedOn(cwd, newest.refName);
+  const ownBasedOn =
+    ownPayload === null || ownPayload === undefined
+      ? null
+      : yield* readBasedOn(cwd, ownPayload.commitOid);
+  const recordedConflictPeer =
+    appliedCommit === null ? null : yield* readConflictPeer(cwd, appliedCommit);
+  let legacyRecordedConflictPeer: string | null = null;
+  if (
+    recordedConflictPeer === null &&
+    appliedCommit !== null &&
+    ownBasedOn === appliedCommit &&
+    localContextCaptured
+  ) {
+    const marker = yield* git.execute({
+      operation: "WipSnapshotReactor.readLegacyConflictMarker",
+      cwd,
+      args: ["show", "-s", "--format=%s%x00%ct", appliedCommit],
+      allowNonZeroExit: true,
+    });
+    const [subject, timestamp] = marker.stdout.trim().split("\0");
+    if (
+      marker.exitCode === 0 &&
+      subject === "t3 wip applied marker (conflicts pinned to base)" &&
+      Number(timestamp) + 1 === newestUnix
+    ) {
+      legacyRecordedConflictPeer = newestCommit;
+    }
+  }
+  // Once this machine has captured its kept-local result after a conflict,
+  // the exact peer snapshot is resolved here. Reprocessing it on every boot
+  // recreates a false Take over forever; a new peer commit still re-evaluates.
+  if (
+    !options.takeover &&
+    ownBasedOn === appliedCommit &&
+    localContextCaptured &&
+    (recordedConflictPeer === newestCommit || legacyRecordedConflictPeer === newestCommit)
+  ) {
+    return { _tag: "skipped" } as WipApplyOutcome;
+  }
   if (
     shippedBase !== null &&
     basedOn === shippedBase &&
@@ -1109,6 +1215,33 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
       return { _tag: "skipped" } as WipApplyOutcome;
     }
   } else {
+    const branchName = payload.branchRef.slice("refs/heads/".length);
+    // A peer can publish its pre-apply branch just after this machine ships a
+    // newer branch transition. Its Based-On then names an older local
+    // snapshot. Never let that delayed echo reverse the newer branch; a real
+    // concurrent branch choice must be explicit through takeover.
+    if (
+      !options.takeover &&
+      !sameBranch &&
+      basedOn !== null &&
+      shippedBase !== null &&
+      basedOn !== shippedBase
+    ) {
+      // A clean snapshot is dismissible as a delayed echo ONLY when proven:
+      // its position must already be contained in our history (peer HEAD is
+      // an ancestor of ours). An unproven clean different-branch snapshot is
+      // a real divergence — dismissing it as an echo would settle both
+      // machines on "Synced" while they silently drift apart (review
+      // finding 2026-07-15); block so takeover stays offered.
+      return newestTree === peerHeadTree &&
+        (yield* isAncestor(cwd, payload.headOid, localState.headOid))
+        ? ({ _tag: "skipped" } as WipApplyOutcome)
+        : ({
+            _tag: "blocked",
+            reason: `the other machine is on ${branchName}`,
+          } as WipApplyOutcome);
+    }
+
     const peerBehind = sameBranch && (yield* isAncestor(cwd, payload.headOid, localState.headOid));
     if (peerBehind && !options.takeover) {
       return { _tag: "skipped" } as WipApplyOutcome;
@@ -1116,9 +1249,11 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
 
     const fastForward = sameBranch && (yield* isAncestor(cwd, localState.headOid, payload.headOid));
     const markerTree = yield* resolveOid(cwd, `${appliedMarker}^{tree}`);
-    const untouchedTree = markerTree ?? (yield* resolveOid(cwd, "HEAD^{tree}"));
-    const untouched = untouchedTree === worktreeTree && localContextCaptured;
-    const branchName = payload.branchRef.slice("refs/heads/".length);
+    // A user may deliberately clean/reset an earlier synchronized WIP tree.
+    // Git-clean at HEAD is still an untouched checkout for branch movement;
+    // a retained applied marker must not manufacture local edits forever.
+    const untouched =
+      (markerTree === worktreeTree || headTree === worktreeTree) && localContextCaptured;
 
     if (options.hasInFlightTurn === true) {
       return {
@@ -1174,7 +1309,12 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
         yield* git.execute({
           operation: "WipSnapshotReactor.fastForward",
           cwd,
-          args: ["merge", "--ff-only", payload.headOid],
+          // The untouched-tree guard above proves the checkout still equals
+          // the last applied snapshot. Reproduce the peer's committed state
+          // first; the per-file pass below then reapplies its WIP tree on top.
+          // This handles both newly committed files and files that already
+          // arrived as untracked WIP before becoming committed.
+          args: ["reset", "--hard", payload.headOid],
         });
       } else {
         yield* git.execute({
@@ -1213,14 +1353,16 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   // lands even while local edits exist on OTHER files; a file both sides
   // changed is left as ours and surfaced as a conflict. Same safety
   // contract as the vault delivery that already works both ways.
-  // Base = the state we last synced FROM the peer (the applied marker), else
-  // our own HEAD, else the empty tree. Both "which files the peer changed"
-  // and "did WE touch this file" are measured against it — so a file whose
-  // current content equals the base is one we have not modified since the
-  // last sync (even if that content itself came from a prior peer apply).
+  // A Git-clean checkout has authoritatively discarded any older WIP recorded
+  // by the applied marker. Using that stale marker as the per-file base makes
+  // a newly re-created same-name file look like a conflict, then turns the
+  // clean checkout's absence into a destructive deletion on the author.
+  // Rebase clean state to HEAD; only dirty checkouts need the applied marker
+  // to distinguish local edits from the last synced version.
   const base =
     mergeBaseOverride ??
-    (yield* resolveOid(cwd, appliedMarker)) ??
+    (cleanAtHead ? yield* resolveOid(cwd, "HEAD") : null) ??
+    localAppliedCommit ??
     (yield* resolveOid(cwd, "HEAD")) ??
     EMPTY_TREE_OID;
   // Our last-shipped snapshot: knows about files we authored (the applied
@@ -1269,7 +1411,12 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
       }
     }
   }
-  const basedOnOid = shippedOnlyDeletes.size === 0 ? null : yield* readBasedOn(cwd, newest.refName);
+  const basedOnPeer = yield* readBasedOnPeer(cwd, newest.refName);
+  // The peer snapshot provably descends from our last shipment: its Based-On
+  // (or the transported conflict proof) names that exact commit. Only then is
+  // our shipped snapshot common history usable as a per-file merge base.
+  const peerSawOurShipment =
+    shippedBase !== null && (basedOn === shippedBase || basedOnPeer === shippedBase);
 
   const hashWorking = (relativePath: string) =>
     git
@@ -1330,25 +1477,48 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
     // the peer's snapshot provably descends from a state that had the file;
     // otherwise the peer simply hasn't seen it yet and absence means nothing.
     if (shippedOnlyDeletes.has(relativePath)) {
+      const seenState = basedOnPeer === shippedBase ? shippedBase : basedOn;
       const seenByPeer =
-        basedOnOid === null ? null : yield* resolveOid(cwd, `${basedOnOid}:${relativePath}`);
+        seenState === null ? null : yield* resolveOid(cwd, `${seenState}:${relativePath}`);
       if (seenByPeer === null) {
         continue;
       }
     }
     const peerOid = yield* resolveOid(cwd, `${newest.refName}:${relativePath}`); // null = deleted by peer
-    // Last-synced version: the applied-marker's copy, else what WE last shipped
-    // (shippedBase). The fallback is what stops a locally-created file we then
-    // deleted from looking "untouched" and being re-added from the peer.
     const markerBaseOid = yield* resolveOid(cwd, `${base}:${relativePath}`);
-    const baseOid =
-      markerBaseOid ??
-      (shippedBase === null ? null : yield* resolveOid(cwd, `${shippedBase}:${relativePath}`));
-    const baseSourceTree = baseOid === null ? null : markerBaseOid !== null ? base : shippedBase;
+    const shippedPathOid =
+      shippedBase === null ? null : yield* resolveOid(cwd, `${shippedBase}:${relativePath}`);
     const ourOid = yield* hashWorking(relativePath); // null = absent locally
+    // Last-synced version: the selected merge base's copy. Dirty checkouts
+    // additionally fall back to what we last shipped — but ONLY when that
+    // shipment is provably common history: the path is absent locally (a
+    // local deletion of a file we authored must not read as untouched
+    // absence), the peer's deletion of it carried Based-On proof, or the
+    // peer snapshot descends from our shipment (its edit is a reply, not a
+    // concurrent write). An unproven concurrent snapshot must NOT use our
+    // own shipment as base: our unacknowledged edit would compare equal to
+    // it, read "untouched", and the peer's bytes would silently overwrite
+    // local work (accept-m35 no-clobber regression, 2026-07-15).
+    const shippedBaseUsable =
+      ourOid === null || peerSawOurShipment || shippedOnlyDeletes.has(relativePath);
+    const baseOid = markerBaseOid ?? (cleanAtHead || !shippedBaseUsable ? null : shippedPathOid);
+    const baseSourceTree = baseOid === null ? null : markerBaseOid !== null ? base : shippedBase;
 
     if (ourOid === peerOid) {
       continue; // already at the peer's state (same content, or deleted on both)
+    }
+    // A clean checkout can mean an intentional deletion of a file we authored.
+    // Preserve it while the peer merely echoes the exact shipped bytes. If the
+    // peer has DIFFERENT bytes at the same path, it recreated the filename from
+    // clean state; apply that new file instead of manufacturing a conflict.
+    if (
+      cleanAtHead &&
+      markerBaseOid === null &&
+      ourOid === null &&
+      shippedPathOid !== null &&
+      peerOid === shippedPathOid
+    ) {
+      continue;
     }
     const localUntouched = ourOid === baseOid; // both null (absent both) counts as untouched
     if (!localUntouched) {
@@ -1508,6 +1678,8 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
             treeResult.stdout.trim(),
             "-m",
             "t3 wip applied marker (conflicts pinned to base)",
+            "-m",
+            `T3-Peer-Snapshot: ${newestCommit}`,
           ],
           env: {
             ...markerEnv,
@@ -1578,6 +1750,7 @@ const make = Effect.gen(function* () {
   const statuses = yield* Ref.make(new Map<WorkspaceProjectId, RoamingWipStatusEntry>());
   const modes = yield* Ref.make(new Map<WorkspaceProjectId, WipTransportMode>());
   const gitContexts = yield* Ref.make(new Map<WorkspaceProjectId, string>());
+  const pendingParkedRestores = yield* Ref.make(new Set<WorkspaceProjectId>());
   const updates = yield* PubSub.unbounded<RoamingWipStatusEntry>();
 
   const vcs = yield* VcsDriver;
@@ -1612,7 +1785,7 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  const recordGitContext = (target: WipTarget) =>
+  const readGitContext = (target: WipTarget) =>
     Effect.gen(function* () {
       const branch = yield* git.execute({
         operation: "WipSnapshotReactor.recordBranch",
@@ -1621,7 +1794,12 @@ const make = Effect.gen(function* () {
         allowNonZeroExit: true,
       });
       const headOid = yield* providePassDeps(resolveOid(target.workspaceRoot, "HEAD"));
-      const context = `${branch.exitCode === 0 ? branch.stdout.trim() : "detached"}\0${headOid ?? "unborn"}`;
+      return `${branch.exitCode === 0 ? branch.stdout.trim() : "detached"}\0${headOid ?? "unborn"}`;
+    });
+
+  const recordGitContext = (target: WipTarget) =>
+    Effect.gen(function* () {
+      const context = yield* readGitContext(target);
       yield* Ref.update(gitContexts, (contexts) =>
         new Map(contexts).set(target.workspaceProjectId, context),
       );
@@ -1684,22 +1862,46 @@ const make = Effect.gen(function* () {
       yield* publishEntry(message === null ? rest : { ...rest, notice: message });
     });
 
-  const processTarget = (target: WipTarget) =>
+  const processTarget = (
+    target: WipTarget,
+    options: { readonly acknowledgeApplied?: boolean } = {},
+  ) =>
     Effect.gen(function* () {
       if (!(yield* isEnabled)) {
         return;
       }
       const mode =
         (yield* Ref.get(modes)).get(target.workspaceProjectId) ?? ("origin-refs" as const);
-      yield* providePassDeps(restoreParkedWipForTarget(target));
+      const recordedContext = (yield* Ref.get(gitContexts)).get(target.workspaceProjectId);
+      const contextChanged =
+        recordedContext !== undefined && recordedContext !== (yield* readGitContext(target));
+      if (contextChanged) {
+        yield* Ref.update(pendingParkedRestores, (pending) =>
+          new Set(pending).add(target.workspaceProjectId),
+        );
+      }
+      if ((yield* Ref.get(pendingParkedRestores)).has(target.workspaceProjectId)) {
+        const restored = yield* providePassDeps(restoreParkedWipForTarget(target));
+        if (restored) {
+          yield* Ref.update(pendingParkedRestores, (pending) => {
+            const next = new Set(pending);
+            next.delete(target.workspaceProjectId);
+            return next;
+          });
+        }
+      }
       // The commit we last shipped, read BEFORE capture overwrites the pushed
       // marker with this pass's snapshot — so apply can tell a locally-created
       // file we just deleted from a genuinely new peer file (the delete flap).
-      const shippedBaseOid = yield* providePassDeps(
-        wipPushedMarkerRefName(target.workspaceProjectId, environmentId).pipe(
-          Effect.flatMap((ref) => resolveOid(target.workspaceRoot, ref)),
-        ),
-      );
+      const shippedBaseOid =
+        mode === "bundle"
+          ? ((yield* providePassDeps(bundleShipped(target.workspaceProjectId, environmentId)))
+              ?.commitOid ?? null)
+          : yield* providePassDeps(
+              wipPushedMarkerRefName(target.workspaceProjectId, environmentId).pipe(
+                Effect.flatMap((ref) => resolveOid(target.workspaceRoot, ref)),
+              ),
+            );
       const hasInFlightTurn = yield* threadRepository
         .hasActiveTurnByProjectId({ projectId: target.localProjectId })
         .pipe(Effect.orElseSucceed(() => true));
@@ -1710,7 +1912,7 @@ const make = Effect.gen(function* () {
       // merge preserves local files, so local work remains recoverable. The
       // reverse order shipped the receiver's stale pre-apply branch back to
       // the author and created a branch-feedback loop.
-      const outcome = yield* providePassDeps(runWipPassForTarget(target, mode));
+      const outcome = yield* providePassDeps(runWipPassForTarget(target, mode, options));
       if (outcome._tag === "done") {
         yield* Ref.update(modes, (map) =>
           new Map(map).set(target.workspaceProjectId, outcome.nextMode),
@@ -1965,7 +2167,13 @@ const make = Effect.gen(function* () {
       const outcome = yield* providePassDeps(
         runWipApplyForTarget(target, undefined, { hasInFlightTurn, takeover: true }),
       );
-      if (outcome._tag !== "applied") return false;
+      // applied-with-conflicts is still a SUCCESSFUL takeover: the branch
+      // switch and reset already happened by the time conflicts are known
+      // (a leftover ignored file colliding with a peer path, a failed
+      // restore). Reporting false here would toast an error over a mutated
+      // worktree and skip the acknowledgement capture the peer needs to
+      // clear its own "Take over".
+      if (outcome._tag !== "applied" && outcome._tag !== "applied-with-conflicts") return false;
       const previous = (yield* Ref.get(statuses)).get(workspaceProjectId) ?? {
         workspaceProjectId,
         mode: "origin-refs" as const,
@@ -1976,6 +2184,7 @@ const make = Effect.gen(function* () {
         lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
         lastAppliedFrom: outcome.fromEnvironmentId,
       });
+      yield* processTarget(target, { acknowledgeApplied: true });
       return true;
     }).pipe(
       Effect.catchCause((cause) =>
@@ -2064,15 +2273,24 @@ const make = Effect.gen(function* () {
                   captured?.branchRef !== undefined &&
                   captured.headOid !== undefined &&
                   `${captured.branchRef}\0${captured.headOid}` !== context;
-                const changed = yield* Ref.modify(gitContexts, (contexts) => {
+                const contextChange = yield* Ref.modify(gitContexts, (contexts) => {
                   const previous = contexts.get(target.workspaceProjectId);
                   const next = new Map(contexts).set(target.workspaceProjectId, context);
                   return [
-                    differsFromCapture || (previous !== undefined && previous !== context),
+                    {
+                      changed:
+                        differsFromCapture || (previous !== undefined && previous !== context),
+                      branchTransition: previous !== undefined && previous !== context,
+                    },
                     next,
                   ] as const;
                 });
-                if (changed) {
+                if (contextChange.branchTransition) {
+                  yield* Ref.update(pendingParkedRestores, (pending) =>
+                    new Set(pending).add(target.workspaceProjectId),
+                  );
+                }
+                if (contextChange.changed) {
                   yield* worker.enqueue(target.workspaceProjectId, target);
                 }
               }

@@ -108,6 +108,7 @@ history file.
   untouched checkout; every blocked state gets a minimal explicit takeover
   action (pulled forward from M5); local work parks per branch in hidden
   refs before any switch. Legacy (branch-blind) snapshots never auto-apply.
+  Takeover status is live-only and never restored from the client shell cache.
 
 ## Architecture
 
@@ -217,8 +218,9 @@ by ancestry (merge-base), never wall clock:
 | Peer behind | Hp ancestor of Hl | Skip (marker bookkeeping only). |
 | Diverged / detached / legacy payload | everything else | **Blocked.** Divergence resolution UI is M5. |
 
-**Untouched** = worktree tree equals the applied-marker tree when that marker
-exists, otherwise the HEAD tree; no merge/rebase/cherry-pick in progress; no
+**Untouched** = worktree tree equals either the applied-marker tree or the
+current HEAD tree (a Git-clean checkout stays untouched when retained sync
+metadata describes earlier WIP); no merge/rebase/cherry-pick in progress; no
 in-flight agent turn in the project; local branch/HEAD still matches this
 machine's latest captured payload (or the applied payload before its first
 local capture). The turn guard uses a project-level projection query (the
@@ -228,8 +230,8 @@ Auto-switch on an untouched checkout is accepted behavior (user decision
 
 **Parked refs:** before any HEAD move, local state snapshots to
 `refs/t3/wip-parked/<wsid>/<branch>` (per branch — work on multiple branches
-survives switching). Returning to a branch with a parked snapshot restores
-it.
+survives switching). A branch return observed while T3 is running restores
+the snapshot once. Startup alone never restores a parked ref.
 
 **Takeover (minimal, pulled forward from M5):** every blocked state surfaces
 one explicit action — park local state, switch/create the peer's branch at

@@ -18,8 +18,16 @@ live in `21-roaming-history.md`.
 - Acceptance scripts: `accept-m1.mjs`, `accept-m2.mjs`, `accept-m2.5.mjs`,
   `accept-m3.mjs`, `accept-m35.mjs`, `accept-m36.mjs`, `accept-m37.mjs`,
   `accept-m37-stress.mjs`, `accept-m38.mjs`. `accept-m2.5.mjs` is the
-  canonical-workflow re-run every milestone ends with. Server-to-server auth
+  canonical-workflow re-run every milestone ends with. `accept-m38.mjs`
+  runs its origins with `receive.hideRefs refs/t3` (bundle fallback) by
+  default and again with `T3_M38_TRANSPORT=origin` (origin-refs); both runs
+  must pass — the transports take different classifier baselines.
+  Server-to-server auth
   smoke test: `scripts/roaming/spike-server-to-server.mjs`.
+- WIP-classifier changes re-run the FULL ladder (m35–m38 + canonical), not
+  just the current milestone's script: fixes #4–#7 (2026-07-11→15) re-ran
+  only `accept-m38` and the m35 no-clobber guarantee regressed unnoticed
+  until the 2026-07-15 audit.
 - Run discipline: scripts and logs under /tmp, fresh harness state per
   acceptance script, no compound one-liners; stale accept-script semantics
   get revised with the milestone that changed them, never worked around.
@@ -67,13 +75,18 @@ live in `21-roaming-history.md`.
   machines, revisit at 3+) record of incoming state consumed by this
   checkout. Supplies the `T3-Based-On` trailer on capture and the primary
   per-file merge base. After a conflicted pass it points to a synthetic
-  commit with conflicted paths pinned to base.
+  commit with conflicted paths pinned to base and
+  `T3-Peer-Snapshot: <peer oid>`.
 - `refs/t3/wip-history/<wsid>/<envid>/<slot>` — 20 local rolling retention
   slots, oldest overwritten; never pushed.
 - `refs/t3/wip-parked/<wsid>/<branch>` — per-branch parked local
-  state, written before any auto/explicit branch switch. On return, a clean
-  checkout whose HEAD equals the parked snapshot parent restores that tree;
-  advanced/dirty branches leave the ref untouched and recoverable.
+  state, written before any auto/explicit branch switch. A branch transition
+  observed in the running process restores a clean checkout whose HEAD equals
+  the parked snapshot parent, then deletes the ref (one-shot). Startup never
+  restores merely because a parked ref matches the current branch;
+  advanced/dirty branches leave it untouched and recoverable. Every reactor
+  pass checks the branch/HEAD tuple directly, while the 10s context poll is a
+  fallback, so a peer event cannot race branch-return restoration.
 - `refs/t3/checkpoints/<base64url-threadId>/turn/<n>` — thread-turn
   checkpoints (upstream checkpointing subsystem, not roaming's).
 - The origin holds only the newest WIP snapshot per (project, machine); the
@@ -187,7 +200,9 @@ live in `21-roaming-history.md`.
 - Temp-index recipe in `roaming/WipSnapshots.ts` (NOT the driver op): seed
   from HEAD, `add -A`, subtract vault set, `write-tree`, `commit-tree` with
   **parent = HEAD** (thin bundles are ancestry-based; also M5's common
-  ancestor) and `T3-Based-On: <applied-marker oid>` trailer; returns
+  ancestor) and `T3-Based-On: <applied-marker oid>` trailer. When that marker
+  represents pinned conflicts, the same contiguous trailer block also carries
+  `T3-Based-On-Peer: <peer oid>`; snapshot ancestry remains unchanged. Returns
   `{ commitOid, treeOid }`. Real index and worktree untouched. Fixed
   author/committer identity.
 - Payload v2 adds `branchRef` (symbolic HEAD; sentinel for
@@ -244,32 +259,74 @@ live in `21-roaming-history.md`.
   peer HEAD descendant, untouched checkout) → `merge --ff-only` + diff on
   top; different branch (untouched, ff-safe) → park, switch, apply;
   peer-behind → skip; diverged/detached/legacy → blocked. Untouched =
-  worktree tree equals applied-marker tree (or HEAD when no marker exists) +
+  worktree tree equals the applied-marker tree or current HEAD tree +
   local branch/HEAD matches this machine's latest payload (or the applied
   payload before first local capture) + no in-progress git op + no in-flight
   agent turn. The in-flight guard uses a project-level projection query
   joining threads to sessions. Every blocked case sets a specific
-  `blockedReason` and surfaces the takeover action. The
+  `blockedReason` and surfaces the takeover action. A pinned conflict marker
+  carries `T3-Peer-Snapshot`; once this machine captures its kept-local result,
+  that exact peer commit is resolved and does not recreate takeover on restart.
+  A different peer commit is evaluated normally. The
   former "strictly newer than HEAD" committer-timestamp staleness gate is
   deleted, not kept alongside. Newest-peer selection across
   environments stays committer-timestamp (fine at 2 machines). An exact
   provenance echo (Based-On + branch/HEAD/tree all match our last shipped
   payload) advances marker bookkeeping but never reverses a newer local
-  branch switch. Reactor passes apply before capture so a receiver never
-  ships stale pre-apply context back to the author.
-- Per-file merge (M3.7, survives as the same-context path): base =
-  applied marker, else HEAD, else empty tree; peer changes via
+  branch switch. A different-branch snapshot whose Based-On predates our
+  latest shipment is suppressed as a delayed echo only when its tree equals
+  its HEAD (no peer WIP) AND its HEAD is an ancestor of ours — a proven echo,
+  its position already contained in our history. An unproven clean snapshot
+  blocks with takeover offered, never silently skips (a skip settles both
+  machines on "Synced" while divergent — audit finding 2026-07-15).
+  A dirty peer snapshot is real active work but remains
+  blocked when it does not acknowledge the latest local shipment, even if the
+  local checkout is clean. It can never auto-switch a newly reset branch.
+  The pre-apply local baseline is the pushed marker in origin-ref mode and the
+  current locally mirrored payload commit in bundle mode; a missing origin
+  marker must not disable causal classification in bundle fallback.
+  Reactor passes apply before capture so a receiver never ships stale
+  pre-apply context back to the author. Successful takeover forces one
+  acknowledgement capture even when the resulting tuple exactly equals the
+  applied peer snapshot; that
+  causal echo lets the non-taking-over machine clear its blocked status.
+  A manual Git branch switch retains any carried WIP exactly as Git leaves it;
+  the reactor never removes those files to force a parked snapshot into place.
+  Parked work restores only when the returned checkout is clean and its HEAD
+  still matches the parked snapshot's parent. Until then the parked ref stays
+  recoverable; a successful clean restore consumes it.
+- Per-file merge (M3.7, survives as the same-context path): a checkout whose
+  worktree equals `HEAD^{tree}` rebases to HEAD even when a retained applied
+  marker describes older WIP; a dirty checkout uses the applied marker, else
+  HEAD, else the empty tree. For a path missing from that base, the
+  last-shipped snapshot substitutes as base ONLY when it is provably common
+  history: the path is absent locally (our own deletion — the delete flap),
+  the path is a proof-gated shipped-only delete, or the peer snapshot's
+  `T3-Based-On`/`T3-Based-On-Peer` names our shipment (a reply, per M3.6
+  delivery). An unproven concurrent snapshot never uses our own shipment as
+  base — our unacknowledged edit would compare "untouched" against it and
+  the peer's bytes would overwrite local work (accept-m35 no-clobber
+  regression, 2026-07-15); it conflicts and keeps ours instead. Peer changes via
   `git diff --name-status --no-renames <base> <peer>`. Per path with
   `{ baseOid, peerOid, ourOid(worktree hash) }`: ours=peer → skip; local
   changed + peer unchanged → keep local silently; both changed → conflict,
   keep ours, surface; local untouched + peer deleted → remove; local
   untouched + peer content → `git restore --source=<peer> --worktree`;
-  path occupied by a directory/conflicting parent → conflict. Same-context
-  apply never touches HEAD, branch refs, or the real index; only classified
-  fast-forward, switch, and takeover paths move HEAD.
+  path occupied by a directory/conflicting parent → conflict. For a path
+  absent from clean HEAD but present in the last-shipped snapshot, an exact
+  peer echo preserves the local deletion; different peer bytes are a newly
+  recreated file and apply normally. This prevents retained metadata from
+  turning a clean reset plus same-name peer creation into false takeover and
+  a destructive deletion. Same-context apply never touches HEAD, branch refs,
+  or the real index; only classified fast-forward, switch, and takeover paths
+  move HEAD.
 - `POST /api/roaming/wip/takeover` reclassifies the newest snapshot, parks
   local state, reproduces the peer branch/HEAD/tree, and returns whether it
-  applied. The blocked project pill is the action; no separate sync UI.
+  applied. Per-file conflicts during takeover (an ignored file colliding
+  with a peer path, a failed restore) still count as applied — the branch
+  switch and reset have already happened, and the acknowledgement capture
+  must still run so the peer clears its block. The blocked project pill is
+  the action; no separate sync UI.
 - Deletion invariants (each was a field bug): (1) the applied marker
   advances EVERY pass that applies or records conflicts — clean passes to
   the peer snapshot, conflicted passes to a synthetic commit with only the
@@ -277,7 +334,10 @@ live in `21-roaming-history.md`.
   one conflict can never unrecord another file's arrival. (2) Peer-absence
   counts as a deletion beyond the marker diff only for paths we SHIPPED and
   only when the peer's `T3-Based-On` state provably contained the path.
-  (3) See the causality re-ship rule under Capture.
+  If its synthetic marker is local-only, an exact `T3-Based-On-Peer` match
+  proves acknowledgement against this machine's own shipped snapshot instead.
+  Legacy snapshots missing that proof are re-captured once. (3) See the
+  causality re-ship rule under Capture.
 - TOCTOU guard: destructive decisions re-verify against a fresh worktree
   tree in the last instant before writing.
 
@@ -291,12 +351,19 @@ live in `21-roaming-history.md`.
   resumed ws subscriptions; after restart, activity timestamps reconstruct
   from marker-ref commit dates (git is the durable store).
 - Sync pill priority: error (red) > blocked (amber, plain-language
-  guidance) > notice (amber) > recent activity (brief green) > idle.
+  guidance) > notice (amber) > completed activity (green) > idle. Capture and
+  apply timestamps describe completed work, so they render `Synced`
+  immediately; there is no timestamp-derived fake `Syncing` interval.
   Concept-free copy — no "roaming"/"sync engine" wording.
 - `blockedReason` and `takeoverAvailable` clear on every non-blocked pass.
   Branch-context reasons include
   enumerated branch-context reasons ("peer is on <branch>", "peer moved
   <branch> forward; you have local edits", divergence, legacy snapshot).
+- `roamingWipStatus` is transient reactor state, not durable shell data. The
+  client strips the entire array from shell-cache loads and writes so a cached
+  blocked row cannot resurrect `Take over` before live status arrives. Warm
+  resume receives an authoritative `roaming-wip-status-replaced` event,
+  including an empty array, before replay/live events.
 
 ## Materialize
 
