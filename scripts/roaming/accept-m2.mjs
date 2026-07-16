@@ -22,8 +22,16 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const A = { name: "instance-a", url: "http://127.0.0.1:14801", base: join(HARNESS_DIR, "instance-a/basedir") };
-const B = { name: "instance-b", url: "http://127.0.0.1:14802", base: join(HARNESS_DIR, "instance-b/basedir") };
+const A = {
+  name: "instance-a",
+  url: "http://127.0.0.1:14801",
+  base: join(HARNESS_DIR, "instance-a/basedir"),
+};
+const B = {
+  name: "instance-b",
+  url: "http://127.0.0.1:14802",
+  base: join(HARNESS_DIR, "instance-b/basedir"),
+};
 const REPO_ROOT = new URL("../..", import.meta.url).pathname;
 
 const fail = (step, detail) => {
@@ -70,7 +78,10 @@ for (const inst of [A, B]) {
 
 // Capture consent lives on the authoring machine only (per-machine setting);
 // B needs just the subsystem flag to mirror, list, and materialize.
-writeFileSync(join(A.base, "userdata", "settings.json"), JSON.stringify({ roaming: true, roamingSecretsSync: true }));
+writeFileSync(
+  join(A.base, "userdata", "settings.json"),
+  JSON.stringify({ roaming: true, roamingSecretsSync: true }),
+);
 writeFileSync(join(B.base, "userdata", "settings.json"), JSON.stringify({ roaming: true }));
 await sleep(1500); // settings watcher debounce + reactor reaction
 pass("roaming enabled on both instances (secrets capture on A)");
@@ -141,7 +152,8 @@ const addPeerResponse = await api(A.url, "/api/roaming/peers", {
   token: adminA,
   body: { baseUrls: [B.url], pairingCredential },
 });
-if (!addPeerResponse.ok) fail("addPeer", `${addPeerResponse.status} ${await addPeerResponse.text()}`);
+if (!addPeerResponse.ok)
+  fail("addPeer", `${addPeerResponse.status} ${await addPeerResponse.text()}`);
 const { peer } = await addPeerResponse.json();
 pass(`A paired with ${peer.environmentId}`);
 
@@ -200,9 +212,8 @@ const registryBlobs = await waitFor("mirror registry", 45_000, async () => {
   return titles.includes("M2 P1") && titles.includes("M2 P2") ? blobs : null;
 });
 const wpid = (title) =>
-  registryBlobs
-    .map((blob) => JSON.parse(blob.payload))
-    .find((payload) => payload.title === title).workspaceProjectId;
+  registryBlobs.map((blob) => JSON.parse(blob.payload)).find((payload) => payload.title === title)
+    .workspaceProjectId;
 const wpidP1 = wpid("M2 P1");
 const wpidP2 = wpid("M2 P2");
 pass("both projects auto-enrolled and mirrored to B (peer-added + project-created triggers)");
@@ -295,7 +306,10 @@ const p2Target = join(materializeRoot, "p2");
 const p2Result = await materialize(wpidP2, p2Target);
 if (p2Result.status !== "completed") fail("materialize p2", JSON.stringify(p2Result));
 if (!p2Result.notices.some((notice) => notice.includes("no secret files synced")))
-  fail("materialize p2", `expected "no secret files synced" notice, got ${JSON.stringify(p2Result.notices)}`);
+  fail(
+    "materialize p2",
+    `expected "no secret files synced" notice, got ${JSON.stringify(p2Result.notices)}`,
+  );
 if (!existsSync(join(p2Target, "README.md"))) fail("materialize p2", "clone missing README.md");
 if (p2Result.localProjectId === null) fail("materialize p2", "project not registered on B");
 pass('P2 materialized with honest "no secret files synced" notice');
@@ -320,9 +334,11 @@ const resolveResponse = await api(B.url, "/api/roaming/conflicts/resolve", {
   token: adminB,
   body: { ref: { kind: "vault", key: wpidP1 }, pick: "local" },
 });
-if (!resolveResponse.ok) fail("resolve", `${resolveResponse.status} ${await resolveResponse.text()}`);
+if (!resolveResponse.ok)
+  fail("resolve", `${resolveResponse.status} ${await resolveResponse.text()}`);
 const resolved = (await resolveResponse.json()).record;
-if (resolved.version <= vaultBlob.version) fail("resolve", "resolution did not supersede the conflicted version");
+if (resolved.version <= vaultBlob.version)
+  fail("resolve", "resolution did not supersede the conflicted version");
 const conflictAfterResolve = await api(B.url, "/api/roaming/conflicts/get", {
   method: "POST",
   token: adminB,
