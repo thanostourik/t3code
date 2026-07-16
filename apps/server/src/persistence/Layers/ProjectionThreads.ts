@@ -146,6 +146,22 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const hasActiveTurnByProjectIdQuery = SqlSchema.findOne({
+    Request: ListProjectionThreadsByProjectInput,
+    Result: Schema.Struct({ active: Schema.Number }),
+    execute: ({ projectId }) =>
+      sql`
+        SELECT EXISTS (
+          SELECT 1
+          FROM projection_threads AS threads
+          JOIN projection_thread_sessions AS sessions
+            ON sessions.thread_id = threads.thread_id
+          WHERE threads.project_id = ${projectId}
+            AND sessions.active_turn_id IS NOT NULL
+        ) AS active
+      `,
+  });
+
   const deleteProjectionThreadRow = SqlSchema.void({
     Request: DeleteProjectionThreadInput,
     execute: ({ threadId }) =>
@@ -170,6 +186,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.listByProjectId:query")),
     );
 
+  const hasActiveTurnByProjectId: ProjectionThreadRepositoryShape["hasActiveTurnByProjectId"] = (
+    input,
+  ) =>
+    hasActiveTurnByProjectIdQuery(input).pipe(
+      Effect.map((row) => row.active === 1),
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadRepository.hasActiveTurnByProjectId:query"),
+      ),
+    );
+
   const deleteById: ProjectionThreadRepositoryShape["deleteById"] = (input) =>
     deleteProjectionThreadRow(input).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.deleteById:query")),
@@ -179,6 +205,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
     upsert,
     getById,
     listByProjectId,
+    hasActiveTurnByProjectId,
     deleteById,
   } satisfies ProjectionThreadRepositoryShape;
 });

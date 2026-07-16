@@ -9,6 +9,7 @@ import {
   ROAMING_CONFLICT_GET_PATH,
   ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_MATERIALIZE_PATH,
+  ROAMING_WIP_TAKEOVER_PATH,
   ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
   ROAMING_PEERS_REMOVE_PATH,
@@ -26,6 +27,8 @@ import {
   RoamingRemovePeerResponse,
   RoamingSetPeerSyncRequest,
   RoamingSetPeerSyncResponse,
+  RoamingWipTakeoverRequest,
+  RoamingWipTakeoverResponse,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -57,6 +60,7 @@ async function postRoaming<
 }): Promise<Res["Type"]> {
   const bearerToken = await readDesktopPrimaryBearerToken();
   const encoded = await Effect.runPromise(
+    // oxlint-disable-next-line t3code/no-inline-schema-compile -- schema is a generic call input
     Schema.encodeUnknownEffect(input.requestSchema)(input.body),
   );
   let response: Response;
@@ -89,6 +93,7 @@ async function postRoaming<
     );
   }
   const json: unknown = await response.json();
+  // oxlint-disable-next-line t3code/no-inline-schema-compile -- schemas are generic call inputs
   return Effect.runPromise(Schema.decodeUnknownEffect(input.responseSchema)(json));
 }
 
@@ -146,6 +151,18 @@ export function materializeRoamingProject(
     path: ROAMING_MATERIALIZE_PATH,
     requestSchema: RoamingMaterializeRequest,
     responseSchema: RoamingMaterializeResponse,
+    body,
+  });
+}
+
+export function takeoverRoamingWip(
+  body: RoamingWipTakeoverRequest,
+): Promise<RoamingWipTakeoverResponse> {
+  return postRoaming({
+    operation: "roaming.wip-takeover",
+    path: ROAMING_WIP_TAKEOVER_PATH,
+    requestSchema: RoamingWipTakeoverRequest,
+    responseSchema: RoamingWipTakeoverResponse,
     body,
   });
 }

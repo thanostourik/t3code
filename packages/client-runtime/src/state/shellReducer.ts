@@ -69,6 +69,9 @@ export function applyShellStreamEvent(
         : Arr.append(snapshot.roamingWipStatus, event.wipStatus),
     };
   }
+  if (event.kind === "roaming-wip-status-replaced") {
+    return { ...snapshot, roamingWipStatus: event.wipStatuses };
+  }
 
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 

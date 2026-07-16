@@ -760,6 +760,7 @@ const buildAppUnderTest = (options?: {
           Layer.succeed(WipSnapshotReactor, {
             start: () => Effect.void,
             snapshotProject: () => Effect.void,
+            takeover: () => Effect.succeed(false),
             snapshotAll: () => Effect.void,
             listStatuses: () => Effect.succeed([]),
             subscribeUpdates: Effect.gen(function* () {

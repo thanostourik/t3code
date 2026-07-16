@@ -484,6 +484,11 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     sequence: NonNegativeInt,
     wipStatus: RoamingWipStatusEntry,
   }),
+  Schema.Struct({
+    kind: Schema.Literal("roaming-wip-status-replaced"),
+    sequence: NonNegativeInt,
+    wipStatuses: Schema.Array(RoamingWipStatusEntry),
+  }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
 

@@ -1,4 +1,4 @@
-import { ProjectId, ThreadId, ProviderInstanceId } from "@t3tools/contracts";
+import { ProjectId, ThreadId, ProviderInstanceId, TurnId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -127,6 +127,47 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       });
+    }),
+  );
+
+  it.effect("reports active turns by project", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("project-active-turn");
+      const threadId = ThreadId.make("thread-active-turn");
+      yield* threads.upsert({
+        threadId,
+        projectId,
+        title: "Active turn",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurnId: TurnId.make("turn-active"),
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z",
+        archivedAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+      });
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_instance_id, runtime_mode,
+          active_turn_id, last_error, updated_at
+        ) VALUES (
+          ${threadId}, 'running', 'codex', 'codex', 'full-access',
+          'turn-active', NULL, '2026-03-24T00:00:00.000Z'
+        )
+      `;
+
+      assert.isTrue(yield* threads.hasActiveTurnByProjectId({ projectId }));
+      yield* sql`UPDATE projection_thread_sessions SET active_turn_id = NULL WHERE thread_id = ${threadId}`;
+      assert.isFalse(yield* threads.hasActiveTurnByProjectId({ projectId }));
     }),
   );
 });

@@ -1325,12 +1325,14 @@ const makeWsRpcLayer = (
                 ),
               );
 
-              const liveTail = roamingEnabled
-                ? Stream.merge(
-                    bufferedLiveStream,
-                    Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
-                  )
-                : bufferedLiveStream;
+              // Pairing turns roaming on after the shell subscription already
+              // exists. Keep the live sources attached so that transition can
+              // publish registry, materialization, and WIP status immediately;
+              // the producers themselves are gated while roaming is off.
+              const liveTail = Stream.merge(
+                bufferedLiveStream,
+                Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
+              );
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
@@ -1422,45 +1424,51 @@ const makeWsRpcLayer = (
                       }),
                   ),
                 );
-                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = roamingEnabled
-                  ? yield* Effect.gen(function* () {
-                      const [shell, wipStatuses] = yield* Effect.all([
-                        projectionSnapshotQuery.getShellSnapshot(),
-                        wipSnapshotReactor.listStatuses(),
-                      ]);
-                      const items: OrchestrationShellStreamItem[] = [];
-                      for (const roamingProject of shell.roamingProjects) {
+                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = yield* (
+                  roamingEnabled
+                    ? Effect.gen(function* () {
+                        const [shell, wipStatuses] = yield* Effect.all([
+                          projectionSnapshotQuery.getShellSnapshot(),
+                          wipSnapshotReactor.listStatuses(),
+                        ]);
+                        const items: OrchestrationShellStreamItem[] = [];
+                        for (const roamingProject of shell.roamingProjects) {
+                          items.push({
+                            kind: "roaming-project-upserted",
+                            sequence: 0,
+                            roamingProject,
+                          });
+                        }
+                        for (const materialization of shell.roamingMaterializations) {
+                          items.push({
+                            kind: "roaming-materialization-updated",
+                            sequence: 0,
+                            materialization,
+                          });
+                        }
                         items.push({
-                          kind: "roaming-project-upserted",
+                          kind: "roaming-wip-status-replaced",
                           sequence: 0,
-                          roamingProject,
+                          wipStatuses,
                         });
-                      }
-                      for (const materialization of shell.roamingMaterializations) {
-                        items.push({
-                          kind: "roaming-materialization-updated",
+                        return items;
+                      })
+                    : Effect.succeed([
+                        {
+                          kind: "roaming-wip-status-replaced" as const,
                           sequence: 0,
-                          materialization,
-                        });
-                      }
-                      for (const wipStatus of wipStatuses) {
-                        items.push({
-                          kind: "roaming-wip-status-updated",
-                          sequence: 0,
-                          wipStatus,
-                        });
-                      }
-                      return items;
-                    }).pipe(
-                      Effect.mapError(
-                        (cause) =>
-                          new OrchestrationGetSnapshotError({
-                            message: "Failed to seed roaming shell overlay on resume",
-                            cause,
-                          }),
-                      ),
-                    )
-                  : [];
+                          wipStatuses: [],
+                        },
+                      ])
+                ).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to seed roaming shell overlay on resume",
+                        cause,
+                      }),
+                  ),
+                );
                 return Stream.concat(
                   Stream.fromIterable(roamingCatchUp),
                   Stream.concat(catchUpStream, synchronizedThenLive),
