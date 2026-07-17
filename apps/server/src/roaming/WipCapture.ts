@@ -33,6 +33,7 @@ import {
   type WipTarget,
   type WipTransportMode,
 } from "./WipShared.ts";
+import { renewLease } from "./WipLease.ts";
 import {
   captureWipSnapshot,
   readBasedOn,
@@ -305,6 +306,11 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         workspaceProjectId: target.workspaceProjectId,
         payload,
       });
+      yield* renewLease({
+        workspaceProjectId: target.workspaceProjectId,
+        environmentId,
+        lastSnapshotAt: capturedAt,
+      });
       return {
         ...entryBase,
         mode: "bundle",
@@ -406,6 +412,11 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         }),
       ),
     );
+    yield* renewLease({
+      workspaceProjectId: target.workspaceProjectId,
+      environmentId,
+      lastSnapshotAt: capturedAt,
+    });
     return {
       _tag: "done",
       nextMode: "origin-refs",
