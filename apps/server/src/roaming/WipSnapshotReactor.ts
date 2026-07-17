@@ -47,6 +47,7 @@ import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { watchTreeEvents } from "./treeWatcher.ts";
 import { runWipApplyForTarget, restoreParkedWipForTarget } from "./WipApply.ts";
 import { runWipPassForTarget } from "./WipCapture.ts";
+import { renewLease } from "./WipLease.ts";
 import { bundleShipped, type WipTarget, type WipTransportMode } from "./WipShared.ts";
 import { resolveOid, wipAppliedMarkerRefName, wipPushedMarkerRefName } from "./WipSnapshots.ts";
 
@@ -313,6 +314,14 @@ const make = Effect.gen(function* () {
       const hasInFlightTurn = yield* threadRepository
         .hasActiveTurnByProjectId({ projectId: target.localProjectId })
         .pipe(Effect.orElseSucceed(() => true));
+      // An agent working here is activity even while the tree is unchanged —
+      // keep this machine's lease fresh so the peer's chip stays honest
+      // (renewLease throttles itself).
+      if (hasInFlightTurn) {
+        yield* providePassDeps(
+          renewLease({ workspaceProjectId: target.workspaceProjectId, environmentId }),
+        );
+      }
       const applied = yield* providePassDeps(
         runWipApplyForTarget(target, shippedBaseOid, { hasInFlightTurn }),
       );
@@ -592,6 +601,10 @@ const make = Effect.gen(function* () {
         lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
         lastAppliedFrom: outcome.fromEnvironmentId,
       });
+      // Move the lease here and now — the acknowledgement capture below also
+      // renews it on a successful ship, but the takeover must move the chip
+      // even when that ship no-ops or fails; force past the activity throttle.
+      yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
       yield* processTarget(target, { acknowledgeApplied: true });
       return true;
     }).pipe(
