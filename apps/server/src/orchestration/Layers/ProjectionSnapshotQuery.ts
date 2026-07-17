@@ -27,6 +27,7 @@ import {
   RoamingMaterializationRecord,
   RoamingMaterializeStepName,
   RoamingMaterializeStepStatus,
+  RoamingLeasePayload,
   RoamingProjectShell,
   RoamingRegistryPayload,
   ThreadId,
@@ -1593,6 +1594,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Schema.fromJsonString(RoamingRegistryPayload),
   );
 
+  const decodeLeasePayload = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingLeasePayload));
+
   const listRoamingProjectShells: ProjectionSnapshotQueryShape["listRoamingProjectShells"] = () =>
     Effect.gen(function* () {
       const rows = yield* sql<{
@@ -1656,6 +1659,47 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         conflictsByWorkspaceProjectId.set(conflict.workspaceProjectId, conflicts);
       }
 
+      // Advisory per-machine activity (M4): one lease blob per (project,
+      // machine), newest first. Stale records from long-gone machines are
+      // harmless — the client judges freshness against the active window.
+      const leaseRows = yield* sql<{
+        readonly workspaceProjectId: string;
+        readonly payload: string;
+      }>`
+        SELECT workspace_project_id AS "workspaceProjectId", payload AS "payload"
+        FROM roaming_blobs
+        WHERE kind = 'lease'
+      `.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingProjectShells:leases"),
+        ),
+      );
+      const activityByWorkspaceProjectId = new Map<
+        string,
+        Array<RoamingProjectShell["activity"][number]>
+      >();
+      for (const lease of leaseRows) {
+        const payload = yield* decodeLeasePayload(lease.payload).pipe(
+          Effect.map(Option.some),
+          Effect.catch(() => Effect.succeed(Option.none())),
+        );
+        if (Option.isNone(payload)) {
+          continue;
+        }
+        const activity = activityByWorkspaceProjectId.get(lease.workspaceProjectId) ?? [];
+        activity.push({
+          environmentId: payload.value.environmentId,
+          renewedAt: payload.value.renewedAt,
+          ...(payload.value.lastSnapshotAt !== undefined
+            ? { lastSnapshotAt: payload.value.lastSnapshotAt }
+            : {}),
+        });
+        activityByWorkspaceProjectId.set(lease.workspaceProjectId, activity);
+      }
+      for (const activity of activityByWorkspaceProjectId.values()) {
+        activity.sort((left, right) => right.renewedAt.localeCompare(left.renewedAt));
+      }
+
       const shells: RoamingProjectShell[] = [];
       for (const row of rows) {
         // A payload this machine cannot decode (newer schema from a peer)
@@ -1683,8 +1727,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           lastMirrorContactAt,
           updatedAt: row.updatedAt,
           conflicts: conflictsByWorkspaceProjectId.get(payload.value.workspaceProjectId) ?? [],
-          // Populated from kind=lease blobs by the M4 lease seam.
-          activity: [],
+          activity: activityByWorkspaceProjectId.get(payload.value.workspaceProjectId) ?? [],
         });
       }
       return shells;
