@@ -72,6 +72,19 @@ export const wipRefGlob = (workspaceProjectId: WorkspaceProjectId) =>
 export const wipAppliedMarkerRefName = (workspaceProjectId: WorkspaceProjectId) =>
   refSafe(workspaceProjectId).pipe(Effect.map((id) => `refs/t3/wip-applied/${id}`));
 
+/**
+ * Local-only pin of a peer snapshot rejected in divergence resolution
+ * (pick=local, M4) — the losing side must stay recoverable even after the
+ * peer force-updates its moving wip ref.
+ */
+export const wipRejectedRefName = (
+  workspaceProjectId: WorkspaceProjectId,
+  environmentId: EnvironmentId,
+) =>
+  Effect.map(wipRefName(workspaceProjectId, environmentId), (ref) =>
+    ref.replace("refs/t3/wip/", "refs/t3/wip-rejected/"),
+  );
+
 export const wipParkedRefName = (
   workspaceProjectId: WorkspaceProjectId,
   branchRef: string,
