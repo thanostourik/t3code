@@ -23,6 +23,8 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
 import {
   classifyWipApply,
+  getWipDivergenceForTarget,
+  resolveKeptLocalDivergence,
   restoreParkedWipForTarget,
   resolveWipPathAction,
   runWipApplyForTarget,
@@ -1819,6 +1821,96 @@ testLayer("WipSnapshotReactor", (it) => {
       );
     }),
   );
+
+  it.effect("divergence: two-sided data, kept-local resolution, takeover pinning (M4)", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-apply-divergence");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-diverge-" });
+      const { peerPath, localPath } = yield* initApplyFixture(root);
+
+      // Both machines commit different work on main → non-ancestor HEADs.
+      yield* fs.writeFileString(pathService.join(peerPath, "peer-file.txt"), "peer commit\n");
+      yield* git(peerPath, ["add", "peer-file.txt"]);
+      yield* git(peerPath, ["commit", "-m", "peer work"]);
+      yield* fs.writeFileString(pathService.join(peerPath, "peer-dirty.txt"), "peer wip\n");
+      const peerCaptured = yield* peerSnapshot(peerPath, wsid, minutesFromNow(60));
+      yield* fs.writeFileString(pathService.join(localPath, "local-file.txt"), "local commit\n");
+      yield* git(localPath, ["add", "local-file.txt"]);
+      yield* git(localPath, ["commit", "-m", "local work"]);
+      yield* fs.writeFileString(pathService.join(localPath, "local-dirty.txt"), "local wip\n");
+
+      // The apply pass blocks and marks the block as a divergence.
+      const outcome = yield* runWipApplyForTarget(target(wsid, localPath));
+      assert.strictEqual(outcome._tag, "blocked");
+      if (outcome._tag === "blocked") {
+        assert.isTrue(outcome.divergence);
+        assert.isTrue(outcome.takeoverServiceable);
+        assert.strictEqual(outcome.snapshotOid, peerCaptured.commitOid);
+        assert.strictEqual(outcome.fromEnvironmentId, PEER_ENVIRONMENT_ID);
+      }
+
+      // Two-sided data: merge-base + one patch per side, full working state.
+      const divergence = yield* getWipDivergenceForTarget(target(wsid, localPath));
+      assert.isNotNull(divergence);
+      const mergeBase = yield* gitStdout(localPath, ["merge-base", "HEAD", peerCaptured.headOid]);
+      assert.strictEqual(divergence!.baseOid, mergeBase);
+      assert.strictEqual(divergence!.local.branchRef, "refs/heads/main");
+      assert.include(divergence!.local.patch, "local-file.txt");
+      assert.include(divergence!.local.patch, "local-dirty.txt");
+      assert.strictEqual(divergence!.peer.environmentId, PEER_ENVIRONMENT_ID);
+      assert.strictEqual(divergence!.peer.snapshotOid, peerCaptured.commitOid);
+      assert.include(divergence!.peer.patch, "peer-file.txt");
+      assert.include(divergence!.peer.patch, "peer-dirty.txt");
+
+      // Takeover pinned to a stale snapshot refuses.
+      const pinned = yield* runWipApplyForTarget(target(wsid, localPath), undefined, {
+        takeover: true,
+        expectedSnapshotOid: "0".repeat(40),
+      });
+      assert.strictEqual(pinned._tag, "blocked");
+
+      // Kept-local resolution refuses a mismatched snapshot...
+      const mismatch = yield* resolveKeptLocalDivergence(target(wsid, localPath), "0".repeat(40));
+      assert.isFalse(mismatch.resolved);
+      // ...and on the real one pins the rejected ref + kept-local marker
+      // without touching the worktree.
+      const resolved = yield* resolveKeptLocalDivergence(
+        target(wsid, localPath),
+        peerCaptured.commitOid,
+      );
+      assert.isTrue(resolved.resolved);
+      const rejectedRef = `refs/t3/wip-rejected/${wsid}/${PEER_ENVIRONMENT_ID}`;
+      assert.strictEqual(resolved.resolved && resolved.preservedRef, rejectedRef);
+      assert.strictEqual(yield* resolveOid(localPath, rejectedRef), peerCaptured.commitOid);
+      const marker = yield* resolveOid(
+        localPath,
+        yield* wipAppliedMarkerRefName(wsid),
+      );
+      assert.isNotNull(marker);
+      const recordedPeer = yield* gitStdout(localPath, [
+        "show",
+        "-s",
+        "--format=%(trailers:key=T3-Peer-Snapshot,valueonly)",
+        marker!,
+      ]);
+      assert.strictEqual(recordedPeer, peerCaptured.commitOid);
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "local-dirty.txt")),
+        "local wip\n",
+      );
+      assert.strictEqual(
+        yield* fs.readFileString(pathService.join(localPath, "local-file.txt")),
+        "local commit\n",
+      );
+      // Peer's work never reached the worktree.
+      const peerFile = yield* fs
+        .readFileString(pathService.join(localPath, "peer-file.txt"))
+        .pipe(Effect.orElseSucceed(() => null));
+      assert.isNull(peerFile);
+    }),
+  );
 });
 
 // ── Pure decision-core invariants ───────────────────────────────────────
@@ -1929,6 +2021,25 @@ it("classifyWipApply: safety invariants hold over the whole fact space", () => {
       // 9. Every blocked state carries a user-facing reason.
       if (decision._tag === "blocked") {
         assert.isAbove(decision.reason.length, 0, label);
+      }
+      // 10. takeoverAvailable is honest (M4): a block is takeover-serviceable
+      //     exactly when no agent turn is in flight — takeover refuses those.
+      if (decision._tag === "blocked") {
+        assert.strictEqual(decision.takeoverServiceable, !facts.hasInFlightTurn, label);
+      }
+      // 11. Divergence is exactly the same-branch non-ancestor block (both
+      //     machines moved the branch), and is always takeover-serviceable.
+      if (decision._tag === "blocked" && decision.divergence) {
+        assert.isTrue(facts.sameBranch && !facts.fastForwardSafe, label);
+        assert.isTrue(decision.takeoverServiceable, label);
+      }
+      if (
+        decision._tag === "blocked" &&
+        !facts.hasInFlightTurn &&
+        facts.sameBranch &&
+        !facts.fastForwardSafe
+      ) {
+        assert.isTrue(decision.divergence, label);
       }
     }
   }
