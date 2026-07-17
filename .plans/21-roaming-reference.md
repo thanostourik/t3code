@@ -100,8 +100,9 @@ live in `21-roaming-history.md`.
   byte-authoritative for hashing — never re-serialize before hashing. The
   store serializes read-modify-write and verifies `contentHash` on ingest.
   Conflict records retain the full remote record.
-- Key derivation per kind: registry/vault/recipe/lease →
-  `<wsid>`; wip → `<wsid>/<envid>`; transcript/brief → `<threadId>`.
+- Key derivation per kind: registry/vault/recipe → `<wsid>`; wip/lease →
+  `<wsid>/<envid>` (lease per-machine so two active machines never produce
+  an equal-version conflict); transcript/brief → `<threadId>`.
 - Reconciliation: per key, higher version wins; same version + different
   hash = surfaced conflict, never auto-merge. Conflict get/resolve routes
   require `access:write` (they carry secret payloads); resolution picks a
