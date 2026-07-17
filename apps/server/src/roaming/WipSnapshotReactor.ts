@@ -703,6 +703,17 @@ const make = Effect.gen(function* () {
         return { resolved: false as const, reason: "project is not on this machine" };
       }
       if (pick === "peer") {
+        // Re-verify the divergence still exists on exactly this snapshot: a
+        // fast-forward that settled things between render and click must not
+        // turn "take the other version" into a surprise backward reset.
+        const current = yield* providePassDeps(getWipDivergenceForTarget(target));
+        if (current === null || current.peer.snapshotOid !== peerSnapshotOid) {
+          return {
+            resolved: false as const,
+            reason:
+              "the machines no longer disagree on this project (or the other machine's work changed); review the latest state",
+          };
+        }
         // Taking the peer side IS a pinned takeover; the losing local state
         // lands on the per-branch parked ref written before the HEAD move.
         const branch = yield* git.execute({
@@ -724,9 +735,7 @@ const make = Effect.gen(function* () {
           ...(result.reason !== undefined ? { reason: result.reason } : {}),
         };
       }
-      const result = yield* providePassDeps(
-        resolveKeptLocalDivergence(target, peerSnapshotOid),
-      );
+      const result = yield* providePassDeps(resolveKeptLocalDivergence(target, peerSnapshotOid));
       if (!result.resolved) {
         return { resolved: false as const, reason: result.reason };
       }
