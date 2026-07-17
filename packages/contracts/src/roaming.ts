@@ -209,7 +209,10 @@ export const ROAMING_LEASE_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
  * per-machine entry surfaced on `RoamingProjectShell.activity`. "The
  * lease" is derived, not stored: the machine with the newest `renewedAt`
  * is where work is live. Takeover moves it by writing a fresh record for
- * the taking machine.
+ * the taking machine. Accepted limitation: `renewedAt` values come from
+ * each machine's own clock, so derivation assumes roughly-synced clocks —
+ * under skew a fresh record can lose to a stale one. Advisory data only;
+ * the chip self-heals within the active window.
  */
 export const RoamingProjectActivity = Schema.Struct({
   environmentId: EnvironmentId,
@@ -467,6 +470,7 @@ export const RoamingWipDivergenceSide = Schema.Struct({
   branchRef: Schema.String,
   headOid: Schema.String,
   snapshotOid: Schema.String,
+  capturedAt: IsoDateTime,
   patch: Schema.String,
   truncated: Schema.optional(Schema.Boolean),
 });
@@ -480,7 +484,6 @@ export const RoamingWipDivergence = Schema.Struct({
   peer: Schema.Struct({
     ...RoamingWipDivergenceSide.fields,
     environmentId: EnvironmentId,
-    capturedAt: IsoDateTime,
   }),
 });
 export type RoamingWipDivergence = typeof RoamingWipDivergence.Type;
@@ -511,8 +514,8 @@ export const RoamingWipDivergenceResolveResponse = Schema.Struct({
   resolved: Schema.Boolean,
   /**
    * Local ref preserving the losing side: the per-branch parked ref when
-   * the peer side won, `refs/t3/wip-rejected/<wsid>/<envid>` when the
-   * local side won.
+   * the peer side won, `refs/t3/wip-rejected/<wsid>/<envid>` (the
+   * REJECTED peer's environmentId) when the local side won.
    */
   preservedRef: Schema.optional(Schema.String),
   /** Plain-language explanation when `resolved` is false. */
