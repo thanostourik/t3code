@@ -19,6 +19,8 @@ import {
   ROAMING_ENROLL_PROJECT_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
   ROAMING_MATERIALIZE_PATH,
+  ROAMING_WIP_DIVERGENCE_PATH,
+  ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
   ROAMING_WIP_TAKEOVER_PATH,
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
@@ -54,6 +56,10 @@ import {
   RoamingSyncManifestResponse,
   RoamingWaitChangesRequest,
   RoamingWaitChangesResponse,
+  RoamingWipDivergenceRequest,
+  RoamingWipDivergenceResolveRequest,
+  RoamingWipDivergenceResolveResponse,
+  RoamingWipDivergenceResponse,
   RoamingWipTakeoverRequest,
   RoamingWipTakeoverResponse,
 } from "@t3tools/contracts";
@@ -505,9 +511,41 @@ const wipTakeoverRoute = HttpRouter.add(
       yield* requireRoamingScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingWipTakeoverRequest);
       const reactor = yield* WipSnapshotReactor;
-      return yield* respondJson(RoamingWipTakeoverResponse, {
-        applied: yield* reactor.takeover(body.workspaceProjectId),
+      const result = yield* reactor.takeover(body.workspaceProjectId, body.snapshotOid);
+      return yield* respondJson(RoamingWipTakeoverResponse, result);
+    }),
+  ),
+);
+
+const wipDivergenceRoute = HttpRouter.add(
+  "POST",
+  ROAMING_WIP_DIVERGENCE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingWipDivergenceRequest);
+      const reactor = yield* WipSnapshotReactor;
+      return yield* respondJson(RoamingWipDivergenceResponse, {
+        divergence: yield* reactor.divergence(body.workspaceProjectId),
       });
+    }),
+  ),
+);
+
+const wipDivergenceResolveRoute = HttpRouter.add(
+  "POST",
+  ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingWipDivergenceResolveRequest);
+      const reactor = yield* WipSnapshotReactor;
+      const result = yield* reactor.resolveDivergence(
+        body.workspaceProjectId,
+        body.pick,
+        body.peerSnapshotOid,
+      );
+      return yield* respondJson(RoamingWipDivergenceResolveResponse, result);
     }),
   ),
 );
@@ -591,6 +629,8 @@ export const roamingRoutesLayer = Layer.mergeAll(
   enrollProjectRoute,
   materializeRoute,
   wipTakeoverRoute,
+  wipDivergenceRoute,
+  wipDivergenceResolveRoute,
   conflictGetRoute,
   conflictResolveRoute,
 );
