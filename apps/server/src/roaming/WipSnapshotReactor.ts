@@ -356,7 +356,18 @@ const make = Effect.gen(function* () {
       // merge preserves local files, so local work remains recoverable. The
       // reverse order shipped the receiver's stale pre-apply branch back to
       // the author and created a branch-feedback loop.
-      const outcome = yield* providePassDeps(runWipPassForTarget(target, mode, options));
+      const outcome = yield* providePassDeps(
+        runWipPassForTarget(target, mode, {
+          ...options,
+          // A ship right after applying peer content (or an explicit
+          // acknowledgement) is an echo, not local activity — it must not
+          // move the advisory lease toward the receiving machine.
+          suppressLeaseRenewal:
+            options.acknowledgeApplied === true ||
+            applied._tag === "applied" ||
+            applied._tag === "applied-with-conflicts",
+        }),
+      );
       if (outcome._tag === "done") {
         yield* Ref.update(modes, (map) =>
           new Map(map).set(target.workspaceProjectId, outcome.nextMode),
@@ -739,6 +750,9 @@ const make = Effect.gen(function* () {
       if (!result.resolved) {
         return { resolved: false as const, reason: result.reason };
       }
+      // Keeping local IS an explicit user action here — move the lease like
+      // takeover does (the acknowledgement ship itself never renews).
+      yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
       // The acknowledgement capture ships our kept-local state naming the
       // rejected snapshot; classification then settles it on both machines
       // and this pass publishes the cleared (non-blocked) status.
