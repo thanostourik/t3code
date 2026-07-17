@@ -47,8 +47,9 @@ the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
 (reactor split, decision-table classifier, shim removal — PRs #57–#60).
 The branch-aware ship gate is closed. M4–M7 remain queued in execution
 order (renumbered 2026-07-17): M4 takeover + divergence, M5 briefs +
-transcripts, M6 bootstrap recipes, M7 cloud store. M4 is next; no
-milestone is active.
+transcripts, M6 bootstrap recipes, M7 cloud store. M4 is active
+(started 2026-07-17; analysis pass done, deltas recorded in its design
+section).
 
 ## Thesis
 
@@ -206,7 +207,7 @@ by ancestry (merge-base), never wall clock:
 | Case | Condition | Behavior |
 |---|---|---|
 | Same context | Bp=Bl, Hp=Hl | Per-file merge (M3.7 machinery, unchanged): peer-changed files cross, both-changed files keep ours + surface, deletions gated on Based-On provenance. |
-| Fast-forward | Bp=Bl, Hp descendant of Hl | Untouched checkout: fetch, `merge --ff-only` to Hp, apply dirty diff on top. Locally edited: **blocked** ("peer moved <branch> forward; you have local edits"). |
+| Fast-forward | Bp=Bl, Hp descendant of Hl | Untouched checkout: fetch, move HEAD to Hp (hard reset — fast-forward by construction, gated on ancestry + untouched + parking), apply dirty diff on top. Locally edited: **blocked** ("peer moved <branch> forward; you have local edits"). |
 | Different branch | Bp≠Bl | Untouched checkout: park, create/update local Bp at Hp (only if fast-forward-safe), `git switch`, apply diff. Touched, or local Bp not ff-safe: **blocked** ("peer is on <branch>"). |
 | Peer behind | Hp ancestor of Hl | Skip (marker bookkeeping only). |
 | Diverged / detached / legacy payload | everything else | **Blocked.** Divergence resolution UI is M4. |
@@ -253,6 +254,30 @@ with the existing diff machinery — desktop version / laptop version, user
 picks a side, the losing side stays recoverable as a ref. No three-way
 merge, no auto-resolution, ever. This screen is the trust story of the
 feature.
+
+Analysis-pass deltas (2026-07-17) against the shipped M3.8 code:
+
+- The `lease` blob kind is already plumbed generically (contracts, store,
+  mirror); M4 adds only its payload schema and semantics: holder
+  environmentId + renewedAt, renewed by WIP capture activity and in-flight
+  turns, moved by takeover. Advisory only — a stale or missing lease never
+  blocks anything; it only informs the chip.
+- Divergence today is one blocked-reason string, contract-indistinguishable
+  from other blocks. M4 gives it a distinct status surface plus a new
+  two-sided diff operation (merge-base → local, merge-base → peer — the
+  merge-base OID is not currently retained and no existing endpoint diffs
+  two arbitrary commits). Rendering reuses the existing diff components.
+- Choosing a side must explicitly preserve the loser: picking peer already
+  parks local state; picking local must pin the peer's rejected snapshot to
+  a local ref (today it only lives in the peer's force-updatable wip ref).
+- Takeover tightening pulled into M4 scope: `takeoverAvailable` is
+  currently set on blocks takeover refuses (in-flight turn, legacy
+  snapshot) — make it honest; takeover requests name the snapshot commit
+  the user saw (today race-to-newest between pill render and click).
+- Chips are powered by the lease + the wip beacon's `capturedAt` (per
+  project, per machine); `lastMirrorContactAt` is global across peers and
+  is not a chip source. Chip copy stays concept-free: machine label +
+  snapshot age, never "lease"/"roaming".
 
 ### Briefs + transcripts (M5)
 
