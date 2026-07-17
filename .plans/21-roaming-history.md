@@ -6,6 +6,18 @@ The main plan keeps only current state and still-binding constraints; this
 file exists so rejected alternatives and their rationale stay discoverable
 without digging through git. Append-only; never loaded by kickoff prompts.
 
+**Numbering eras (records below keep the numbering of their date — never
+rewritten):**
+
+| Era | M3 | M4 | M5 | M6 |
+|---|---|---|---|---|
+| ≤ 2026-07-06 | Bootstrap recipes | WIP snapshots | Takeover + divergence | Briefs + transcripts |
+| 2026-07-06 → 2026-07-17 | WIP snapshots | Bootstrap recipes | Takeover + divergence | Briefs + transcripts |
+| ≥ 2026-07-17 | WIP snapshots | Takeover + divergence | Briefs + transcripts | Bootstrap recipes |
+
+M0–M2.5, the M3.x sub-milestones, and M7 (cloud store) mean the same thing
+in every era.
+
 ## Decisions log (full, as recorded through M2.5 — 2026-07-05)
 
 > **Decisions log:** 2026-07-04 — v1 transport for small state = machine-to-machine
@@ -1947,3 +1959,18 @@ Validation: 80 roaming unit tests (3 new), 113 client-runtime state tests,
 typecheck across 15 workspaces, and the full fresh-state ladder —
 `accept-m35`, `accept-m38` (bundle AND origin transports), `accept-m36`,
 `accept-m37`, `accept-m2.5`.
+
+## 2026-07-17 — milestones renumbered to execution order (second renumber)
+
+User decision after the pre-M4 cleanup closed: takeover/divergence and
+roaming conversations FINISH the core sync story that M0–M3.8 built, while
+bootstrap recipes are the open-ended comfort feature — agent setup of
+arbitrary unknown projects has unbounded tool/environment combinations and
+no pre-specified steps, so it is the hardest thing to get right and the
+least essential to the roaming promise. New order: M4 = takeover +
+divergence (was M5), M5 = briefs + transcripts (was M6), M6 = bootstrap
+recipes (was M4); M7 unchanged. The user explicitly rejected keeping stale
+numbers with a reordered table: numbers must always match execution order
+(kickoff prompts address milestones by number — the 2026-07-06 renumber
+set the precedent), and archaeology is served by the numbering-era map now
+at the top of this file rather than by freezing the numbering.
