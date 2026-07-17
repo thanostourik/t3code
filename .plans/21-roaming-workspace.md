@@ -96,35 +96,20 @@ history file.
   pairing; one paired machine = one Authorized-clients row; Materialize is
   enabled-iff-workable, disabled-with-reason otherwise; revoked/auth-failed
   remotes flip to offline + Materialize.
-- **2026-07-06 — milestones renumbered to execution order:** WIP snapshots
-  before bootstrap recipes (uncommitted work is the thesis's first sentence;
-  recipes are the comfort feature and open-ended risk).
 - **2026-07-07 — t3sync manifests:** what the vault syncs is defined by two
   editable files with exact .gitignore semantics (global `<stateDir>/t3sync`
   + optional repo-root `.t3sync`); `vaultOverrides` retired.
-- **2026-07-10 — SHIP GATE:** branch-blind WIP sync is not shippable,
-  period. Committed branch work on one machine must never materialize as
-  uncommitted soup on the other machine's different branch. M3.8 gates all
-  shipping of the sync feature.
-- **2026-07-11 — M3.8 model decided:** a snapshot is the full git working
-  state (branch + HEAD + dirty tree); apply either reproduces that state
-  completely or touches nothing. Auto-apply may switch branches on an
-  untouched checkout; every blocked state gets a minimal explicit takeover
-  action (pulled forward from the takeover milestone, M4 since the
-  2026-07-17 renumber); local work parks per branch in hidden
-  refs before any switch. Legacy (branch-blind) snapshots never auto-apply.
-  Takeover status is live-only and never restored from the client shell cache.
-- **2026-07-17 — milestones renumbered to execution order (user decision,
-  second renumber):** M4 = takeover + divergence (was M5), M5 = briefs +
-  transcripts (was M6), M6 = bootstrap recipes (was M4); M7 unchanged.
-  Rationale: takeover/divergence and roaming conversations FINISH the core
-  sync story; recipes are the open-ended comfort feature (agent setup of
-  arbitrary unknown projects — unbounded tool/environment combinations, no
-  pre-specified steps) and run last before the gated cloud milestone.
-  Numbers must always match execution order — kickoff prompts address
-  milestones by number. Documents dated before 2026-07-17 use the previous
-  numbering; the numbering-era map at the top of the history file
-  disambiguates all three eras.
+- **2026-07-11 — full-working-state sync model:** apply either reproduces
+  the peer's complete git state (branch + HEAD + dirty tree) or touches
+  nothing; auto-switch on an untouched checkout is accepted (parking makes
+  it lossless). Now fully expressed by the WIP sync design section below.
+- **2026-07-17 — milestone numbers always match execution order:** current
+  order M4 takeover + divergence, M5 briefs + transcripts, M6 bootstrap
+  recipes, M7 cloud store — the first two finish the core sync story;
+  recipes are the open-ended comfort feature and run last before the gated
+  cloud milestone. Kickoff prompts address milestones by number; records
+  keep the numbering of their date (era map at the top of the history
+  file).
 
 ## Architecture
 
@@ -203,24 +188,16 @@ dirty tree.** A snapshot without its branch/HEAD context is meaningless —
 tree-only sync (shipped M3–M3.7) is what produced uncommitted soup across
 branches and triggered the ship gate.
 
-**Capture** (unchanged mechanics, extended payload): temp-index snapshot of
-the worktree — staged/unstaged flattened, vault set subtracted, oversize
-untracked files excluded — committed with parent = HEAD and a `T3-Based-On`
-trailer, written to `refs/t3/wip/<wsid>/<envid>`, shipped via origin push
-(force-with-lease) or bundle blob fallback. Payload v2 adds `branchRef`
-(symbolic HEAD; sentinel for detached/unborn) and `headOid`. Snapshots
-capture the clean state too (a stale dirty snapshot must never shadow
-committed work). Capture no-op identity is the full
-`(branchRef, headOid, treeOid)` tuple, so a branch/HEAD move with an unchanged
-tree still ships. Triggers: fs watch (debounced), 2-min sweep, turn completion,
-enrollment, graceful shutdown, plus a lightweight branch/HEAD poll so clean
-CLI switches and commits do not wait for the sweep (`.git` is intentionally
-outside the filesystem watcher).
-
-Origin-ref snapshots join branch context from the mirrored v2 beacon by an
-exact `(refName, commitOid)` match. A fetched ref without matching v2 metadata
-is legacy context and never auto-applies; ref ancestry alone cannot recover
-the checked-out branch.
+**Capture** (mechanics, triggers, and transport in the reference):
+temp-index snapshot of the full working state — staged/unstaged flattened,
+vault set subtracted, oversize untracked files excluded — committed with
+parent = HEAD and provenance trailers, shipped via origin push or bundle
+blob fallback. Snapshots capture the clean state too (a stale dirty
+snapshot must never shadow committed work), and the no-op identity is the
+full `(branchRef, headOid, treeOid)` tuple, so a branch/HEAD move with an
+unchanged tree still ships. A snapshot without v2 branch/HEAD context is
+legacy and never auto-applies — ref ancestry alone cannot recover the
+checked-out branch.
 
 **Apply — reproduce completely or touch nothing.** Given peer snapshot
 `{branch Bp, head Hp, tree Tp}` and local `{branch Bl, head Hl}`, classify
