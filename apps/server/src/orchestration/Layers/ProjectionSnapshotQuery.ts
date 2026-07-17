@@ -1535,6 +1535,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           lastMirrorContactAt,
           updatedAt: row.updatedAt,
           conflicts: conflictsByWorkspaceProjectId.get(payload.value.workspaceProjectId) ?? [],
+          // Populated from kind=lease blobs by the M4 lease seam.
+          activity: [],
         });
       }
       return shells;
