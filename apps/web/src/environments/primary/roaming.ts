@@ -9,6 +9,8 @@ import {
   ROAMING_CONFLICT_GET_PATH,
   ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_MATERIALIZE_PATH,
+  ROAMING_WIP_DIVERGENCE_PATH,
+  ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
   ROAMING_WIP_TAKEOVER_PATH,
   ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
@@ -27,6 +29,10 @@ import {
   RoamingRemovePeerResponse,
   RoamingSetPeerSyncRequest,
   RoamingSetPeerSyncResponse,
+  RoamingWipDivergenceRequest,
+  RoamingWipDivergenceResolveRequest,
+  RoamingWipDivergenceResolveResponse,
+  RoamingWipDivergenceResponse,
   RoamingWipTakeoverRequest,
   RoamingWipTakeoverResponse,
 } from "@t3tools/contracts";
@@ -163,6 +169,30 @@ export function takeoverRoamingWip(
     path: ROAMING_WIP_TAKEOVER_PATH,
     requestSchema: RoamingWipTakeoverRequest,
     responseSchema: RoamingWipTakeoverResponse,
+    body,
+  });
+}
+
+export function getRoamingWipDivergence(
+  body: RoamingWipDivergenceRequest,
+): Promise<RoamingWipDivergenceResponse> {
+  return postRoaming({
+    operation: "roaming.wip-divergence",
+    path: ROAMING_WIP_DIVERGENCE_PATH,
+    requestSchema: RoamingWipDivergenceRequest,
+    responseSchema: RoamingWipDivergenceResponse,
+    body,
+  });
+}
+
+export function resolveRoamingWipDivergence(
+  body: RoamingWipDivergenceResolveRequest,
+): Promise<RoamingWipDivergenceResolveResponse> {
+  return postRoaming({
+    operation: "roaming.wip-divergence-resolve",
+    path: ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
+    requestSchema: RoamingWipDivergenceResolveRequest,
+    responseSchema: RoamingWipDivergenceResolveResponse,
     body,
   });
 }
