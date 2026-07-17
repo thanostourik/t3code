@@ -280,12 +280,20 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
       // The origin→bundle flip captures before knowing the blob baseline:
       // skip the write only when the blob already carries this exact working
       // state. Branch and HEAD are part of the identity even when the tree is
-      // unchanged.
+      // unchanged — and so are the causality trailers: an acknowledgement
+      // capture after a conflict/divergence resolution changes ONLY
+      // T3-Based-On/T3-Based-On-Peer, and dropping it leaves the peer (and
+      // this machine's conflictAlreadyResolved proof) permanently unsettled
+      // (accept-m4 bundle failure, 2026-07-18).
       const shippedBlob = yield* bundleShipped(target.workspaceProjectId, environmentId);
       if (
         shippedBlob?.treeOid === captured.treeOid &&
         shippedBlob.branchRef === captured.branchRef &&
-        shippedBlob.headOid === captured.headOid
+        shippedBlob.headOid === captured.headOid &&
+        (yield* readBasedOn(cwd, shippedBlob.commitOid)) ===
+          (yield* readBasedOn(cwd, captured.commitOid)) &&
+        (yield* readBasedOnPeer(cwd, shippedBlob.commitOid)) ===
+          (yield* readBasedOnPeer(cwd, captured.commitOid))
       ) {
         return { ...entryBase, mode: "bundle" } satisfies RoamingWipStatusEntry;
       }

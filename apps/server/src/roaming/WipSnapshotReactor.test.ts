@@ -471,6 +471,53 @@ testLayer("WipSnapshotReactor", (it) => {
     }),
   );
 
+  it.effect("bundle mode ships a causality-only change instead of deduping it (M4)", () =>
+    Effect.gen(function* () {
+      const wsid = WorkspaceProjectId.make("wp-wip-bundle-ack");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const blobStore = yield* RoamingBlobStore;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wip-bundle-ack-" });
+      const { workPath } = yield* initRepoWithOrigin(root);
+      yield* fs.writeFileString(pathService.join(workPath, "scratch.txt"), "untracked\n");
+
+      const first = yield* runWipPassForTarget(target(wsid, workPath), "bundle");
+      assert.strictEqual(first._tag, "done");
+      const blobKey = `${wsid}/${LOCAL_ENVIRONMENT_ID}`;
+      const shippedV1 = yield* blobStore.get({ kind: "wip", key: blobKey });
+      assert.isNotNull(shippedV1);
+
+      // Move the applied marker (we consumed a peer snapshot / resolved a
+      // divergence): the tree is byte-identical, only the next capture's
+      // T3-Based-On changes. The blob dedupe must NOT swallow that ship —
+      // the peer never settles otherwise (accept-m4 bundle failure).
+      yield* fs.writeFileString(pathService.join(workPath, "peer-x.txt"), "peer\n");
+      const markerSnap = yield* captureWipSnapshot({
+        cwd: workPath,
+        workspaceProjectId: wsid,
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        vaultExcludePaths: [],
+      });
+      assert.isNotNull(markerSnap);
+      yield* fs.remove(pathService.join(workPath, "peer-x.txt"), { force: true });
+      const appliedMarker = yield* wipAppliedMarkerRefName(wsid);
+      yield* git(workPath, ["update-ref", appliedMarker, markerSnap!.commitOid]);
+
+      const ack = yield* runWipPassForTarget(target(wsid, workPath), "bundle");
+      assert.strictEqual(ack._tag, "done");
+      assert.isDefined(ack._tag === "done" ? ack.entry.lastPushedAt : undefined);
+      const shippedV2 = yield* blobStore.get({ kind: "wip", key: blobKey });
+      assert.isAbove(shippedV2!.version, shippedV1!.version);
+      const ackPayload = yield* decodeWipPayloadJson(shippedV2!.payload);
+      const ackBasedOn = yield* readBasedOn(workPath, ackPayload.commitOid);
+      assert.strictEqual(ackBasedOn, markerSnap!.commitOid);
+
+      // And exactly one: the settled state dedupes again.
+      const settled = yield* runWipPassForTarget(target(wsid, workPath), "bundle");
+      assert.strictEqual(settled._tag, "skipped");
+    }),
+  );
+
   it.effect("re-ships a legacy snapshot whose Based-On proof was not transported", () =>
     Effect.gen(function* () {
       const wsid = WorkspaceProjectId.make("wp-wip-based-on-migration");
@@ -1884,10 +1931,7 @@ testLayer("WipSnapshotReactor", (it) => {
       const rejectedRef = `refs/t3/wip-rejected/${wsid}/${PEER_ENVIRONMENT_ID}`;
       assert.strictEqual(resolved.resolved && resolved.preservedRef, rejectedRef);
       assert.strictEqual(yield* resolveOid(localPath, rejectedRef), peerCaptured.commitOid);
-      const marker = yield* resolveOid(
-        localPath,
-        yield* wipAppliedMarkerRefName(wsid),
-      );
+      const marker = yield* resolveOid(localPath, yield* wipAppliedMarkerRefName(wsid));
       assert.isNotNull(marker);
       const recordedPeer = yield* gitStdout(localPath, [
         "show",
