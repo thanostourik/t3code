@@ -258,9 +258,13 @@ feature.
 Analysis-pass deltas (2026-07-17) against the shipped M3.8 code:
 
 - The `lease` blob kind is already plumbed generically (contracts, store,
-  mirror); M4 adds only its payload schema and semantics: holder
-  environmentId + renewedAt, renewed by WIP capture activity and in-flight
-  turns, moved by takeover. Advisory only — a stale or missing lease never
+  mirror); M4 adds only its payload schema and semantics. Leases are
+  per-machine activity records (key `<wsid>/<envid>`, not the per-project
+  singleton originally implied — a singleton written by both active
+  machines produces equal-version blob conflicts exactly when the chip
+  matters). Renewed by WIP capture activity and in-flight turns; "the
+  lease" is derived — newest `renewedAt` wins — and takeover moves it by
+  writing a fresh record. Advisory only: a stale or missing lease never
   blocks anything; it only informs the chip.
 - Divergence today is one blocked-reason string, contract-indistinguishable
   from other blocks. M4 gives it a distinct status surface plus a new

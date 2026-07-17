@@ -35,9 +35,15 @@ export type RoamingBlobKind = typeof RoamingBlobKind.Type;
  * The reconciliation address is `(kind, key)`. `key` must be globally unique
  * within its kind; the derivation is part of this contract:
  *
- * - `registry`, `vault`, `recipe`, `lease` → `<workspaceProjectId>`
- * - `wip`                                  → `<workspaceProjectId>/<environmentId>`
- * - `transcript`, `brief`                  → `<threadId>`
+ * - `registry`, `vault`, `recipe` → `<workspaceProjectId>`
+ * - `wip`, `lease`                → `<workspaceProjectId>/<environmentId>`
+ * - `transcript`, `brief`         → `<threadId>`
+ *
+ * `lease` is per-machine deliberately: each machine only ever writes its
+ * own record, so concurrent activity on two machines can never produce an
+ * equal-version blob conflict — which a per-project singleton would hit
+ * exactly when both machines are active, the case the activity chip exists
+ * to show.
  *
  * `workspaceProjectId` on the record is a denormalized grouping attribute
  * (indexing, per-project listing), not part of the address.
@@ -188,6 +194,42 @@ export const RoamingWipPayload = Schema.Struct({
 });
 export type RoamingWipPayload = typeof RoamingWipPayload.Type;
 
+// ── Lease (M4: takeover + divergence) ───────────────────────────────
+
+/**
+ * How stale a lease may be and still render as "active on <machine>".
+ * Advisory UI threshold shared by server projections and clients — a lease
+ * is never a lock, and an expired one blocks nothing.
+ */
+export const ROAMING_LEASE_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
+
+/**
+ * A machine's advisory activity record for one project, both the payload
+ * of blob kind=lease (key=<workspaceProjectId>/<environmentId>) and the
+ * per-machine entry surfaced on `RoamingProjectShell.activity`. "The
+ * lease" is derived, not stored: the machine with the newest `renewedAt`
+ * is where work is live. Takeover moves it by writing a fresh record for
+ * the taking machine. Accepted limitation: `renewedAt` values come from
+ * each machine's own clock, so derivation assumes roughly-synced clocks —
+ * under skew a fresh record can lose to a stale one. Advisory data only;
+ * the chip self-heals within the active window.
+ */
+export const RoamingProjectActivity = Schema.Struct({
+  environmentId: EnvironmentId,
+  /** Renewed on WIP capture activity, in-flight agent turns, and takeover. */
+  renewedAt: IsoDateTime,
+  /** `capturedAt` of this machine's newest WIP snapshot, when one exists. */
+  lastSnapshotAt: Schema.optional(IsoDateTime),
+});
+export type RoamingProjectActivity = typeof RoamingProjectActivity.Type;
+
+/** Payload of blob kind=lease, JSON-encoded. */
+export const RoamingLeasePayload = Schema.Struct({
+  schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  ...RoamingProjectActivity.fields,
+});
+export type RoamingLeasePayload = typeof RoamingLeasePayload.Type;
+
 // ── Registry entry payload (kind=registry, key=workspaceProjectId) ──
 
 export const RoamingRegistryPayload = Schema.Struct({
@@ -235,6 +277,14 @@ export const RoamingProjectShell = Schema.Struct({
       detectedAt: IsoDateTime,
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /**
+   * Advisory per-machine activity (from kind=lease blobs), newest first.
+   * Powers the "active on <machine>, snapshot <age> ago" chip; freshness
+   * is judged against ROAMING_LEASE_ACTIVE_WINDOW_MS.
+   */
+  activity: Schema.Array(RoamingProjectActivity).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type RoamingProjectShell = typeof RoamingProjectShell.Type;
 
@@ -252,7 +302,7 @@ export const RoamingMaterializeStepName = Schema.Literals([
   "restore-wip",
   "apply-vault",
   "register-project",
-  /** Recorded as skipped until M4 lands bootstrap recipes. */
+  /** Recorded as skipped until M6 lands bootstrap recipes. */
   "bootstrap",
 ]);
 export type RoamingMaterializeStepName = typeof RoamingMaterializeStepName.Type;
@@ -349,10 +399,28 @@ export const RoamingWipStatusEntry = Schema.Struct({
   lastCapturedAt: Schema.optional(IsoDateTime),
   lastPushedAt: Schema.optional(IsoDateTime),
   lastError: Schema.optional(Schema.String),
-  /** Why the last incoming snapshot was NOT applied (local edits). */
+  /**
+   * Why the last incoming snapshot was NOT applied — plain language,
+   * enumerated by the apply classifier (local edits, peer on another
+   * branch, divergence, legacy/invalid snapshot, agent turn in flight).
+   */
   blockedReason: Schema.optional(Schema.String),
-  /** The blocked snapshot can be reproduced explicitly after parking local work. */
+  /**
+   * The blocked snapshot can be reproduced explicitly after parking local
+   * work. Set only for blocks takeover can actually service (M4) — an
+   * in-flight local turn or an unusable snapshot blocks without it.
+   */
   takeoverAvailable: Schema.optional(Schema.Boolean),
+  /** The peer snapshot commit that produced blockedReason; echo it in takeover requests. */
+  blockedSnapshotOid: Schema.optional(Schema.String),
+  /** Author environment of that snapshot. */
+  blockedFrom: Schema.optional(EnvironmentId),
+  /**
+   * Set when the block is a two-sided divergence: both machines moved the
+   * same branch. The divergence routes below render and resolve it;
+   * takeover remains the "just take theirs" shortcut.
+   */
+  divergenceAvailable: Schema.optional(Schema.Boolean),
   /**
    * Degraded-but-working advisory (M3.7): set while file watching is
    * unavailable (inotify budget) and capture runs on the short sweep
@@ -368,13 +436,92 @@ export type RoamingWipStatusEntry = typeof RoamingWipStatusEntry.Type;
 
 export const RoamingWipTakeoverRequest = Schema.Struct({
   workspaceProjectId: WorkspaceProjectId,
+  /**
+   * The snapshot the user was shown (status `blockedSnapshotOid`). When
+   * set, takeover refuses instead of applying a newer snapshot that
+   * arrived between render and click; omitted, newest wins (M3.8
+   * behavior, kept for the CLI/harness).
+   */
+  snapshotOid: Schema.optional(Schema.String),
 });
 export type RoamingWipTakeoverRequest = typeof RoamingWipTakeoverRequest.Type;
 
 export const RoamingWipTakeoverResponse = Schema.Struct({
   applied: Schema.Boolean,
+  /** Plain-language explanation when `applied` is false. */
+  reason: Schema.optional(Schema.String),
 });
 export type RoamingWipTakeoverResponse = typeof RoamingWipTakeoverResponse.Type;
+
+// ── Divergence (M4) ─────────────────────────────────────────────────
+//
+// Two-sided divergence: both machines moved the same branch. Resolution is
+// diff-and-choose — the user picks a whole side, never a merge — and the
+// losing side always stays recoverable as a local ref. This screen is the
+// trust story of the feature; nothing here may auto-resolve.
+
+/**
+ * One side of a divergence: that machine's branch/HEAD and newest WIP
+ * snapshot, plus a unified patch from the common ancestor (`baseOid`) to
+ * the snapshot tree. Patches ride the checkpoint-diff pipeline and share
+ * its size cap; `truncated` marks a capped patch.
+ */
+export const RoamingWipDivergenceSide = Schema.Struct({
+  branchRef: Schema.String,
+  headOid: Schema.String,
+  snapshotOid: Schema.String,
+  capturedAt: IsoDateTime,
+  patch: Schema.String,
+  truncated: Schema.optional(Schema.Boolean),
+});
+export type RoamingWipDivergenceSide = typeof RoamingWipDivergenceSide.Type;
+
+export const RoamingWipDivergence = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+  /** Merge-base of the two HEADs — the diff base for both patches. */
+  baseOid: Schema.String,
+  local: RoamingWipDivergenceSide,
+  peer: Schema.Struct({
+    ...RoamingWipDivergenceSide.fields,
+    environmentId: EnvironmentId,
+  }),
+});
+export type RoamingWipDivergence = typeof RoamingWipDivergence.Type;
+
+export const RoamingWipDivergenceRequest = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+});
+export type RoamingWipDivergenceRequest = typeof RoamingWipDivergenceRequest.Type;
+
+/** `divergence` is null when the project is not currently diverged. */
+export const RoamingWipDivergenceResponse = Schema.Struct({
+  divergence: Schema.NullOr(RoamingWipDivergence),
+});
+export type RoamingWipDivergenceResponse = typeof RoamingWipDivergenceResponse.Type;
+
+export const RoamingWipDivergenceResolveRequest = Schema.Struct({
+  workspaceProjectId: WorkspaceProjectId,
+  pick: Schema.Literals(["local", "peer"]),
+  /**
+   * The exact peer snapshot being resolved. A newer snapshot arriving
+   * between render and click refuses instead of being silently chosen.
+   */
+  peerSnapshotOid: Schema.String,
+});
+export type RoamingWipDivergenceResolveRequest = typeof RoamingWipDivergenceResolveRequest.Type;
+
+export const RoamingWipDivergenceResolveResponse = Schema.Struct({
+  resolved: Schema.Boolean,
+  /**
+   * Local ref preserving the losing side: the per-branch parked ref when
+   * the peer side won, `refs/t3/wip-rejected/<wsid>/<envid>` (the
+   * REJECTED peer's environmentId) when the local side won.
+   */
+  preservedRef: Schema.optional(Schema.String),
+  /** Plain-language explanation when `resolved` is false. */
+  reason: Schema.optional(Schema.String),
+});
+export type RoamingWipDivergenceResolveResponse = typeof RoamingWipDivergenceResolveResponse.Type;
 
 // ── Peers ────────────────────────────────────────────────────────────
 
@@ -640,5 +787,7 @@ export const ROAMING_HANDSHAKE_COMPLETE_PATH = "/api/roaming/handshake-complete"
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_WIP_TAKEOVER_PATH = "/api/roaming/wip/takeover";
+export const ROAMING_WIP_DIVERGENCE_PATH = "/api/roaming/wip/divergence";
+export const ROAMING_WIP_DIVERGENCE_RESOLVE_PATH = "/api/roaming/wip/divergence/resolve";
 export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";
 export const ROAMING_CONFLICT_RESOLVE_PATH = "/api/roaming/conflicts/resolve";
