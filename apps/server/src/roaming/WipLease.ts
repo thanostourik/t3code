@@ -36,12 +36,15 @@ export const LEASE_RENEW_MIN_INTERVAL_MS = 60 * 1000;
  * Write (or refresh) this machine's lease record. `lastSnapshotAt` set means
  * a snapshot just shipped — always write, carrying the new capture time.
  * Without it (turn activity), the write is throttled against the previous
- * record's renewedAt and preserves its lastSnapshotAt.
+ * record's renewedAt and preserves its lastSnapshotAt. `force` bypasses the
+ * throttle (takeover must move the lease even when this machine renewed
+ * moments ago and no follow-up ship happens).
  */
 export const renewLease = Effect.fn("WipLease.renewLease")(function* (input: {
   readonly workspaceProjectId: WorkspaceProjectId;
   readonly environmentId: EnvironmentId;
   readonly lastSnapshotAt?: string;
+  readonly force?: boolean;
 }) {
   yield* Effect.gen(function* () {
     const blobStore = yield* RoamingBlobStore;
@@ -55,6 +58,7 @@ export const renewLease = Effect.fn("WipLease.renewLease")(function* (input: {
     const now = yield* DateTime.now;
     if (
       input.lastSnapshotAt === undefined &&
+      input.force !== true &&
       previous !== null &&
       DateTime.toEpochMillis(now) - Date.parse(previous.renewedAt) < LEASE_RENEW_MIN_INTERVAL_MS
     ) {

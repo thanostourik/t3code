@@ -603,8 +603,8 @@ const make = Effect.gen(function* () {
       });
       // Move the lease here and now — the acknowledgement capture below also
       // renews it on a successful ship, but the takeover must move the chip
-      // even when the origin is unreachable.
-      yield* providePassDeps(renewLease({ workspaceProjectId, environmentId }));
+      // even when that ship no-ops or fails; force past the activity throttle.
+      yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
       yield* processTarget(target, { acknowledgeApplied: true });
       return true;
     }).pipe(
