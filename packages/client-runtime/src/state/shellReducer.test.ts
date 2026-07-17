@@ -72,6 +72,7 @@ const stubRoamingProject = {
   lastMirrorContactAt: null,
   updatedAt: "2026-04-01T00:00:00.000Z",
   conflicts: [],
+  activity: [],
 } as const;
 
 describe("applyShellStreamEvent", () => {
