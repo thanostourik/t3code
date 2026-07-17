@@ -3200,11 +3200,15 @@ function ProjectSyncIndicator(props: {
 
   // Divergence takes precedence over blind takeover; takeover remains
   // reachable inside the dialog as "Take the other machine's version".
-  const pillAction = entry.divergenceAvailable
-    ? () => setDivergenceOpen(true)
-    : entry.takeoverAvailable
-      ? takeOver
-      : null;
+  // A red "Sync error" pill must never carry a hidden action — the label
+  // and the click have to agree.
+  const pillAction = entry.lastError
+    ? null
+    : entry.divergenceAvailable
+      ? () => setDivergenceOpen(true)
+      : entry.takeoverAvailable
+        ? takeOver
+        : null;
 
   return (
     <>

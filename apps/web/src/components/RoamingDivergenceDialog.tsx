@@ -14,6 +14,7 @@ import {
   resolveRoamingWipDivergence,
 } from "../environments/primary/roaming";
 import { useTheme } from "../hooks/useTheme";
+import { useEnvironments } from "../state/environments";
 import {
   buildFileDiffRenderKey,
   getRenderablePatch,
@@ -84,7 +85,15 @@ export function RoamingDivergenceDialog(props: {
   const [loading, setLoading] = useState(false);
   const [resolving, setResolving] = useState<"local" | "peer" | null>(null);
   const [side, setSide] = useState<"local" | "peer">("peer");
-  const otherMachine = props.peerLabel ?? "the other machine";
+  const { environments } = useEnvironments();
+  // Prefer the fetched divergence's authoritative peer environment; the
+  // prop (from the blocked status) only bridges until the data arrives.
+  const fetchedLabel =
+    divergence !== null
+      ? (environments.find((candidate) => candidate.environmentId === divergence.peer.environmentId)
+          ?.label ?? null)
+      : null;
+  const otherMachine = fetchedLabel ?? props.peerLabel ?? "the other machine";
 
   useEffect(() => {
     if (!props.open) return;
@@ -186,11 +195,13 @@ export function RoamingDivergenceDialog(props: {
           )}
           {divergence !== null && (
             <>
-              <div className="flex gap-1 rounded-md bg-muted/40 p-1 text-sm" role="tablist">
+              {/* Plain toggle buttons rather than a partial ARIA tabs
+                  implementation — Tab/Enter/Space work, aria-pressed carries
+                  the state. */}
+              <div className="flex gap-1 rounded-md bg-muted/40 p-1 text-sm">
                 <button
                   type="button"
-                  role="tab"
-                  aria-selected={side === "peer"}
+                  aria-pressed={side === "peer"}
                   className={`flex-1 rounded px-3 py-1.5 ${side === "peer" ? "bg-background shadow-sm" : "text-muted-foreground"}`}
                   onClick={() => setSide("peer")}
                 >
@@ -198,8 +209,7 @@ export function RoamingDivergenceDialog(props: {
                 </button>
                 <button
                   type="button"
-                  role="tab"
-                  aria-selected={side === "local"}
+                  aria-pressed={side === "local"}
                   className={`flex-1 rounded px-3 py-1.5 ${side === "local" ? "bg-background shadow-sm" : "text-muted-foreground"}`}
                   onClick={() => setSide("local")}
                 >
