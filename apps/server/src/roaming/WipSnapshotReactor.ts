@@ -14,6 +14,7 @@
  */
 import {
   type ProjectId,
+  type RoamingWipDivergence,
   type RoamingWipStatusEntry,
   type WorkspaceProjectId,
 } from "@t3tools/contracts";
@@ -45,11 +46,21 @@ import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { watchTreeEvents } from "./treeWatcher.ts";
-import { runWipApplyForTarget, restoreParkedWipForTarget } from "./WipApply.ts";
+import {
+  getWipDivergenceForTarget,
+  resolveKeptLocalDivergence,
+  restoreParkedWipForTarget,
+  runWipApplyForTarget,
+} from "./WipApply.ts";
 import { runWipPassForTarget } from "./WipCapture.ts";
 import { renewLease } from "./WipLease.ts";
 import { bundleShipped, type WipTarget, type WipTransportMode } from "./WipShared.ts";
-import { resolveOid, wipAppliedMarkerRefName, wipPushedMarkerRefName } from "./WipSnapshots.ts";
+import {
+  resolveOid,
+  wipAppliedMarkerRefName,
+  wipParkedRefName,
+  wipPushedMarkerRefName,
+} from "./WipSnapshots.ts";
 
 const WIP_INTERVAL = Duration.minutes(2);
 const GIT_CONTEXT_INTERVAL = Duration.seconds(10);
@@ -72,7 +83,23 @@ export class WipSnapshotReactor extends Context.Service<
   {
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     readonly snapshotProject: (workspaceProjectId: WorkspaceProjectId) => Effect.Effect<void>;
-    readonly takeover: (workspaceProjectId: WorkspaceProjectId) => Effect.Effect<boolean>;
+    readonly takeover: (
+      workspaceProjectId: WorkspaceProjectId,
+      /** Pin: refuse when the newest snapshot is not the one the user saw. */
+      snapshotOid?: string,
+    ) => Effect.Effect<{ readonly applied: boolean; readonly reason?: string }>;
+    readonly divergence: (
+      workspaceProjectId: WorkspaceProjectId,
+    ) => Effect.Effect<RoamingWipDivergence | null>;
+    readonly resolveDivergence: (
+      workspaceProjectId: WorkspaceProjectId,
+      pick: "local" | "peer",
+      peerSnapshotOid: string,
+    ) => Effect.Effect<{
+      readonly resolved: boolean;
+      readonly preservedRef?: string;
+      readonly reason?: string;
+    }>;
     readonly snapshotAll: () => Effect.Effect<void>;
     readonly listStatuses: () => Effect.Effect<ReadonlyArray<RoamingWipStatusEntry>>;
     readonly subscribeUpdates: Effect.Effect<
@@ -351,6 +378,9 @@ const make = Effect.gen(function* () {
       const {
         blockedReason: _stale,
         takeoverAvailable: _staleTakeover,
+        blockedSnapshotOid: _staleSnapshot,
+        blockedFrom: _staleFrom,
+        divergenceAvailable: _staleDivergence,
         notice: _staleNotice,
         ...baseWithoutBlocked
       } = base;
@@ -374,9 +404,18 @@ const make = Effect.gen(function* () {
                     ", ",
                   )}${applied.conflicts.length > 3 ? ` and ${applied.conflicts.length - 3} more` : ""}`,
                 takeoverAvailable: true,
+                blockedSnapshotOid: applied.snapshotOid,
+                blockedFrom: applied.fromEnvironmentId,
               }
             : applied._tag === "blocked"
-              ? { ...withWarning, blockedReason: applied.reason, takeoverAvailable: true }
+              ? {
+                  ...withWarning,
+                  blockedReason: applied.reason,
+                  takeoverAvailable: applied.takeoverServiceable,
+                  blockedSnapshotOid: applied.snapshotOid,
+                  blockedFrom: applied.fromEnvironmentId,
+                  ...(applied.divergence ? { divergenceAvailable: true } : {}),
+                }
               : withWarning;
       const entryWithNotice: RoamingWipStatusEntry =
         currentNotice === undefined ? entry : { ...entry, notice: currentNotice };
@@ -571,18 +610,22 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const takeover: WipSnapshotReactor["Service"]["takeover"] = (workspaceProjectId) =>
+  const takeover: WipSnapshotReactor["Service"]["takeover"] = (workspaceProjectId, snapshotOid) =>
     Effect.gen(function* () {
-      if (!(yield* isEnabled)) return false;
+      if (!(yield* isEnabled)) return { applied: false as const };
       const target = (yield* listTargets).find(
         (candidate) => candidate.workspaceProjectId === workspaceProjectId,
       );
-      if (target === undefined) return false;
+      if (target === undefined) return { applied: false as const };
       const hasInFlightTurn = yield* threadRepository
         .hasActiveTurnByProjectId({ projectId: target.localProjectId })
         .pipe(Effect.orElseSucceed(() => true));
       const outcome = yield* providePassDeps(
-        runWipApplyForTarget(target, undefined, { hasInFlightTurn, takeover: true }),
+        runWipApplyForTarget(target, undefined, {
+          hasInFlightTurn,
+          takeover: true,
+          ...(snapshotOid !== undefined ? { expectedSnapshotOid: snapshotOid } : {}),
+        }),
       );
       // applied-with-conflicts is still a SUCCESSFUL takeover: the branch
       // switch and reset already happened by the time conflicts are known
@@ -590,12 +633,24 @@ const make = Effect.gen(function* () {
       // restore). Reporting false here would toast an error over a mutated
       // worktree and skip the acknowledgement capture the peer needs to
       // clear its own "Take over".
-      if (outcome._tag !== "applied" && outcome._tag !== "applied-with-conflicts") return false;
+      if (outcome._tag !== "applied" && outcome._tag !== "applied-with-conflicts") {
+        return {
+          applied: false as const,
+          ...(outcome._tag === "blocked" ? { reason: outcome.reason } : {}),
+        };
+      }
       const previous = (yield* Ref.get(statuses)).get(workspaceProjectId) ?? {
         workspaceProjectId,
         mode: "origin-refs" as const,
       };
-      const { blockedReason: _blocked, takeoverAvailable: _takeover, ...rest } = previous;
+      const {
+        blockedReason: _blocked,
+        takeoverAvailable: _takeover,
+        blockedSnapshotOid: _snapshot,
+        blockedFrom: _from,
+        divergenceAvailable: _divergence,
+        ...rest
+      } = previous;
       yield* publishEntry({
         ...rest,
         lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
@@ -606,12 +661,95 @@ const make = Effect.gen(function* () {
       // even when that ship no-ops or fails; force past the activity throttle.
       yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
       yield* processTarget(target, { acknowledgeApplied: true });
-      return true;
+      return { applied: true as const };
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("roaming wip: takeover failed", { workspaceProjectId, cause }).pipe(
-          Effect.as(false),
+          Effect.as({ applied: false as const }),
         ),
+      ),
+    );
+
+  const divergence: WipSnapshotReactor["Service"]["divergence"] = (workspaceProjectId) =>
+    Effect.gen(function* () {
+      if (!(yield* isEnabled)) return null;
+      const target = (yield* listTargets).find(
+        (candidate) => candidate.workspaceProjectId === workspaceProjectId,
+      );
+      if (target === undefined) return null;
+      return yield* providePassDeps(getWipDivergenceForTarget(target));
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("roaming wip: divergence query failed", {
+          workspaceProjectId,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+
+  const resolveDivergence: WipSnapshotReactor["Service"]["resolveDivergence"] = (
+    workspaceProjectId,
+    pick,
+    peerSnapshotOid,
+  ) =>
+    Effect.gen(function* () {
+      if (!(yield* isEnabled)) {
+        return { resolved: false as const, reason: "sync is not enabled for this project" };
+      }
+      const target = (yield* listTargets).find(
+        (candidate) => candidate.workspaceProjectId === workspaceProjectId,
+      );
+      if (target === undefined) {
+        return { resolved: false as const, reason: "project is not on this machine" };
+      }
+      if (pick === "peer") {
+        // Re-verify the divergence still exists on exactly this snapshot: a
+        // fast-forward that settled things between render and click must not
+        // turn "take the other version" into a surprise backward reset.
+        const current = yield* providePassDeps(getWipDivergenceForTarget(target));
+        if (current === null || current.peer.snapshotOid !== peerSnapshotOid) {
+          return {
+            resolved: false as const,
+            reason:
+              "the machines no longer disagree on this project (or the other machine's work changed); review the latest state",
+          };
+        }
+        // Taking the peer side IS a pinned takeover; the losing local state
+        // lands on the per-branch parked ref written before the HEAD move.
+        const branch = yield* git.execute({
+          operation: "WipSnapshotReactor.divergenceLocalBranch",
+          cwd: target.workspaceRoot,
+          args: ["symbolic-ref", "-q", "HEAD"],
+          allowNonZeroExit: true,
+        });
+        const parkedRef =
+          branch.exitCode === 0
+            ? yield* wipParkedRefName(target.workspaceProjectId, branch.stdout.trim()).pipe(
+                Effect.orElseSucceed(() => undefined),
+              )
+            : undefined;
+        const result = yield* takeover(workspaceProjectId, peerSnapshotOid);
+        return {
+          resolved: result.applied,
+          ...(result.applied && parkedRef !== undefined ? { preservedRef: parkedRef } : {}),
+          ...(result.reason !== undefined ? { reason: result.reason } : {}),
+        };
+      }
+      const result = yield* providePassDeps(resolveKeptLocalDivergence(target, peerSnapshotOid));
+      if (!result.resolved) {
+        return { resolved: false as const, reason: result.reason };
+      }
+      // The acknowledgement capture ships our kept-local state naming the
+      // rejected snapshot; classification then settles it on both machines
+      // and this pass publishes the cleared (non-blocked) status.
+      yield* processTarget(target, { acknowledgeApplied: true });
+      return { resolved: true as const, preservedRef: result.preservedRef };
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("roaming wip: divergence resolution failed", {
+          workspaceProjectId,
+          cause,
+        }).pipe(Effect.as({ resolved: false as const, reason: "internal error" })),
       ),
     );
 
@@ -804,6 +942,8 @@ const make = Effect.gen(function* () {
     start,
     snapshotProject,
     takeover,
+    divergence,
+    resolveDivergence,
     snapshotAll,
     listStatuses,
     subscribeUpdates: PubSub.subscribe(updates),
