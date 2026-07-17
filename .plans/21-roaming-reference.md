@@ -24,10 +24,10 @@ live in `21-roaming-history.md`.
   must pass — the transports take different classifier baselines.
   Server-to-server auth
   smoke test: `scripts/roaming/spike-server-to-server.mjs`.
-- WIP-classifier changes re-run the FULL ladder (m35–m38 + canonical), not
-  just the current milestone's script: fixes #4–#7 (2026-07-11→15) re-ran
-  only `accept-m38` and the m35 no-clobber guarantee regressed unnoticed
-  until the 2026-07-15 audit.
+- WIP-classifier changes re-run the FULL ladder (m35–m38 + canonical),
+  never just the current milestone's script — the earlier suites hold the
+  earlier guarantees (the m35 no-clobber regression hid behind m38-only
+  reruns for four days).
 - Run discipline: scripts and logs under /tmp, fresh harness state per
   acceptance script, no compound one-liners; stale accept-script semantics
   get revised with the milestone that changed them, never worked around.
@@ -259,72 +259,63 @@ live in `21-roaming-history.md`.
 
 ### Apply
 
-- Context classifier by
-  ancestry: same-context → per-file merge below; fast-forward (same branch,
-  peer HEAD descendant, untouched checkout) → `merge --ff-only` + diff on
-  top; different branch (untouched, ff-safe) → park, switch, apply;
-  peer-behind → skip; diverged/detached/legacy → blocked. Untouched =
-  worktree tree equals the applied-marker tree or current HEAD tree +
-  local branch/HEAD matches this machine's latest payload (or the applied
-  payload before first local capture) + no in-progress git op + no in-flight
-  agent turn. The in-flight guard uses a project-level projection query
-  joining threads to sessions. Every blocked case sets a specific
-  `blockedReason` and surfaces the takeover action. A pinned conflict marker
-  carries `T3-Peer-Snapshot`; once this machine captures its kept-local result,
-  that exact peer commit is resolved and does not recreate takeover on restart.
-  A different peer commit is evaluated normally. The
-  former "strictly newer than HEAD" committer-timestamp staleness gate is
-  deleted, not kept alongside. Newest-peer selection across
-  environments stays committer-timestamp (fine at 2 machines). An exact
-  provenance echo (Based-On + branch/HEAD/tree all match our last shipped
-  payload) advances marker bookkeeping but never reverses a newer local
-  branch switch. A different-branch snapshot whose Based-On predates our
-  latest shipment is suppressed as a delayed echo only when its tree equals
-  its HEAD (no peer WIP) AND its HEAD is an ancestor of ours — a proven echo,
-  its position already contained in our history. An unproven clean snapshot
-  blocks with takeover offered, never silently skips (a skip settles both
-  machines on "Synced" while divergent — audit finding 2026-07-15).
-  A dirty peer snapshot is real active work but remains
-  blocked when it does not acknowledge the latest local shipment, even if the
-  local checkout is clean. It can never auto-switch a newly reset branch.
-  The pre-apply local baseline is the pushed marker in origin-ref mode and the
-  current locally mirrored payload commit in bundle mode; a missing origin
-  marker must not disable causal classification in bundle fallback.
-  Reactor passes apply before capture so a receiver never ships stale
-  pre-apply context back to the author. Successful takeover forces one
-  acknowledgement capture even when the resulting tuple exactly equals the
-  applied peer snapshot; that
-  causal echo lets the non-taking-over machine clear its blocked status.
-  A manual Git branch switch retains any carried WIP exactly as Git leaves it;
-  the reactor never removes those files to force a parked snapshot into place.
-  Parked work restores only when the returned checkout is clean and its HEAD
-  still matches the parked snapshot's parent. Until then the parked ref stays
-  recoverable; a successful clean restore consumes it.
-- Per-file merge (M3.7, survives as the same-context path): a checkout whose
-  worktree equals `HEAD^{tree}` rebases to HEAD even when a retained applied
-  marker describes older WIP; a dirty checkout uses the applied marker, else
-  HEAD, else the empty tree. For a path missing from that base, the
-  last-shipped snapshot substitutes as base ONLY when it is provably common
-  history: the path is absent locally (our own deletion — the delete flap),
-  the path is a proof-gated shipped-only delete, or the peer snapshot's
-  `T3-Based-On`/`T3-Based-On-Peer` names our shipment (a reply, per M3.6
-  delivery). An unproven concurrent snapshot never uses our own shipment as
-  base — our unacknowledged edit would compare "untouched" against it and
-  the peer's bytes would overwrite local work (accept-m35 no-clobber
-  regression, 2026-07-15); it conflicts and keeps ours instead. Peer changes via
-  `git diff --name-status --no-renames <base> <peer>`. Per path with
-  `{ baseOid, peerOid, ourOid(worktree hash) }`: ours=peer → skip; local
-  changed + peer unchanged → keep local silently; both changed → conflict,
-  keep ours, surface; local untouched + peer deleted → remove; local
-  untouched + peer content → `git restore --source=<peer> --worktree`;
-  path occupied by a directory/conflicting parent → conflict. For a path
-  absent from clean HEAD but present in the last-shipped snapshot, an exact
-  peer echo preserves the local deletion; different peer bytes are a newly
-  recreated file and apply normally. This prevents retained metadata from
-  turning a clean reset plus same-name peer creation into false takeover and
-  a destructive deletion. Same-context apply never touches HEAD, branch refs,
-  or the real index; only classified fast-forward, switch, and takeover paths
-  move HEAD.
+- Classification (same context / fast-forward / different branch /
+  peer-behind / diverged) is the plan's decision table; the EXECUTABLE
+  source of truth for guard precedence is `classifyWipApply` in
+  `WipApply.ts` — a pure decision table over gathered `WipContextFacts`,
+  with invariant tests enumerating the whole fact space. Not restated here.
+  Mechanics that bind it:
+  - Untouched (defined in the plan) mechanically requires the local
+    branch/HEAD to match this machine's latest captured payload (or the
+    applied payload before first local capture); the in-flight-turn guard
+    uses a project-level projection query joining threads to sessions.
+  - Staleness is ancestry, never wall clock (the committer-timestamp gate
+    is deleted, not kept alongside). Newest-peer selection across
+    environments stays committer-timestamp (fine at 2 machines).
+  - Every blocked case sets a specific `blockedReason` and surfaces the
+    takeover action.
+  - Echo/acknowledgement rules (each answers a field bug):
+    - An exact provenance echo (Based-On + branch/HEAD/tree = our last
+      shipment) advances marker bookkeeping only; it never reverses a
+      newer local branch switch.
+    - A different-branch snapshot with a stale Based-On is a delayed echo
+      ONLY when clean AND its HEAD is an ancestor of ours; unproven, it
+      blocks with takeover offered — a silent skip settles both machines
+      on "Synced" while divergent.
+    - A dirty stale snapshot is real work but stays blocked until it
+      acknowledges our latest shipment; it can never auto-switch a newly
+      reset branch.
+    - A pinned conflict marker's exact `T3-Peer-Snapshot` commit is
+      resolved once this machine's kept-local result ships; it never
+      recreates takeover on restart. A different peer commit re-evaluates.
+  - Pre-apply causal baseline: the pushed marker in origin mode, the
+    current mirrored payload commit in bundle mode — a missing origin
+    marker must not disable causal classification in bundle fallback.
+  - Passes apply BEFORE capture, so a receiver never ships stale pre-apply
+    context back to the author. Successful takeover forces one
+    acknowledgement capture even on an exact applied tuple, so the peer
+    clears its block.
+  - Parked refs: a manual git switch keeps carried WIP exactly as Git
+    leaves it — the reactor never deletes files to force a parked snapshot
+    into place; restore only when the returned checkout is clean at the
+    parked snapshot's parent, and success consumes the ref.
+- Per-file merge (the same-context path). Executable source of truth:
+  `resolveWipPathAction` (pure, table-tested). Base selection: a
+  clean-at-HEAD checkout rebases to HEAD (a retained applied marker must
+  not manufacture local edits); dirty checkouts use the applied marker,
+  else HEAD, else the empty tree. A path missing from that base may use
+  the last-shipped snapshot as base ONLY when it is provably common
+  history — locally absent (our own deletion; the delete flap), a
+  proof-gated shipped-only delete, or the peer's Based-On/Based-On-Peer
+  naming our shipment (a reply, M3.6 delivery); an unproven concurrent
+  snapshot conflicts and keeps ours (the m35 no-clobber rule). Per path
+  over `{ baseOid, peerOid, ourOid }`: ours=peer → skip; local changed +
+  peer unchanged → keep local silently; both changed → conflict, keep
+  ours, surface; untouched + peer deleted → remove; untouched + peer
+  content → `git restore --source=<peer> --worktree`; occupied path →
+  conflict. Clean-at-HEAD deletion echo: exact shipped bytes stay deleted,
+  different bytes are a recreated file and apply. Same-context apply never
+  touches HEAD, branch refs, or the real index.
 - `POST /api/roaming/wip/takeover` reclassifies the newest snapshot, parks
   local state, reproduces the peer branch/HEAD/tree, and returns whether it
   applied. Per-file conflicts during takeover (an ignored file colliding
@@ -360,9 +351,8 @@ live in `21-roaming-history.md`.
   apply timestamps describe completed work, so they render `Synced`
   immediately; there is no timestamp-derived fake `Syncing` interval.
   Concept-free copy — no "roaming"/"sync engine" wording.
-- `blockedReason` and `takeoverAvailable` clear on every non-blocked pass.
-  Branch-context reasons include
-  enumerated branch-context reasons ("peer is on <branch>", "peer moved
+- `blockedReason` and `takeoverAvailable` clear on every non-blocked pass;
+  reasons are enumerated plain language ("peer is on <branch>", "peer moved
   <branch> forward; you have local edits", divergence, legacy snapshot).
 - `roamingWipStatus` is transient reactor state, not durable shell data. The
   client strips the entire array from shell-cache loads and writes so a cached
