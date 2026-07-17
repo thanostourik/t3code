@@ -100,7 +100,18 @@ export type WipPassOutcome =
 export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTarget")(function* (
   target: WipTarget,
   mode: WipTransportMode,
-  options: { readonly acknowledgeApplied?: boolean } = {},
+  options: {
+    readonly acknowledgeApplied?: boolean;
+    /**
+     * Set by the reactor when this pass applied peer content (or is an
+     * acknowledgement): the resulting ship is an echo of received work,
+     * not local activity, and must not move the advisory lease — the
+     * receiving machine would otherwise read as "active" after every
+     * delivery. Explicit user actions (takeover, kept-local resolution)
+     * renew forcibly at their call sites instead.
+     */
+    readonly suppressLeaseRenewal?: boolean;
+  } = {},
 ) {
   const git = yield* GitVcsDriver;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -314,11 +325,13 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         workspaceProjectId: target.workspaceProjectId,
         payload,
       });
-      yield* renewLease({
-        workspaceProjectId: target.workspaceProjectId,
-        environmentId,
-        lastSnapshotAt: capturedAt,
-      });
+      if (options.suppressLeaseRenewal !== true) {
+        yield* renewLease({
+          workspaceProjectId: target.workspaceProjectId,
+          environmentId,
+          lastSnapshotAt: capturedAt,
+        });
+      }
       return {
         ...entryBase,
         mode: "bundle",
@@ -420,11 +433,13 @@ export const runWipPassForTarget = Effect.fn("WipSnapshotReactor.runWipPassForTa
         }),
       ),
     );
-    yield* renewLease({
-      workspaceProjectId: target.workspaceProjectId,
-      environmentId,
-      lastSnapshotAt: capturedAt,
-    });
+    if (options.suppressLeaseRenewal !== true) {
+      yield* renewLease({
+        workspaceProjectId: target.workspaceProjectId,
+        environmentId,
+        lastSnapshotAt: capturedAt,
+      });
+    }
     return {
       _tag: "done",
       nextMode: "origin-refs",
