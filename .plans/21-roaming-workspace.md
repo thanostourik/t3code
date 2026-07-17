@@ -22,7 +22,7 @@ the document must be corrected before coding.
 2. **Pair the desktop — once.** This is the *existing* pairing/thin-client
    flow (one code, one dialog), which gains a JetBrains-style **what to
    sync** step: Projects (always on), Secret files (pre-checked, default
-   patterns), Work in progress (M3), Conversations (M6).
+   patterns), Work in progress (M3), Conversations (M5).
 3. **Remote conversations work immediately.** The desktop's projects appear
    live in the ONE project list; opening one runs on the desktop (thin
    client). If pairing succeeded but a remote conversation doesn't work,
@@ -42,9 +42,13 @@ dead.
 
 ## Status
 
-M0–M3.8 done (2026-07-04 → 2026-07-11; results in the history file).
-The branch-aware ship gate is closed. M4–M7 remain queued; no later milestone
-is active.
+M0–M3.8 done (2026-07-04 → 2026-07-11; results in the history file), plus
+the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
+(reactor split, decision-table classifier, shim removal — PRs #57–#60).
+The branch-aware ship gate is closed. M4–M7 remain queued in execution
+order (renumbered 2026-07-17): M4 takeover + divergence, M5 briefs +
+transcripts, M6 bootstrap recipes, M7 cloud store. M4 is next; no
+milestone is active.
 
 ## Thesis
 
@@ -106,9 +110,21 @@ history file.
   state (branch + HEAD + dirty tree); apply either reproduces that state
   completely or touches nothing. Auto-apply may switch branches on an
   untouched checkout; every blocked state gets a minimal explicit takeover
-  action (pulled forward from M5); local work parks per branch in hidden
+  action (pulled forward from the takeover milestone, M4 since the
+  2026-07-17 renumber); local work parks per branch in hidden
   refs before any switch. Legacy (branch-blind) snapshots never auto-apply.
   Takeover status is live-only and never restored from the client shell cache.
+- **2026-07-17 — milestones renumbered to execution order (user decision,
+  second renumber):** M4 = takeover + divergence (was M5), M5 = briefs +
+  transcripts (was M6), M6 = bootstrap recipes (was M4); M7 unchanged.
+  Rationale: takeover/divergence and roaming conversations FINISH the core
+  sync story; recipes are the open-ended comfort feature (agent setup of
+  arbitrary unknown projects — unbounded tool/environment combinations, no
+  pre-specified steps) and run last before the gated cloud milestone.
+  Numbers must always match execution order — kickoff prompts address
+  milestones by number. Documents dated before 2026-07-17 use the previous
+  numbering; the numbering-era map at the top of the history file
+  disambiguates all three eras.
 
 ## Architecture
 
@@ -216,7 +232,7 @@ by ancestry (merge-base), never wall clock:
 | Fast-forward | Bp=Bl, Hp descendant of Hl | Untouched checkout: fetch, `merge --ff-only` to Hp, apply dirty diff on top. Locally edited: **blocked** ("peer moved <branch> forward; you have local edits"). |
 | Different branch | Bp≠Bl | Untouched checkout: park, create/update local Bp at Hp (only if fast-forward-safe), `git switch`, apply diff. Touched, or local Bp not ff-safe: **blocked** ("peer is on <branch>"). |
 | Peer behind | Hp ancestor of Hl | Skip (marker bookkeeping only). |
-| Diverged / detached / legacy payload | everything else | **Blocked.** Divergence resolution UI is M5. |
+| Diverged / detached / legacy payload | everything else | **Blocked.** Divergence resolution UI is M4. |
 
 **Untouched** = worktree tree equals either the applied-marker tree or the
 current HEAD tree (a Git-clean checkout stays untouched when retained sync
@@ -233,10 +249,11 @@ Auto-switch on an untouched checkout is accepted behavior (user decision
 survives switching). A branch return observed while T3 is running restores
 the snapshot once. Startup alone never restores a parked ref.
 
-**Takeover (minimal, pulled forward from M5):** every blocked state surfaces
+**Takeover (minimal, pulled forward from the takeover milestone):** every
+blocked state surfaces
 one explicit action — park local state, switch/create the peer's branch at
 its HEAD, restore its dirty diff. Leases, activity chips, and the
-diff-and-choose divergence screen stay M5; M3.8 only guarantees blocked
+diff-and-choose divergence screen stay M4; M3.8 only guarantees blocked
 states are never dead ends.
 
 **What roams and what doesn't:** the checked-out branch + HEAD + dirty tree
@@ -251,7 +268,7 @@ auto-puller, and only ever fast-forward.
 data), so `roamingWipSync` defaults off; the pre-checked "Work in progress"
 pairing row is the consent, one decision for both machines.
 
-### Takeover + divergence (M5)
+### Takeover + divergence (M4)
 
 Advisory lease blob per project (never a lock) powering "active on desktop,
 snapshot 4 min ago" chips; full takeover UX; two-sided divergence rendered
@@ -260,7 +277,16 @@ picks a side, the losing side stays recoverable as a ref. No three-way
 merge, no auto-resolution, ever. This screen is the trust story of the
 feature.
 
-### Bootstrap recipes (M4)
+### Briefs + transcripts (M5)
+
+Mirror *projected transcripts*, not raw orchestration events; mirrored
+threads render read-only ("from desktop"), never imported into the local
+event log — no cross-machine event conflict model exists because no import
+path exists. Park = final snapshot + agent-written resumption brief; resume
+= new local thread seeded with the brief. Deliberately no provider-session
+transplants.
+
+### Bootstrap recipes (M6)
 
 The clone was never the expensive part — setup is. First materialization
 runs an agent thread that sets up the repo, verifies the dev server boots,
@@ -269,15 +295,6 @@ command steps, no DSL). Replays run the recipe; failures escalate to an
 agent turn seeded with the recipe + failure output. Recipes rot; the agent
 fallback is the feature, the recipe is the cache. V1 targets scriptable
 setups; capture-what-happened over guaranteed-boot.
-
-### Briefs + transcripts (M6)
-
-Mirror *projected transcripts*, not raw orchestration events; mirrored
-threads render read-only ("from desktop"), never imported into the local
-event log — no cross-machine event conflict model exists because no import
-path exists. Park = final snapshot + agent-written resumption brief; resume
-= new local thread seeded with the brief. Deliberately no provider-session
-transplants.
 
 ## Explicitly not building
 
@@ -308,9 +325,9 @@ detail live in the history and reference files.
 | M3.6 — Field round 2 | Vault delivery on arrival, based-on fast-forward, sync visibility (blockedReason + pill). | ✅ 2026-07-07. |
 | M3.7 — Sync hardening | Per-file WIP merge, two-machine deletion model, sync pill data path, title propagation, vault interval backbone, watcher budget, mirror/wait long-poll, delivery-latency exit criteria. | ✅ 2026-07-10. |
 | M3.8 — Branch-aware sync model (SHIP GATE) | Full working-state snapshots, ancestry classifier, safe HEAD transitions, parking/takeover, branch-aware materialize. | ✅ 2026-07-11. |
-| M4 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
-| M5 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | Takeover applies newest snapshot and moves the lease; two-sided divergence shows diff-and-choose; the losing side stays recoverable. Canonical re-run. |
-| M6 — Briefs + transcripts | Step 7 + "Conversations" pairing row. | Threads from A readable on B; park produces an editable brief; resume seeds a new local thread. Canonical re-run. |
+| M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | Takeover applies newest snapshot and moves the lease; two-sided divergence shows diff-and-choose; the losing side stays recoverable. Canonical re-run. |
+| M5 — Briefs + transcripts | Step 7 + "Conversations" pairing row. | Threads from A readable on B; park produces an editable brief; resume seeds a new local thread. Canonical re-run. |
+| M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 
 ## Execution process

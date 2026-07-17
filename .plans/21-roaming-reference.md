@@ -204,7 +204,7 @@ live in `21-roaming-history.md`.
   triggers/coalescing/status only.
 - Temp-index recipe in `roaming/WipSnapshots.ts` (NOT the driver op): seed
   from HEAD, `add -A`, subtract vault set, `write-tree`, `commit-tree` with
-  **parent = HEAD** (thin bundles are ancestry-based; also M5's common
+  **parent = HEAD** (thin bundles are ancestry-based; also M4 divergence's common
   ancestor) and `T3-Based-On: <applied-marker oid>` trailer. When that marker
   represents pinned conflicts, the same contiguous trailer block also carries
   `T3-Based-On-Peer: <peer oid>`; snapshot ancestry remains unchanged. Returns
@@ -374,7 +374,7 @@ live in `21-roaming-history.md`.
 
 - Synchronous `POST /api/roaming/materialize` + resumable idempotent step
   machine in `roaming_materializations`: resolve-path → clone →
-  restore-wip → apply-vault → register-project → bootstrap (M4). Failed
+  restore-wip → apply-vault → register-project → bootstrap (M6). Failed
   runs return the failed record over HTTP 200; resume continues from the
   failed step. Progress = step-machine PubSub merged at the shell subscribe
   point.
