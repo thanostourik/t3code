@@ -45,6 +45,7 @@ import {
   type ContextMenuItem,
   DEFAULT_SERVER_SETTINGS,
   ProjectId,
+  ROAMING_LEASE_ACTIVE_WINDOW_MS,
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
   type SidebarProjectGroupingMode,
@@ -134,6 +135,7 @@ import {
   resolveThreadRouteRef,
   resolveThreadRouteTarget,
 } from "../threadRoutes";
+import { RoamingDivergenceDialog } from "./RoamingDivergenceDialog";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatElapsedDurationLabel, formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -2349,7 +2351,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             <span className="truncate text-xs font-medium text-foreground/90">
               {project.displayName}
             </span>
-            <ProjectSyncIndicator workspaceProjectId={syncWorkspaceProjectId} />
+            <ProjectSyncIndicator
+              workspaceProjectId={syncWorkspaceProjectId}
+              projectTitle={project.displayName}
+            />
             {project.groupedProjectCount > 1 ? (
               <span className="shrink-0 text-[10px] text-muted-foreground/60">
                 {project.groupedProjectCount} projects
@@ -3019,22 +3024,51 @@ const joinTargetPath = (baseDirectory: string, dirName: string): string => {
  * blocked, and failed sync. Data is the wip status the server already
  * streams; no new concepts, no "roaming" wording.
  */
-function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undefined }) {
+function ProjectSyncIndicator(props: {
+  workspaceProjectId: string | null | undefined;
+  projectTitle?: string;
+}) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const wipStatus = useEnvironmentRoamingWipStatus(primaryEnvironmentId);
   const roamingWipSync = usePrimarySettings((settings) => settings.roamingWipSync);
+  const roamingProjects = useRoamingProjects();
+  const { environments } = useEnvironments();
   const entry = props.workspaceProjectId
     ? wipStatus.find((candidate) => candidate.workspaceProjectId === props.workspaceProjectId)
     : undefined;
   const [takingOver, setTakingOver] = useState(false);
+  const [divergenceOpen, setDivergenceOpen] = useState(false);
+  const machineLabel = useCallback(
+    (environmentId: string | undefined) =>
+      environmentId !== undefined
+        ? (environments.find((candidate) => candidate.environmentId === environmentId)?.label ??
+          null)
+        : null,
+    [environments],
+  );
+  // Advisory activity (M4): the machine with the newest lease record is
+  // where work is live; only a FRESH record on another machine renders.
+  const activity =
+    props.workspaceProjectId && primaryEnvironmentId
+      ? roamingProjects.find(
+          (candidate) =>
+            candidate.environmentId === primaryEnvironmentId &&
+            candidate.roamingProject.workspaceProjectId === props.workspaceProjectId,
+        )?.roamingProject.activity?.[0]
+      : undefined;
+  const blockedSnapshotOid = entry?.blockedSnapshotOid;
   const takeOver = useCallback(() => {
     if (!props.workspaceProjectId || takingOver) return;
     setTakingOver(true);
     void takeoverRoamingWip({
       workspaceProjectId: WorkspaceProjectId.make(props.workspaceProjectId),
+      // Pin the snapshot the pill described — a newer arrival refuses
+      // instead of silently applying work the user never saw.
+      ...(blockedSnapshotOid !== undefined ? { snapshotOid: blockedSnapshotOid } : {}),
     })
-      .then(({ applied }) => {
-        if (!applied) throw new Error("The other machine's state is no longer available.");
+      .then(({ applied, reason }) => {
+        if (!applied)
+          throw new Error(reason ?? "The other machine's state is no longer available.");
         toastManager.add({ type: "success", title: "Switched to the other machine's work" });
       })
       .catch((error: unknown) => {
@@ -3045,7 +3079,7 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
         });
       })
       .finally(() => setTakingOver(false));
-  }, [props.workspaceProjectId, takingOver]);
+  }, [props.workspaceProjectId, takingOver, blockedSnapshotOid]);
 
   // Re-render on a clock so "Synced 3m" stays fresh even when no new status
   // arrives. Capture/apply timestamps record completed operations; they must
@@ -3094,12 +3128,32 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       tip: `Sync problem: ${entry.lastError}`,
     };
   } else if (entry.blockedReason) {
-    pill = {
-      icon: takingOver ? "spinner" : "dot",
-      dotClass: "bg-amber-500",
-      text: takingOver ? "Switching…" : "Take over",
-      tip: `${entry.blockedReason}. Take over to park this machine's work and switch to the other machine's state.`,
-    };
+    if (entry.divergenceAvailable) {
+      // Two-sided divergence: the pill opens diff-and-choose, never a
+      // blind takeover — this screen is the trust story of the feature.
+      pill = {
+        icon: "dot",
+        dotClass: "bg-amber-500",
+        text: "Review changes",
+        tip: `${entry.blockedReason}. Review both versions and pick which one to keep.`,
+      };
+    } else if (entry.takeoverAvailable) {
+      pill = {
+        icon: takingOver ? "spinner" : "dot",
+        dotClass: "bg-amber-500",
+        text: takingOver ? "Switching…" : "Take over",
+        tip: `${entry.blockedReason}. Take over to park this machine's work and switch to the other machine's state.`,
+      };
+    } else {
+      // Blocked but not actionable right now (e.g. an agent turn is in
+      // flight) — honest waiting state instead of a button that refuses.
+      pill = {
+        icon: "dot",
+        dotClass: "bg-amber-500",
+        text: "Waiting",
+        tip: entry.blockedReason,
+      };
+    }
   } else if (entry.notice) {
     // Degraded but working (e.g. file watching unavailable): sync still
     // runs on a short sweep — advisory amber, not an error.
@@ -3108,6 +3162,23 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
       dotClass: "bg-amber-500",
       text: "Sync on",
       tip: entry.notice,
+    };
+  } else if (
+    activity !== undefined &&
+    activity.environmentId !== primaryEnvironmentId &&
+    now - Date.parse(activity.renewedAt) < ROAMING_LEASE_ACTIVE_WINDOW_MS
+  ) {
+    // Advisory lease chip (M4): work is live on the other machine right now.
+    const label = machineLabel(activity.environmentId);
+    pill = {
+      icon: "dot",
+      dotClass: "bg-sky-500",
+      text: label !== null ? `Active on ${label}` : "Active elsewhere",
+      tip: `Being worked on ${label ?? "the other machine"} right now${
+        activity.lastSnapshotAt !== undefined
+          ? ` — last snapshot ${formatElapsedDurationLabel(activity.lastSnapshotAt, now)} ago`
+          : ""
+      }.`,
     };
   } else if (lastActivityIso !== undefined) {
     pill = {
@@ -3127,40 +3198,61 @@ function ProjectSyncIndicator(props: { workspaceProjectId: string | null | undef
     };
   }
 
+  // Divergence takes precedence over blind takeover; takeover remains
+  // reachable inside the dialog as "Take the other machine's version".
+  const pillAction = entry.divergenceAvailable
+    ? () => setDivergenceOpen(true)
+    : entry.takeoverAvailable
+      ? takeOver
+      : null;
+
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            role={entry.takeoverAvailable ? "button" : undefined}
-            tabIndex={entry.takeoverAvailable ? 0 : undefined}
-            aria-label={pill.tip}
-            aria-disabled={takingOver || undefined}
-            onPointerDown={(event) => entry.takeoverAvailable && event.stopPropagation()}
-            onClick={(event) => {
-              if (!entry.takeoverAvailable) return;
-              event.stopPropagation();
-              takeOver();
-            }}
-            onKeyDown={(event) => {
-              if (!entry.takeoverAvailable || (event.key !== "Enter" && event.key !== " ")) return;
-              event.preventDefault();
-              event.stopPropagation();
-              takeOver();
-            }}
-            className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
-          >
-            {pill.icon === "spinner" ? (
-              <LoaderIcon className="size-2.5 shrink-0 animate-spin" />
-            ) : (
-              <span className={`size-2 shrink-0 rounded-full ${pill.dotClass}`} />
-            )}
-            <span className="whitespace-nowrap">{pill.text}</span>
-          </span>
-        }
-      />
-      <TooltipPopup side="top">{pill.tip}</TooltipPopup>
-    </Tooltip>
+    <>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span
+              role={pillAction !== null ? "button" : undefined}
+              tabIndex={pillAction !== null ? 0 : undefined}
+              aria-label={pill.tip}
+              aria-disabled={takingOver || undefined}
+              onPointerDown={(event) => pillAction !== null && event.stopPropagation()}
+              onClick={(event) => {
+                if (pillAction === null) return;
+                event.stopPropagation();
+                pillAction();
+              }}
+              onKeyDown={(event) => {
+                if (pillAction === null || (event.key !== "Enter" && event.key !== " ")) return;
+                event.preventDefault();
+                event.stopPropagation();
+                pillAction();
+              }}
+              className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
+            >
+              {pill.icon === "spinner" ? (
+                <LoaderIcon className="size-2.5 shrink-0 animate-spin" />
+              ) : (
+                <span className={`size-2 shrink-0 rounded-full ${pill.dotClass}`} />
+              )}
+              <span className="whitespace-nowrap">{pill.text}</span>
+            </span>
+          }
+        />
+        <TooltipPopup side="top">{pill.tip}</TooltipPopup>
+      </Tooltip>
+      {divergenceOpen &&
+        props.workspaceProjectId !== null &&
+        props.workspaceProjectId !== undefined && (
+          <RoamingDivergenceDialog
+            workspaceProjectId={props.workspaceProjectId}
+            projectTitle={props.projectTitle}
+            peerLabel={machineLabel(entry.blockedFrom)}
+            open={divergenceOpen}
+            onOpenChange={setDivergenceOpen}
+          />
+        )}
+    </>
   );
 }
 
