@@ -1960,6 +1960,57 @@ typecheck across 15 workspaces, and the full fresh-state ladder —
 `accept-m35`, `accept-m38` (bundle AND origin transports), `accept-m36`,
 `accept-m37`, `accept-m2.5`.
 
+## 2026-07-17/18 — M4 takeover + divergence (results)
+
+Landed as PRs #63–#69 on 2026-07-17, accepted 2026-07-18. Delivered per the
+plan's M4 section: per-machine advisory lease records (key `<wsid>/<envid>`
+— the analysis pass rejected the per-project singleton, which would produce
+equal-version blob conflicts exactly when both machines are active),
+"active on <machine>" chips, the distinct divergence surface with two-sided
+merge-base patches and diff-and-choose resolution (losing side always
+recoverable: parked ref for pick=peer, new `wip-rejected` pin for
+pick=local), honest `takeoverAvailable`, and snapshot pinning on
+takeover/resolve (no race-to-newest from the UI).
+
+Notable analysis-pass findings (recorded in #63 before coding): `lease` was
+already plumbed generically since the contracts era; divergence existed
+only as a blocked-reason string; the plan's `merge --ff-only` wording did
+not match the shipped ancestry-gated hard reset; the losing peer side of a
+kept-local resolution previously lived only in the peer's force-updatable
+wip ref.
+
+Field bugs caught by acceptance (both invisible to unit tests):
+
+- #69 — the bundle transport's blob dedupe compared only tree/branch/HEAD,
+  silently dropping acknowledgement captures whose only change is the
+  causality trailers: a keep-local divergence resolution never settled in
+  bundle mode (the pill stuck after a reported success). The dedupe now
+  compares T3-Based-On/T3-Based-On-Peer too; regression test proves
+  exactly one ack ships, then the settled state dedupes again. The origin
+  transport pushes unconditionally and was unaffected — validation for
+  running accept scripts on BOTH transports.
+- #70 — the receiver's acknowledgement ship renewed its own lease, so the
+  activity chip pointed at the RECEIVING machine after every delivery (the
+  accept-m4 activity assertion only passed its first run by racing the
+  ack). Echo ships now never move the lease; takeover and kept-local
+  resolution renew forcibly as explicit user actions.
+
+Review notes (independent reviewers per PR): takeover's explicit lease
+renewal needed a `force` past the 60s activity throttle (#65 fix);
+pick=peer re-verifies the divergence before takeover so a meanwhile
+fast-forward cannot become a surprise backward reset (#66 fix); a red
+"Sync error" pill must not carry a hidden click action (#67 fix). Accepted
+(documented, not coded): pick=local reports `resolved: true` while the
+settle awaits a successful ship — self-healing, inherited from the
+conflict-pin mechanism; lease derivation trusts wall clocks.
+
+Validation: 47 roaming reactor tests (2 new suites: WipLease, divergence
+integration; fact-space invariants extended with takeover-honesty and
+divergence-exactness), typecheck across contracts/client-runtime/server/
+web, and the full fresh-state ladder — accept-m35, m36, m37, m37-stress,
+m38 (bundle AND origin), accept-m4 (bundle AND origin), accept-m2.5
+canonical re-run.
+
 ## 2026-07-17 — milestones renumbered to execution order (second renumber)
 
 User decision after the pre-M4 cleanup closed: takeover/divergence and
