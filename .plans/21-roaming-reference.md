@@ -17,11 +17,14 @@ live in `21-roaming-history.md`.
   stale UI. Headless web login: the `/pair` page + a one-time admin code.
 - Acceptance scripts: `accept-m1.mjs`, `accept-m2.mjs`, `accept-m2.5.mjs`,
   `accept-m3.mjs`, `accept-m35.mjs`, `accept-m36.mjs`, `accept-m37.mjs`,
-  `accept-m37-stress.mjs`, `accept-m38.mjs`. `accept-m2.5.mjs` is the
-  canonical-workflow re-run every milestone ends with. `accept-m38.mjs`
-  runs its origins with `receive.hideRefs refs/t3` (bundle fallback) by
-  default and again with `T3_M38_TRANSPORT=origin` (origin-refs); both runs
-  must pass — the transports take different classifier baselines.
+  `accept-m37-stress.mjs`, `accept-m38.mjs`, `accept-m4.mjs`.
+  `accept-m2.5.mjs` is the canonical-workflow re-run every milestone ends
+  with. `accept-m38.mjs` and `accept-m4.mjs` run their origins with
+  `receive.hideRefs refs/t3` (bundle fallback) by default and again with
+  `T3_M38_TRANSPORT=origin` / `T3_M4_TRANSPORT=origin`; both runs must
+  pass — the transports take different classifier baselines. `accept-m4`
+  builds its divergence under the peer sync pause, which only fully stops
+  exchange in bundle mode.
   Server-to-server auth
   smoke test: `scripts/roaming/spike-server-to-server.mjs`.
 - WIP-classifier changes re-run the FULL ladder (m35–m38 + canonical),
@@ -79,6 +82,10 @@ live in `21-roaming-history.md`.
   `T3-Peer-Snapshot: <peer oid>`.
 - `refs/t3/wip-history/<wsid>/<envid>/<slot>` — 20 local rolling retention
   slots, oldest overwritten; never pushed.
+- `refs/t3/wip-rejected/<wsid>/<envid>` — local pin of a peer snapshot
+  rejected in divergence resolution (pick=local, M4); `<envid>` is the
+  REJECTED peer's environmentId. Never pushed; keeps the losing side
+  recoverable after the peer force-updates its moving wip ref.
 - `refs/t3/wip-parked/<wsid>/<branch>` — per-branch parked local
   state, written before any auto/explicit branch switch. A branch transition
   observed in the running process restores a clean checkout whose HEAD equals
@@ -318,12 +325,34 @@ live in `21-roaming-history.md`.
   different bytes are a recreated file and apply. Same-context apply never
   touches HEAD, branch refs, or the real index.
 - `POST /api/roaming/wip/takeover` reclassifies the newest snapshot, parks
-  local state, reproduces the peer branch/HEAD/tree, and returns whether it
-  applied. Per-file conflicts during takeover (an ignored file colliding
+  local state, reproduces the peer branch/HEAD/tree, and returns
+  `{ applied, reason? }`. An optional `snapshotOid` pins the takeover to
+  the snapshot the user was shown — a newer arrival refuses with a reason
+  instead of applying unseen work (M4); omitted = newest-wins (harness/CLI).
+  Per-file conflicts during takeover (an ignored file colliding
   with a peer path, a failed restore) still count as applied — the branch
   switch and reset have already happened, and the acknowledgement capture
   must still run so the peer clears its block. The blocked project pill is
-  the action; no separate sync UI.
+  the action; the divergence dialog is the only additional sync surface.
+- Divergence (M4): `divergence: true` on a blocked outcome means exactly
+  same-branch + non-ancestor HEADs (`classifyWipApply` invariant 11);
+  `takeoverServiceable === !hasInFlightTurn` (invariant 10) and maps to the
+  status entry's `takeoverAvailable` — legacy/invalid-snapshot blocks are
+  not serviceable. `POST /api/roaming/wip/divergence` returns merge-base +
+  one capped patch per side (10 MB cap, `truncated` flag; the local side
+  diffs the live vault-subtracted worktree TREE oid — its `snapshotOid` is
+  a tree, not a captured commit; no merge-base → empty-tree base).
+  `POST /api/roaming/wip/divergence/resolve` pins `peerSnapshotOid`:
+  pick=peer re-verifies the divergence still exists, then runs the pinned
+  takeover (losing side = per-branch parked ref); pick=local pins the
+  rejected snapshot to `wip-rejected`, writes a kept-local applied marker
+  (synthetic commit of the current worktree tree, `T3-Peer-Snapshot`
+  trailer, dated 1s before the snapshot), touches no worktree state, and
+  forces the acknowledgement capture — the existing
+  `conflictAlreadyResolved` row then keeps that exact snapshot settled.
+  Both routes `access:write`. `selectNewestPeerSnapshot` (fetch + bundle
+  import + newest selection + integrity validation) is the shared
+  selection for apply and both divergence routes.
 - Deletion invariants (each was a field bug): (1) the applied marker
   advances EVERY pass that applies or records conflicts — clean passes to
   the peer snapshot, conflicted passes to a synthetic commit with only the
@@ -352,9 +381,40 @@ live in `21-roaming-history.md`.
   apply timestamps describe completed work, so they render `Synced`
   immediately; there is no timestamp-derived fake `Syncing` interval.
   Concept-free copy — no "roaming"/"sync engine" wording.
-- `blockedReason` and `takeoverAvailable` clear on every non-blocked pass;
-  reasons are enumerated plain language ("peer is on <branch>", "peer moved
-  <branch> forward; you have local edits", divergence, legacy snapshot).
+- M4 status fields: `blockedSnapshotOid` (the peer snapshot that produced
+  the block — echo it in takeover requests), `blockedFrom` (its author
+  environment), `divergenceAvailable` (block is a two-sided divergence).
+  All blocked fields clear on every non-blocked pass; reasons are
+  enumerated plain language ("peer is on <branch>", "peer moved <branch>
+  forward; you have local edits", divergence, legacy snapshot). A dirty
+  same-branch non-ancestor checkout reads "has diverged", not "moved
+  forward" (M4 correction).
+- Pill actions (M4): divergence → "Review changes" opens the diff-and-choose
+  dialog (takeover stays reachable inside it); serviceable block → "Take
+  over" (pinned to `blockedSnapshotOid`); non-serviceable block →
+  non-clickable "Waiting"; a red `lastError` pill never carries an action.
+
+### Leases + activity (M4)
+
+- One kind=lease blob per (project, machine), key `<wsid>/<envid>`, payload
+  `RoamingLeasePayload { schemaVersion, environmentId, renewedAt,
+  lastSnapshotAt? }`. "The lease" is derived: newest `renewedAt` wins;
+  advisory only — never blocks anything.
+- Renewal (`WipLease.renewLease`): after a successful ship of
+  locally-authored work (both transports; always writes, carries
+  `capturedAt`) — passes that applied peer content and acknowledgement
+  captures suppress renewal, because an echo is not activity and would
+  point the chip at the receiving machine after every delivery; while an
+  agent turn is in flight (throttled to 60s, preserves `lastSnapshotAt`);
+  on takeover and kept-local divergence resolution (forced past the
+  throttle — explicit user actions move the lease even when the follow-up
+  ship no-ops or fails). Renewals log-and-swallow failures.
+- `RoamingProjectShell.activity`: all lease records for the project, newest
+  first, no peer filtering — stale machines age out visually via
+  `ROAMING_LEASE_ACTIVE_WINDOW_MS` (2 min, shared server/client constant).
+  The blob-change shell stream re-projects on lease arrival, so chips
+  update live. Chip renders only when the newest record belongs to another
+  machine and is inside the window.
 - `roamingWipStatus` is transient reactor state, not durable shell data. The
   client strips the entire array from shell-cache loads and writes so a cached
   blocked row cannot resurrect `Take over` before live status arrives. Warm
@@ -407,6 +467,13 @@ live in `21-roaming-history.md`.
   unlikely).
 - Base-diff peer deletions with NO applied marker yet are not
   Based-On-gated (narrow: markers appear on first exchange).
+- Divergence pick=local reports `resolved: true` once the marker + rejected
+  ref are durably written, but the settle rides the acknowledgement
+  capture's SHIP — if that fails (origin down), the divergence pill returns
+  until a later ship succeeds. Self-healing, idempotent to re-resolve; no
+  data loss (inherited from the conflict-pin mechanism).
+- Lease derivation trusts cross-machine wall clocks: under skew a fresh
+  record can lose to a stale one and the chip lags. Advisory only.
 - Stashes, in-progress rebases, the staged/unstaged split, reflog, and
   other local branches do not roam. Both
   machines must run ≥M3.8 builds before branch-aware behavior holds
