@@ -45,11 +45,11 @@ dead.
 M0–M3.8 done (2026-07-04 → 2026-07-11; results in the history file), plus
 the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
 (reactor split, decision-table classifier, shim removal — PRs #57–#60).
-The branch-aware ship gate is closed. M4–M7 remain queued in execution
-order (renumbered 2026-07-17): M4 takeover + divergence, M5 briefs +
-transcripts, M6 bootstrap recipes, M7 cloud store. M4 is active
-(started 2026-07-17; analysis pass done, deltas recorded in its design
-section).
+The branch-aware ship gate is closed. M4 (takeover + divergence) done
+2026-07-18 (PRs #63–#69; results in the history file). M5–M7 remain
+queued in execution order (renumbered 2026-07-17): M5 briefs +
+transcripts, M6 bootstrap recipes, M7 cloud store. M5 is next; no
+milestone is active.
 
 ## Thesis
 
@@ -248,40 +248,27 @@ pairing row is the consent, one decision for both machines.
 
 ### Takeover + divergence (M4)
 
-Advisory lease blob per project (never a lock) powering "active on desktop,
-snapshot 4 min ago" chips; full takeover UX; two-sided divergence rendered
-with the existing diff machinery — desktop version / laptop version, user
-picks a side, the losing side stays recoverable as a ref. No three-way
-merge, no auto-resolution, ever. This screen is the trust story of the
-feature.
+Advisory lease records (never a lock) power "active on <machine>, snapshot
+<age> ago" chips: one per (project, machine) — per-machine so two active
+machines can never produce an equal-version blob conflict — renewed by
+capture activity, in-flight turns, and takeover; "the lease" is derived,
+newest renewal wins. Chip copy is concept-free: machine label + snapshot
+age, never "lease"/"roaming".
 
-Analysis-pass deltas (2026-07-17) against the shipped M3.8 code:
+Divergence (both machines moved the same branch) is a distinct blocked
+state with its own two-sided diff operation (merge-base → each side's full
+working state), rendered with the existing diff components as
+diff-and-choose: the user keeps a whole side, never a merge, and the losing
+side always stays recoverable as a ref (picking peer parks local state;
+picking local pins the rejected peer snapshot). No three-way merge, no
+auto-resolution, ever. This screen is the trust story of the feature.
 
-- The `lease` blob kind is already plumbed generically (contracts, store,
-  mirror); M4 adds only its payload schema and semantics. Leases are
-  per-machine activity records (key `<wsid>/<envid>`, not the per-project
-  singleton originally implied — a singleton written by both active
-  machines produces equal-version blob conflicts exactly when the chip
-  matters). Renewed by WIP capture activity and in-flight turns; "the
-  lease" is derived — newest `renewedAt` wins — and takeover moves it by
-  writing a fresh record. Advisory only: a stale or missing lease never
-  blocks anything; it only informs the chip.
-- Divergence today is one blocked-reason string, contract-indistinguishable
-  from other blocks. M4 gives it a distinct status surface plus a new
-  two-sided diff operation (merge-base → local, merge-base → peer — the
-  merge-base OID is not currently retained and no existing endpoint diffs
-  two arbitrary commits). Rendering reuses the existing diff components.
-- Choosing a side must explicitly preserve the loser: picking peer already
-  parks local state; picking local must pin the peer's rejected snapshot to
-  a local ref (today it only lives in the peer's force-updatable wip ref).
-- Takeover tightening pulled into M4 scope: `takeoverAvailable` is
-  currently set on blocks takeover refuses (in-flight turn, legacy
-  snapshot) — make it honest; takeover requests name the snapshot commit
-  the user saw (today race-to-newest between pill render and click).
-- Chips are powered by the lease + the wip beacon's `capturedAt` (per
-  project, per machine); `lastMirrorContactAt` is global across peers and
-  is not a chip source. Chip copy stays concept-free: machine label +
-  snapshot age, never "lease"/"roaming".
+Takeover is honest and pinned: `takeoverAvailable` is set only for blocks
+takeover can actually service, and takeover/resolve requests name the exact
+snapshot the user saw — a newer arrival refuses instead of applying unseen
+work. Blocked-but-unserviceable states render as plain waiting states, and
+every blocked state remains a non-dead-end. Mechanics (schemas, refs,
+routes, invariants) in the reference.
 
 ### Briefs + transcripts (M5)
 
@@ -331,7 +318,7 @@ detail live in the history and reference files.
 | M3.6 — Field round 2 | Vault delivery on arrival, based-on fast-forward, sync visibility (blockedReason + pill). | ✅ 2026-07-07. |
 | M3.7 — Sync hardening | Per-file WIP merge, two-machine deletion model, sync pill data path, title propagation, vault interval backbone, watcher budget, mirror/wait long-poll, delivery-latency exit criteria. | ✅ 2026-07-10. |
 | M3.8 — Branch-aware sync model (SHIP GATE) | Full working-state snapshots, ancestry classifier, safe HEAD transitions, parking/takeover, branch-aware materialize. | ✅ 2026-07-11. |
-| M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | Takeover applies newest snapshot and moves the lease; two-sided divergence shows diff-and-choose; the losing side stays recoverable. Canonical re-run. |
+| M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | ✅ 2026-07-18. |
 | M5 — Briefs + transcripts | Step 7 + "Conversations" pairing row. | Threads from A readable on B; park produces an editable brief; resume seeds a new local thread. Canonical re-run. |
 | M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
