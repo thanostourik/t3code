@@ -43,6 +43,7 @@ const makeLayer = (input: {
     Layer.provideMerge(
       Layer.succeed(OrchestrationEngineService, {
         readEvents: () => Stream.empty,
+        latestSequence: Effect.succeed(0),
         streamDomainEvents: Stream.empty,
         dispatch: () => Effect.die("unused"),
       } satisfies OrchestrationEngineService["Service"]),
