@@ -754,9 +754,13 @@ const make = Effect.gen(function* () {
       // takeover does (the acknowledgement ship itself never renews).
       yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
       // The acknowledgement capture ships our kept-local state naming the
-      // rejected snapshot; classification then settles it on both machines
-      // and this pass publishes the cleared (non-blocked) status.
+      // rejected snapshot. That pass classifies BEFORE it ships, so it still
+      // reports the divergence; run one more pass so the settled state
+      // (conflictAlreadyResolved → skip) publishes the cleared pill NOW
+      // instead of on the next interval tick (field finding 2026-07-22:
+      // "Review changes" lingered up to 2 minutes after a successful keep).
       yield* processTarget(target, { acknowledgeApplied: true });
+      yield* processTarget(target);
       return { resolved: true as const, preservedRef: result.preservedRef };
     }).pipe(
       Effect.catchCause((cause) =>
