@@ -2011,6 +2011,19 @@ web, and the full fresh-state ladder — accept-m35, m36, m37, m37-stress,
 m38 (bundle AND origin), accept-m4 (bundle AND origin), accept-m2.5
 canonical re-run.
 
+Manual browser walk (2026-07-22, real Chrome on the harness): both
+dialogs, both resolutions, and the activity chip verified visually by the
+user. Findings: (1) keep-local left "Review changes" lingering up to the
+2-minute interval because the acknowledgement pass classifies before it
+ships — fixed as #71 (resolve runs a settle pass after the ack; accept-m4
+window tightened to 15s); (2) harness-only login hell worth remembering:
+both instances share the host-scoped `t3_session` cookie (use
+localhost/127.0.0.1 split), `/pair#token=` takes PAIRING codes (never
+session JWTs), and `auth pairing create --ttl 30d --base-url` prints
+ready-made links. The chip reads "Active elsewhere" in the bare-browser
+harness (no named environments) — correct fallback; the desktop app
+resolves real machine names.
+
 ## 2026-07-17 — milestones renumbered to execution order (second renumber)
 
 User decision after the pre-M4 cleanup closed: takeover/divergence and
