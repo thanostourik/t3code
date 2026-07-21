@@ -111,6 +111,7 @@ const makeEngineLayer = (
 ) =>
   Layer.succeed(OrchestrationEngineService, {
     readEvents: () => Stream.empty,
+    latestSequence: Effect.succeed(0),
     streamDomainEvents: Stream.empty,
     dispatch: (command) =>
       Effect.gen(function* () {
