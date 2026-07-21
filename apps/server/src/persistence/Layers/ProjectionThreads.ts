@@ -219,6 +219,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           JOIN projection_thread_sessions AS sessions
             ON sessions.thread_id = threads.thread_id
           WHERE threads.project_id = ${projectId}
+            AND threads.deleted_at IS NULL
             AND sessions.active_turn_id IS NOT NULL
         ) AS active
       `,

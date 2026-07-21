@@ -511,6 +511,46 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       assert.isFalse(yield* threads.hasActiveTurnByProjectId({ projectId }));
     }),
   );
+  it.effect("ignores soft-deleted threads when reporting active turns", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("project-deleted-turn");
+      const threadId = ThreadId.make("thread-deleted-turn");
+      yield* threads.upsert({
+        threadId,
+        projectId,
+        title: "Deleted with lingering turn",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurnId: TurnId.make("turn-deleted"),
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z",
+        archivedAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: "2026-03-24T00:01:00.000Z",
+      });
+      // A crash mid-turn can leave the session's active_turn_id set after the
+      // thread is soft-deleted; the project must not stay "busy" forever.
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_instance_id, runtime_mode,
+          active_turn_id, last_error, updated_at
+        ) VALUES (
+          ${threadId}, 'running', 'codex', 'codex', 'full-access',
+          'turn-deleted', NULL, '2026-03-24T00:00:00.000Z'
+        )
+      `;
+
+      assert.isFalse(yield* threads.hasActiveTurnByProjectId({ projectId }));
+    }),
+  );
   it.effect("round-trips manual and branch pull requests through the thread row", () =>
     Effect.gen(function* () {
       const threads = yield* ProjectionThreadRepository;
