@@ -676,6 +676,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   roaming: Schema.optionalKey(Schema.Boolean),
   roamingSecretsSync: Schema.optionalKey(Schema.Boolean),
+  roamingWipSync: Schema.optionalKey(Schema.Boolean),
   providers: Schema.optionalKey(
     Schema.Struct({
       codex: Schema.optionalKey(CodexSettingsPatch),
