@@ -129,6 +129,19 @@ describe("ServerSettingsPatch.providerInstances", () => {
   });
 });
 
+describe("ServerSettingsPatch roaming consent keys", () => {
+  // Regression: roamingWipSync was missing from the patch schema, so the UI
+  // consent toggle decoded to a patch without the key and became a no-op.
+  it("keeps both roaming consent keys through patch decoding", () => {
+    const patch = decodeServerSettingsPatch({
+      roamingSecretsSync: true,
+      roamingWipSync: false,
+    });
+    expect(patch.roamingSecretsSync).toBe(true);
+    expect(patch.roamingWipSync).toBe(false);
+  });
+});
+
 describe("ServerSettingsPatch string normalization", () => {
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({
