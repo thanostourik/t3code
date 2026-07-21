@@ -1044,7 +1044,17 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
-      Layer.provide(Layer.mock(RoamingBlobStore)({})),
+      Layer.provide(
+        Layer.mock(RoamingBlobStore)({
+          // The shell live tail always attaches the roaming sources
+          // (pairing can enable roaming mid-subscription), so any test that
+          // pulls live items reaches this subscription.
+          subscribeChanges: Effect.gen(function* () {
+            const pubsub = yield* PubSub.unbounded<never>();
+            return yield* PubSub.subscribe(pubsub);
+          }),
+        }),
+      ),
       Layer.provide(
         Layer.succeed(Materializer, {
           materialize: () => Effect.die("unused"),
@@ -8318,16 +8328,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       const wsUrl = yield* getWsServerUrl("/ws");
-      const firstItem = yield* Effect.scoped(
+      const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({
             afterSequence: 0,
             requestCompletionMarker: true,
-          }).pipe(Stream.runHead),
+          }).pipe(Stream.take(2), Stream.runCollect),
         ),
       );
 
-      assert.deepEqual(Option.getOrThrow(firstItem), { kind: "synchronized" });
+      // Resumes always lead with the roaming overlay seed (an empty
+      // wip-status clear while roaming is off), then the marker.
+      const collected = Array.from(items);
+      assert.deepEqual(collected[0], {
+        kind: "roaming-wip-status-replaced",
+        sequence: 0,
+        wipStatuses: [],
+      });
+      assert.deepEqual(collected[1], { kind: "synchronized" });
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -9685,11 +9703,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({
             afterSequence: 0,
             requestCompletionMarker: true,
-          }).pipe(Stream.take(3), Stream.runCollect),
+          }).pipe(Stream.take(4), Stream.runCollect),
         ),
       );
 
+      // The roaming overlay seed leads every resume, then the replayed items.
       const collected = Array.from(items);
+      assert.equal(collected[0]?.kind, "roaming-wip-status-replaced");
       const upsertedIds = collected.flatMap((item) =>
         item.kind === "thread-upserted" ? [item.thread.id] : [],
       );
@@ -9697,7 +9717,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       // a single shell refetch (not 20). The new thread is not stuck behind it.
       assert.include(upsertedIds, busyThreadId);
       assert.include(upsertedIds, newThreadId);
-      assert.equal(collected[2]?.kind, "synchronized");
+      assert.equal(collected[3]?.kind, "synchronized");
       assert.equal(shellFetches.filter((id) => id === busyThreadId).length, 1);
       assert.equal(replayLimit, 50);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -9851,13 +9871,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
-            Stream.take(1),
+            Stream.take(2),
             Stream.runCollect,
           ),
         ),
       );
 
-      const [first] = Array.from(items);
+      // Item 0 is the roaming overlay seed that leads every resume.
+      const [, first] = Array.from(items);
       assert.equal(first?.kind, "thread-removed");
       assert.equal(first?.kind === "thread-removed" ? first.threadId : null, goneThreadId);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -9912,13 +9933,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
-            Stream.take(1),
+            Stream.take(2),
             Stream.runCollect,
           ),
         ),
       );
 
-      const [first] = Array.from(items);
+      // Item 0 is the roaming overlay seed that leads every resume.
+      const [, first] = Array.from(items);
       assert.equal(first?.kind, "thread-upserted");
       assert.equal(first?.kind === "thread-upserted" ? first.thread.id : null, threadId);
       assert.equal(attempts, 2);
@@ -9971,13 +9993,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
-            Stream.take(1),
+            Stream.take(2),
             Stream.runCollect,
           ),
         ),
       );
 
-      const [first] = Array.from(items);
+      // Item 0 is the roaming overlay seed that leads every resume.
+      const [, first] = Array.from(items);
       assert.equal(first?.kind, "project-removed");
       assert.equal(first?.kind === "project-removed" ? first.projectId : null, projectId);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
