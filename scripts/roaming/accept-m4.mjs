@@ -153,9 +153,7 @@ pass("paired once with WIP enabled");
 
 const registry = await waitFor("registry reaches B", 120_000, async () => {
   const shell = await shellOf(B, adminB);
-  return (
-    shell?.roamingProjects?.find((candidate) => candidate.title === "M4 Primary") ?? null
-  );
+  return shell?.roamingProjects?.find((candidate) => candidate.title === "M4 Primary") ?? null;
 });
 const wsid = registry.workspaceProjectId;
 const bRoot = join(HARNESS_DIR, "m4-b-workspace");
@@ -218,9 +216,7 @@ await setSync(true);
 
 const blockedOnB = await waitFor("B blocks with divergence", 180_000, async () => {
   const shell = await shellOf(B, adminB);
-  const entry = shell?.roamingWipStatus?.find(
-    (candidate) => candidate.workspaceProjectId === wsid,
-  );
+  const entry = shell?.roamingWipStatus?.find((candidate) => candidate.workspaceProjectId === wsid);
   return entry?.divergenceAvailable === true && entry.blockedSnapshotOid ? entry : null;
 });
 if (!blockedOnB.blockedReason?.includes("diverged"))
@@ -299,11 +295,12 @@ if (git(["-C", bWork, "rev-parse", rejectedRef]) !== divergenceOnB.peer.snapshot
 if (git(["-C", bWork, "rev-parse", "HEAD"]) !== bDivergedHead)
   fail("keep local", "keep-local moved HEAD");
 if (existsSync(join(bWork, "a-side.txt"))) fail("keep local", "A's file leaked into B's worktree");
-await waitFor("B clears the divergence after keeping local", 120_000, async () => {
+// Tight on purpose: resolve runs the acknowledgement + settle passes before
+// returning, so the pill must clear in seconds — a lingering "Review
+// changes" after a successful keep was the 2026-07-22 field finding.
+await waitFor("B clears the divergence after keeping local", 15_000, async () => {
   const shell = await shellOf(B, adminB);
-  const entry = shell?.roamingWipStatus?.find(
-    (candidate) => candidate.workspaceProjectId === wsid,
-  );
+  const entry = shell?.roamingWipStatus?.find((candidate) => candidate.workspaceProjectId === wsid);
   return entry && entry.blockedReason === undefined ? true : null;
 });
 pass("keep-local resolves B: worktree untouched, A's version pinned recoverable");
@@ -311,9 +308,7 @@ pass("keep-local resolves B: worktree untouched, A's version pinned recoverable"
 // ── Resolve on A: take B's version; A's version stays recoverable ───────
 const blockedOnA = await waitFor("A blocks with divergence", 180_000, async () => {
   const shell = await shellOf(A, adminA);
-  const entry = shell?.roamingWipStatus?.find(
-    (candidate) => candidate.workspaceProjectId === wsid,
-  );
+  const entry = shell?.roamingWipStatus?.find((candidate) => candidate.workspaceProjectId === wsid);
   return entry?.divergenceAvailable === true && entry.blockedSnapshotOid ? entry : null;
 });
 const divergenceOnA = await waitFor("divergence data on A", 60_000, async () => {
@@ -352,9 +347,7 @@ if (git(["-C", work, "show", `${parkedRef}:a-side.txt`]) !== "A version")
   fail("take peer", "A's losing file content is not recoverable");
 await waitFor("A clears the divergence after taking B's version", 120_000, async () => {
   const shell = await shellOf(A, adminA);
-  const entry = shell?.roamingWipStatus?.find(
-    (candidate) => candidate.workspaceProjectId === wsid,
-  );
+  const entry = shell?.roamingWipStatus?.find((candidate) => candidate.workspaceProjectId === wsid);
   return entry && entry.blockedReason === undefined ? true : null;
 });
 pass("take-peer resolves A: lands on B's state, own version parked recoverable");
