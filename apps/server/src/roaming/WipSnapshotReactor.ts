@@ -47,6 +47,7 @@ import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers } from "./RoamingPeers.ts";
+import { VaultSync } from "./VaultSync.ts";
 import { watchTreeEvents } from "./treeWatcher.ts";
 import {
   getWipDivergenceForTarget,
@@ -181,6 +182,7 @@ const make = Effect.gen(function* () {
   const threadRepository = yield* ProjectionThreadRepository;
   const serverSettings = yield* ServerSettingsService;
   const peers = yield* RoamingPeers;
+  const vaultSync = yield* VaultSync;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* serverEnvironment.getEnvironmentId;
   const hostPlatform = yield* HostProcessPlatform;
@@ -403,7 +405,12 @@ const make = Effect.gen(function* () {
         notice: _staleNotice,
         ...baseWithoutBlocked
       } = base;
-      const currentNotice = (yield* Ref.get(watchNotices)).get(target.workspaceProjectId);
+      // Watch advisory wins the single notice slot; a vault tombstone
+      // deletion (G4) fills it otherwise — secrets removals are never
+      // silent.
+      const vaultNotice = (yield* vaultSync.deletionNotices).get(target.workspaceProjectId);
+      const currentNotice =
+        (yield* Ref.get(watchNotices)).get(target.workspaceProjectId) ?? vaultNotice;
       const withWarning: RoamingWipStatusEntry =
         outcome._tag === "skipped" && outcome.warning !== undefined
           ? { ...baseWithoutBlocked, lastError: outcome.warning }

@@ -6,6 +6,7 @@ import {
   RoamingRegistryPayload,
   RoamingVaultBundle,
   type RoamingVaultFileEntry,
+  type RoamingVaultTombstone,
   type WorkspaceProjectId,
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
@@ -16,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -70,6 +72,12 @@ export class VaultSync extends Context.Service<
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     readonly rescanProject: (workspaceProjectId: WorkspaceProjectId) => Effect.Effect<void>;
     readonly rescanAll: () => Effect.Effect<void>;
+    /**
+     * Per-project advisory for applied tombstone deletions (G4) — sticky
+     * for the session so a secrets removal is never silent. Merged into the
+     * project's sync-status notice by WipSnapshotReactor.
+     */
+    readonly deletionNotices: Effect.Effect<ReadonlyMap<WorkspaceProjectId, string>>;
   }
 >()("t3/roaming/VaultSync") {}
 
@@ -296,7 +304,10 @@ const statMode = (stat: unknown): number | undefined => {
   return typeof mode === "number" ? mode & 0o777 : undefined;
 };
 
-const captureBundle = (target: VaultTarget) =>
+const statMtimeMs = (stat: { readonly mtime: Option.Option<Date> }): number | null =>
+  Option.getOrNull(Option.map(stat.mtime, (mtime) => mtime.getTime()));
+
+const captureBundle = (target: VaultTarget, previous: RoamingVaultBundle | null) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
@@ -305,6 +316,9 @@ const captureBundle = (target: VaultTarget) =>
     if (tracked._tag === "unavailable") {
       return { _tag: "skipped" as const };
     }
+    const previousTombstones = new Map(
+      (previous?.tombstones ?? []).map((tombstone) => [tombstone.path, tombstone]),
+    );
     const files: RoamingVaultFileEntry[] = [];
     let totalBytes = 0;
 
@@ -326,6 +340,18 @@ const captureBundle = (target: VaultTarget) =>
       if (stat?.type !== "File") {
         continue;
       }
+      // A tombstoned file stays dead until the user re-creates it: only an
+      // mtime NEWER than the tombstone revives it (G4) — otherwise this
+      // machine's not-yet-deleted copy would resurrect the file the peer
+      // just deleted.
+      const tombstone = previousTombstones.get(relativePath);
+      if (tombstone !== undefined) {
+        const mtimeMs = statMtimeMs(stat);
+        if (mtimeMs === null || mtimeMs <= Date.parse(tombstone.deletedAt)) {
+          continue;
+        }
+        previousTombstones.delete(relativePath);
+      }
       // Enforce the cap from stat before reading: an accidentally matched
       // huge file must be skipped, not loaded into memory first.
       totalBytes += Number(stat.size);
@@ -341,15 +367,52 @@ const captureBundle = (target: VaultTarget) =>
       });
     }
 
+    // Tombstones (G4): carry forward every previous tombstone whose file is
+    // still dead, and mint one for each file the previous bundle carried
+    // that is now ABSENT ON DISK. Absence from the candidate list alone is
+    // not a deletion — a file that became tracked or turned into a symlink
+    // still exists and merely stops syncing.
+    const shipped = new Set(files.map((file) => file.path));
+    const tombstones: RoamingVaultTombstone[] = [...previousTombstones.values()].filter(
+      (tombstone) => !shipped.has(tombstone.path),
+    );
+    const capturedAt = DateTime.formatIso(yield* DateTime.now);
+    for (const prevFile of previous?.files ?? []) {
+      if (shipped.has(prevFile.path) || previousTombstones.has(prevFile.path)) {
+        continue;
+      }
+      const stat = yield* fs
+        .stat(pathService.join(target.workspaceRoot, prevFile.path))
+        .pipe(Effect.orElseSucceed(() => null));
+      if (stat === null) {
+        tombstones.push({ path: prevFile.path, deletedAt: capturedAt });
+      }
+    }
+
     return {
       _tag: "bundle" as const,
       bundle: {
         schemaVersion: 1,
-        capturedAt: DateTime.formatIso(yield* DateTime.now),
+        capturedAt,
         files,
+        tombstones,
       },
     };
   });
+
+function sameTombstoneSet(
+  left: ReadonlyArray<RoamingVaultTombstone>,
+  right: ReadonlyArray<RoamingVaultTombstone>,
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const identity = (tombstone: RoamingVaultTombstone) =>
+    `${tombstone.path}\0${tombstone.deletedAt}`;
+  const leftIds = left.map(identity).sort();
+  const rightIds = right.map(identity).sort();
+  return leftIds.every((value, index) => value === rightIds[index]);
+}
 
 function sameVaultFileSet(
   left: ReadonlyArray<Pick<RoamingVaultFileEntry, "path" | "sha256" | "mode">>,
@@ -415,9 +478,12 @@ const writeAppliedRecord = (
  * Apply an arrived vault bundle to a live checkout. Per file: missing →
  * write; identical to incoming → align the record; identical to what WE
  * last applied (user untouched since) → update; anything else is a local
- * edit — never overwritten, surfaced as skipped. Files the peer dropped
- * are NOT deleted locally (v1: the overwritten mirrored bundle may hold
- * the only other copy).
+ * edit — never overwritten, surfaced as skipped. Per tombstone (G4): a
+ * local copy the user has not touched since our last apply moves into the
+ * recoverable holding dir under the server state dir (never a plain
+ * unlink); a locally edited or re-created copy always wins and is
+ * surfaced. Pre-G4 bundles carry no tombstones and keep the old
+ * never-delete semantics.
  */
 export const deliverVaultBundle = Effect.fn("VaultSync.deliverVaultBundle")(function* (input: {
   readonly workspaceProjectId: WorkspaceProjectId;
@@ -426,10 +492,13 @@ export const deliverVaultBundle = Effect.fn("VaultSync.deliverVaultBundle")(func
 }) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
+  const config = yield* ServerConfig.ServerConfig;
   const applied = yield* readAppliedRecord(input.workspaceProjectId);
   const next: Record<string, string> = { ...applied };
   const written: string[] = [];
   const skipped: string[] = [];
+  const deleted: string[] = [];
+  let trashDir: string | null = null;
 
   for (const entry of input.bundle.files) {
     const relativePath = yield* normalizeRelativePathOrFail(entry.path);
@@ -469,22 +538,83 @@ export const deliverVaultBundle = Effect.fn("VaultSync.deliverVaultBundle")(func
     }
   }
 
+  for (const tombstone of input.bundle.tombstones) {
+    const relativePath = yield* normalizeRelativePathOrFail(tombstone.path);
+    const absolutePath = pathService.resolve(input.workspaceRoot, relativePath);
+    const relativeToRoot = pathService.relative(input.workspaceRoot, absolutePath);
+    if (
+      relativeToRoot === ".." ||
+      relativeToRoot.startsWith(`..${pathService.sep}`) ||
+      pathService.isAbsolute(relativeToRoot)
+    ) {
+      return yield* new VaultPathEscapeError({ path: tombstone.path });
+    }
+    // Never follow a symlink into a delete.
+    const isSymlink = yield* fs.readLink(absolutePath).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+    if (isSymlink) {
+      continue;
+    }
+    const existing = yield* fs.readFile(absolutePath).pipe(Effect.orElseSucceed(() => null));
+    if (existing === null) {
+      delete next[relativePath];
+      continue;
+    }
+    const existingHash = NodeCrypto.createHash("sha256").update(existing).digest("hex");
+    if (existingHash !== applied[relativePath]) {
+      // Edited or re-created locally since our last apply — the user's copy
+      // wins; the next capture ships it and drops the tombstone. (This hash
+      // check IS the "last-synced state" rule; mtimes are useless across
+      // machines with skewed clocks.)
+      skipped.push(relativePath);
+      continue;
+    }
+    // Move into the holding dir under the STATE dir, not the workspace: a
+    // workspace-local trash would re-match unanchored t3sync patterns and
+    // ship the "deleted" secret right back out.
+    if (trashDir === null) {
+      const stamp = DateTime.formatIso(yield* DateTime.now).replaceAll(":", "-");
+      trashDir = pathService.join(config.stateDir, "vault-trash", input.workspaceProjectId, stamp);
+    }
+    const trashPath = pathService.join(trashDir, relativePath);
+    yield* fs.makeDirectory(pathService.dirname(trashPath), { recursive: true });
+    // Copy-then-remove (rename can cross filesystems); secrets never sit at
+    // the umask default.
+    yield* fs.writeFile(trashPath, existing, { mode: 0o600 });
+    yield* fs.remove(absolutePath);
+    delete next[relativePath];
+    deleted.push(relativePath);
+  }
+
   yield* writeAppliedRecord(input.workspaceProjectId, next);
-  if (written.length > 0 || skipped.length > 0) {
-    yield* Effect.logInfo("roaming vault: delivered bundle", {
+  if (written.length > 0 || skipped.length > 0 || deleted.length > 0) {
+    // Deletions are never silent (G4): the log always carries them, and
+    // callers surface them as notices.
+    yield* Effect.logWarning("roaming vault: delivered bundle", {
       workspaceProjectId: input.workspaceProjectId,
       written,
       skipped,
+      deleted,
+      ...(trashDir !== null ? { trashDir } : {}),
     });
   }
-  return { written, skipped };
+  return { written, skipped, deleted, trashDir };
 });
 
 export const captureVaultForProject = Effect.fn("VaultSync.captureVaultForProject")(function* (
   target: VaultTarget,
 ) {
   const blobStore = yield* RoamingBlobStore;
-  const captured = yield* captureBundle(target).pipe(
+  const current = yield* blobStore.get({ kind: "vault", key: target.workspaceProjectId });
+  const previous =
+    current === null
+      ? null
+      : yield* decodeCurrentVaultBundle(current.payload).pipe(
+          Effect.map((decoded) => (Result.isSuccess(decoded) ? decoded.success : null)),
+        );
+  const captured = yield* captureBundle(target, previous).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("roaming vault: capture failed", {
         workspaceProjectId: target.workspaceProjectId,
@@ -505,15 +635,12 @@ export const captureVaultForProject = Effect.fn("VaultSync.captureVaultForProjec
     return { status: "oversize" };
   }
 
-  const current = yield* blobStore.get({ kind: "vault", key: target.workspaceProjectId });
-  if (current !== null) {
-    const decoded = yield* decodeCurrentVaultBundle(current.payload);
-    if (
-      Result.isSuccess(decoded) &&
-      sameVaultFileSet(captured.bundle.files, decoded.success.files)
-    ) {
-      return { status: "unchanged" };
-    }
+  if (
+    previous !== null &&
+    sameVaultFileSet(captured.bundle.files, previous.files) &&
+    sameTombstoneSet(captured.bundle.tombstones, previous.tombstones)
+  ) {
+    return { status: "unchanged" };
   }
 
   const payload = yield* encodeVaultBundleJson(captured.bundle).pipe(
@@ -819,6 +946,8 @@ const make = Effect.gen(function* () {
   // checkout instead of waiting for a materialize that already happened.
   // Gated on the master gate only — the CAPTURING machine's consent decided
   // what is in the bundle; the receiver merely lands its own mirrored data.
+  const deletionNoticesRef = yield* Ref.make(new Map<WorkspaceProjectId, string>());
+
   const deliverArrivedVault = (workspaceProjectId: WorkspaceProjectId) =>
     Effect.gen(function* () {
       if (!(yield* peers.roamingEnabled)) {
@@ -839,13 +968,23 @@ const make = Effect.gen(function* () {
       if (bundle === null) {
         return;
       }
-      yield* provideVaultDeps(
+      const result = yield* provideVaultDeps(
         deliverVaultBundle({
           workspaceProjectId,
           workspaceRoot: target.workspaceRoot,
           bundle,
         }),
       );
+      if (result.deleted.length > 0) {
+        yield* Ref.update(deletionNoticesRef, (notices) => {
+          const nextNotices = new Map(notices);
+          nextNotices.set(
+            workspaceProjectId,
+            `Removed synced secret file${result.deleted.length === 1 ? "" : "s"} ${result.deleted.join(", ")} (deleted on the other machine); ${result.trashDir === null ? "a copy was kept" : `copies kept under ${result.trashDir}`}`,
+          );
+          return nextNotices;
+        });
+      }
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("roaming vault: delivery failed", { workspaceProjectId, cause }),
@@ -948,7 +1087,12 @@ const make = Effect.gen(function* () {
       );
     });
 
-  return { start, rescanProject, rescanAll } satisfies VaultSync["Service"];
+  return {
+    start,
+    rescanProject,
+    rescanAll,
+    deletionNotices: Ref.get(deletionNoticesRef),
+  } satisfies VaultSync["Service"];
 });
 
 export const layer = Layer.effect(VaultSync, make);
