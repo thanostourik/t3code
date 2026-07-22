@@ -212,17 +212,17 @@ const make = Effect.gen(function* () {
         }),
       );
 
+      // ONE domain-event subscription (S7): created → enroll pass; renamed →
+      // registry title push.
       yield* Effect.forkScoped(
         engine.streamDomainEvents.pipe(
-          Stream.filter((event) => event.type === "project.created"),
-          Stream.runForEach(() => Queue.offer(trigger, undefined)),
-        ),
-      );
-
-      yield* Effect.forkScoped(
-        engine.streamDomainEvents.pipe(
-          Stream.filter((event) => event.type === "project.meta-updated"),
-          Stream.runForEach((event) => pushRenamedTitle(event.payload)),
+          Stream.runForEach((event) =>
+            event.type === "project.created"
+              ? Queue.offer(trigger, undefined)
+              : event.type === "project.meta-updated"
+                ? pushRenamedTitle(event.payload)
+                : Effect.void,
+          ),
         ),
       );
 
