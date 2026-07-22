@@ -173,6 +173,32 @@ const seedActivityFromMarkers = Effect.fn("WipSnapshotReactor.seedActivityFromMa
   } satisfies RoamingWipStatusEntry;
 });
 
+/**
+ * Strip every blocked-state field (S6): blockedReason and its satellites are
+ * one unit — a field added in one strip site and forgotten in the other was
+ * a standing bug class.
+ */
+const clearBlockedFields = (
+  entry: RoamingWipStatusEntry,
+): Omit<
+  RoamingWipStatusEntry,
+  | "blockedReason"
+  | "takeoverAvailable"
+  | "blockedSnapshotOid"
+  | "blockedFrom"
+  | "divergenceAvailable"
+> => {
+  const {
+    blockedReason: _blockedReason,
+    takeoverAvailable: _takeoverAvailable,
+    blockedSnapshotOid: _blockedSnapshotOid,
+    blockedFrom: _blockedFrom,
+    divergenceAvailable: _divergenceAvailable,
+    ...rest
+  } = entry;
+  return rest;
+};
+
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
@@ -396,15 +422,7 @@ const make = Effect.gen(function* () {
       // anything else (a stale "blocked" after the user commits would lie).
       // The watch notice is owned by the watch loop, not the pass — strip
       // whatever the previous entry carried and re-merge the current one.
-      const {
-        blockedReason: _stale,
-        takeoverAvailable: _staleTakeover,
-        blockedSnapshotOid: _staleSnapshot,
-        blockedFrom: _staleFrom,
-        divergenceAvailable: _staleDivergence,
-        notice: _staleNotice,
-        ...baseWithoutBlocked
-      } = base;
+      const { notice: _staleNotice, ...baseWithoutBlocked } = clearBlockedFields(base);
       // Watch advisory wins the single notice slot; a vault tombstone
       // deletion (G4) fills it otherwise — secrets removals are never
       // silent.
@@ -693,14 +711,7 @@ const make = Effect.gen(function* () {
         workspaceProjectId,
         mode: "origin-refs" as const,
       };
-      const {
-        blockedReason: _blocked,
-        takeoverAvailable: _takeover,
-        blockedSnapshotOid: _snapshot,
-        blockedFrom: _from,
-        divergenceAvailable: _divergence,
-        ...rest
-      } = previous;
+      const rest = clearBlockedFields(previous);
       yield* publishEntry({
         ...rest,
         lastAppliedAt: yield* Effect.map(DateTime.now, DateTime.formatIso),
@@ -879,14 +890,7 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             if (yield* isEnabled) {
               for (const target of yield* listTargets) {
-                const branch = yield* git.execute({
-                  operation: "WipSnapshotReactor.pollBranch",
-                  cwd: target.workspaceRoot,
-                  args: ["symbolic-ref", "-q", "HEAD"],
-                  allowNonZeroExit: true,
-                });
-                const headOid = yield* providePassDeps(resolveOid(target.workspaceRoot, "HEAD"));
-                const context = `${branch.exitCode === 0 ? branch.stdout.trim() : "detached"}\0${headOid ?? "unborn"}`;
+                const context = yield* readGitContext(target);
                 const captured = yield* providePassDeps(
                   bundleShipped(target.workspaceProjectId, environmentId),
                 );
@@ -974,22 +978,21 @@ const make = Effect.gen(function* () {
           );
         }),
       );
-      // Enrollment: a project gains its workspaceProjectId AFTER pairing has
-      // already run the settings-triggered scan, so without this trigger the
-      // fresh project has no watcher and no first snapshot until the next
-      // interval sweep — measured on the M3.7 harness as a ~2-minute stall
-      // on the very first delivery.
-      yield* Effect.forkScoped(
-        Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
-          event.type === "project.meta-updated" && event.payload.workspaceProjectId !== undefined
-            ? snapshotAll()
-            : Effect.void,
-        ).pipe(Effect.ignoreCause({ log: true })),
-      );
-      // Turn completion: snapshot just that project, post-checkpoint.
+      // ONE domain-event subscription (S7), dispatching on event type:
+      // — Enrollment: a project gains its workspaceProjectId AFTER pairing
+      //   has already run the settings-triggered scan, so without this
+      //   trigger the fresh project has no watcher and no first snapshot
+      //   until the next interval sweep (~2-minute stall, M3.7 harness).
+      // — Turn completion: snapshot just that project, post-checkpoint.
       yield* Effect.forkScoped(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
           Effect.gen(function* () {
+            if (
+              event.type === "project.meta-updated" &&
+              event.payload.workspaceProjectId !== undefined
+            ) {
+              return yield* snapshotAll();
+            }
             if (event.type !== "thread.turn-diff-completed") {
               return;
             }
