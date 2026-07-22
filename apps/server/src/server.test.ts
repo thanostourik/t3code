@@ -796,6 +796,7 @@ const buildAppUnderTest = (options?: {
             const pubsub = yield* PubSub.unbounded<never>();
             return yield* PubSub.subscribe(pubsub);
           }),
+          listRecords: Effect.succeed([]),
           ...options?.layers?.materializer,
         } satisfies Materializer["Service"]),
       ),
