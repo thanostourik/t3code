@@ -327,7 +327,10 @@ const make = Effect.gen(function* () {
    * gone/archived. `force` bypasses the Conversations flag (park) but never
    * the roaming gate.
    */
-  const capture = (threadId: ThreadId, options: { parked?: boolean; force?: boolean } = {}) =>
+  const capture = (
+    threadId: ThreadId,
+    options: { parked?: boolean; force?: boolean; unpark?: boolean } = {},
+  ) =>
     Effect.gen(function* () {
       if (!(yield* peers.roamingEnabled)) {
         return;
@@ -395,12 +398,11 @@ const make = Effect.gen(function* () {
         return;
       }
       const capturedAt = yield* nowIso;
-      // `parked` sticks until the thread actually changes again — a plain
-      // coalesced capture racing park must not silently strip the marker.
+      // `parked` sticks until the author actively continues the conversation
+      // (a new user message → `unpark`); passive churn — a turn erroring or
+      // completing right after the handoff — must not strip the marker.
       const keepParked =
-        options.parked === true ||
-        (existing?.payload.parked === true &&
-          existing.payload.updatedAt === threadRow.value.updatedAt);
+        options.parked === true || (existing?.payload.parked === true && options.unpark !== true);
       const payload = buildTranscriptPayload({
         thread: detail.value,
         workspaceProjectId,
@@ -419,7 +421,7 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeKeyedCoalescingWorker<
     ThreadId,
-    { parked?: boolean; force?: boolean },
+    { parked?: boolean; force?: boolean; unpark?: boolean },
     never,
     never
   >({
@@ -493,9 +495,13 @@ const make = Effect.gen(function* () {
         );
       }
 
-      // Final transcript capture, marked parked. Direct (not enqueued): the
-      // response must reflect a completed capture.
-      yield* capture(threadId, { parked: true, force: true });
+      // Final transcript capture, marked parked — through the worker, so it
+      // can never interleave with an in-flight event capture (a direct call
+      // raced one and the plain rebuild overwrote the parked payload); drain
+      // so the response reflects a completed capture. The worker's merge
+      // spreads options, so a coalesced plain enqueue keeps `parked`.
+      yield* worker.enqueue(threadId, { parked: true, force: true });
+      yield* worker.drainKey(threadId);
 
       // Final WIP snapshot: consent-gated, skip-not-fail.
       if (settings !== null && settings.roamingWipSync) {
@@ -614,12 +620,19 @@ const make = Effect.gen(function* () {
       // events are deliberately excluded: transcripts ship at turn/message
       // boundaries, not per streaming delta.
       yield* Effect.forkScoped(
-        Stream.runForEach(engine.streamDomainEvents, (event) =>
-          CAPTURE_EVENT_TYPES.has(event.type) &&
-          typeof (event.payload as { threadId?: unknown }).threadId === "string"
-            ? worker.enqueue((event.payload as { threadId: ThreadId }).threadId, {})
-            : Effect.void,
-        ).pipe(Effect.ignoreCause({ log: true })),
+        Stream.runForEach(engine.streamDomainEvents, (event) => {
+          if (
+            !CAPTURE_EVENT_TYPES.has(event.type) ||
+            typeof (event.payload as { threadId?: unknown }).threadId !== "string"
+          ) {
+            return Effect.void;
+          }
+          const payload = event.payload as { threadId: ThreadId; role?: unknown };
+          // A new user message is the author continuing the conversation —
+          // that (and only that) clears a parked marker.
+          const unpark = event.type === "thread.message-sent" && payload.role === "user";
+          return worker.enqueue(payload.threadId, unpark ? { unpark: true } : {});
+        }).pipe(Effect.ignoreCause({ log: true })),
       );
 
       // Settings changes (Conversations toggled on) and peer changes (the
