@@ -22,6 +22,21 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+// D3: roaming has no stored flag — the gate derives from peer records in
+// state.sqlite, so freshness/on-ness checks read the peers table.
+const hasRoamingPeers = (base) => {
+  try {
+    const db = new DatabaseSync(join(base, "userdata", "state.sqlite"), { readOnly: true });
+    try {
+      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+};
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
 const A = {
@@ -100,9 +115,8 @@ for (const inst of [A, B]) {
     () => false,
   );
   if (!up) fail("preflight", `${inst.name} is not running — start the harness first`);
-  const settings = readSettings(inst);
-  if (settings.roaming === true)
-    fail("preflight", `${inst.name} already has roaming on — restart the harness fresh`);
+  if (hasRoamingPeers(inst.base))
+    fail("preflight", `${inst.name} already has roaming peers — restart the harness fresh`);
 }
 
 // While roaming is off: mirror routes hide behind 404, but the two
@@ -202,16 +216,16 @@ pass("one pairing call returned mirror peer + attach grant, no-store headers set
 if (!existsSync(join(B.base, "userdata", "secrets", `roaming-peer-${environmentIdA}.bin`)))
   fail("pair", "machine credential for A not stored on B");
 
-// settings: pairing IS how the flag turns on, on both machines
+// D3: the peer record IS the on-switch; only the consents are settings.
 const settingsB = readSettings(B);
-if (settingsB.roaming !== true || settingsB.roamingSecretsSync !== true)
-  fail("settings", `B settings not applied: ${JSON.stringify(settingsB)}`);
+if (!hasRoamingPeers(B.base) || settingsB.roamingSecretsSync !== true)
+  fail("settings", `B not enabled after pairing: ${JSON.stringify(settingsB)}`);
 const settingsA = await waitFor("A settings propagation", 10_000, async () => {
   const settings = readSettings(A);
-  return settings.roaming === true && settings.roamingSecretsSync === true ? settings : null;
+  return hasRoamingPeers(A.base) && settings.roamingSecretsSync === true ? settings : null;
 });
 if (!settingsA) fail("settings", "unreachable");
-pass("roaming + secrets consent flipped on BOTH machines by the one pairing action");
+pass("peer records + secrets consent landed on BOTH machines by the one pairing action");
 
 // ── 4. the attach half works as the client would use it ───────────────
 const attachToken = paired.attach.token;
@@ -333,7 +347,10 @@ const attachOnlySession = await api(A.url, "/api/auth/session", {
 if (attachOnlySession.authenticated !== true) fail("std-re-pair", "attach bearer rejected");
 pass("standard-code re-pair reports the standing mirror; attach still works");
 
-// ── 7. re-pairing applies the ONE secrets decision to BOTH machines ───
+// ── 7. re-pair: the initiator's dialog choice applies locally ONLY ────
+// (G8, 2026-07-22: a machine that already has peers never has its consents
+// overridden by a received re-pair — the ONE-decision rule seeds consents
+// on FIRST pairing only.)
 const secondAdminCode = await mintCode(ADMIN_SCOPES, "Another machine of yours");
 const repair = await api(B.url, "/api/roaming/peers", {
   method: "POST",
@@ -345,14 +362,16 @@ const repair = await api(B.url, "/api/roaming/peers", {
   },
 });
 if (!repair.ok) fail("re-pair", `${repair.status} ${await repair.text()}`);
-// The settings file stores only non-default values, so false shows as absence.
+// A (already-paired callee) keeps its earlier explicit true (G8).
 const settingsAAfter = readSettings(A);
-if ((settingsAAfter.roamingSecretsSync ?? false) !== false)
-  fail("re-pair", "the pairing's secrets decision was not applied on the peer");
+if (settingsAAfter.roamingSecretsSync !== true)
+  fail("re-pair", "re-pair overrode the callee's prior consent (G8 violation)");
+// B (initiator) applies its own dialog choice; the settings file stores
+// only non-default values, so false shows as absence.
 const settingsBAfter = readSettings(B);
 if ((settingsBAfter.roamingSecretsSync ?? false) !== false)
-  fail("re-pair", "the pairing's secrets decision was not applied locally");
-pass("one secrets decision per pairing, applied to both machines");
+  fail("re-pair", "the initiator's own secrets decision was not applied locally");
+pass("re-pair: initiator applies its own choice; already-paired callee keeps its consent (G8)");
 // restore both machines' consent for the later secrets-materialize steps
 writeFileSync(
   join(A.base, "userdata", "settings.json"),

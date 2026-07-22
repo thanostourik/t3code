@@ -796,7 +796,7 @@ const buildAppUnderTest = (options?: {
         } satisfies Materializer["Service"]),
       ),
       Layer.provide(Layer.mock(RoamingService)({})),
-      Layer.provide(Layer.mock(RoamingPeers)({})),
+      Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
       Layer.provide(
         Layer.succeed(WipSnapshotReactor, {
           start: () => Effect.void,

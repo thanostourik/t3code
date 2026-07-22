@@ -168,6 +168,8 @@ const makePeersLayer = (rows: Ref.Ref<ReadonlyArray<{ environmentId: string }>>)
     list: () => Ref.get(rows),
     recordContact: () => Effect.die("unused"),
     subscribeChanges: Effect.die("unused") as never,
+    // Mirrors the real service's derived gate (D3): on iff a row exists.
+    roamingEnabled: Ref.get(rows).pipe(Effect.map((current) => current.length > 0)),
   } as unknown as RoamingPeers["Service"]);
 
 const unusedStubs = Layer.mergeAll(
@@ -206,16 +208,13 @@ const makeAuthLayer = (issued: Ref.Ref<ReadonlyArray<{ scopes: ReadonlyArray<str
 
 const runAddPeer = (input: {
   readonly httpLayer: Layer.Layer<HttpClient.HttpClient>;
-  readonly roaming?: boolean;
   readonly syncOptions?: { readonly secretsSync?: boolean };
 }) =>
   Effect.gen(function* () {
     const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
     const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>([]);
     const issued = yield* Ref.make<ReadonlyArray<{ scopes: ReadonlyArray<string> }>>([]);
-    const settingsLayer = ServerSettingsService.layerTest({
-      roaming: input.roaming ?? false,
-    });
+    const settingsLayer = ServerSettingsService.layerTest();
     const testLayer = RoamingServiceLayer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -235,7 +234,7 @@ const runAddPeer = (input: {
       const service = yield* RoamingService;
       const result = yield* service.addPeer({
         baseUrls: [PEER_BASE_URL],
-        pairingCredential: input.roaming === undefined ? ADMIN_CODE : ADMIN_CODE,
+        pairingCredential: ADMIN_CODE,
         ...(input.syncOptions !== undefined ? { syncOptions: input.syncOptions } : {}),
       });
       const settings = yield* ServerSettingsService.pipe(
@@ -274,9 +273,8 @@ describe("RoamingService unified pairing handshake", () => {
         new TextDecoder().decode(secrets.get(roamingPeerSecretName(PEER_ENVIRONMENT_ID))),
         MACHINE_TOKEN,
       );
+      // The peer row IS the on-switch (D3); the dialog's choice applies.
       assert.strictEqual(peerRows.length, 1);
-      // Pairing flips the local setting on and applies the dialog's choice.
-      assert.isTrue(settings.roaming);
       assert.isTrue(settings.roamingSecretsSync);
     }),
   );
@@ -289,8 +287,8 @@ describe("RoamingService unified pairing handshake", () => {
       assert.strictEqual(result.attach.token, HANDSHAKE_TOKEN);
       assert.strictEqual(result.attach.environmentId, PEER_ENVIRONMENT_ID);
       assert.strictEqual(secrets.size, 0);
+      // No peer row → roaming stays off (D3).
       assert.strictEqual(peerRows.length, 0);
-      assert.isFalse(settings.roaming);
     }),
   );
 
@@ -322,12 +320,12 @@ describe("RoamingService unified pairing handshake", () => {
     }),
   );
 
-  it.effect("mintMachineCredential always applies the pairing's sync options", () =>
+  it.effect("mintMachineCredential applies sync options on first pairing only (G8)", () =>
     Effect.gen(function* () {
       const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
       const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>([]);
       const issued = yield* Ref.make<ReadonlyArray<{ scopes: ReadonlyArray<string> }>>([]);
-      const settingsLayer = ServerSettingsService.layerTest({ roaming: false });
+      const settingsLayer = ServerSettingsService.layerTest();
       const testLayer = RoamingServiceLayer.pipe(
         Layer.provide(
           Layer.mergeAll(
@@ -349,26 +347,27 @@ describe("RoamingService unified pairing handshake", () => {
         const service = yield* RoamingService;
         const settingsService = yield* ServerSettingsService;
 
-        // First pairing: roaming off → on, secretsSync applied.
+        // First pairing (no peers yet): the dialog's choices seed the
+        // consents.
         yield* service.mintMachineCredential({
           callerEnvironmentId: PEER_ENVIRONMENT_ID,
           callerBaseUrls: [],
-          syncOptions: { secretsSync: true },
+          syncOptions: { secretsSync: true, wipSync: false },
         });
         const first = yield* settingsService.getSettings;
-        assert.isTrue(first.roaming);
         assert.isTrue(first.roamingSecretsSync);
+        assert.isFalse(first.roamingWipSync);
 
-        // Later pairing: ONE secrets decision per pairing (2026-07-06) —
-        // the dialog's choice always applies, replacing any prior value.
+        // Re-pair on a machine that already has a peer: an explicit prior
+        // choice is never overridden remotely (G8).
         yield* service.mintMachineCredential({
           callerEnvironmentId: EnvironmentId.make("env-other"),
           callerBaseUrls: [],
-          syncOptions: { secretsSync: false },
+          syncOptions: { secretsSync: false, wipSync: true },
         });
         const second = yield* settingsService.getSettings;
-        assert.isTrue(second.roaming);
-        assert.isFalse(second.roamingSecretsSync);
+        assert.isTrue(second.roamingSecretsSync);
+        assert.isFalse(second.roamingWipSync);
 
         // The mirror credential is least-privilege.
         const issuedCalls = yield* Ref.get(issued);
@@ -396,7 +395,7 @@ const runAddPeerAttachOnly = (options?: {
       options?.existingPeers ?? [],
     );
     const issued = yield* Ref.make<ReadonlyArray<{ scopes: ReadonlyArray<string> }>>([]);
-    const settingsLayer = ServerSettingsService.layerTest({ roaming: false });
+    const settingsLayer = ServerSettingsService.layerTest();
     const testLayer = RoamingServiceLayer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -434,7 +433,7 @@ const runAddPeerWith404 = (baseLayer: Layer.Layer<HttpClient.HttpClient>) =>
     const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
     const peerRows = yield* Ref.make<ReadonlyArray<{ environmentId: string }>>([]);
     const issued = yield* Ref.make<ReadonlyArray<{ scopes: ReadonlyArray<string> }>>([]);
-    const settingsLayer = ServerSettingsService.layerTest({ roaming: false });
+    const settingsLayer = ServerSettingsService.layerTest();
     // Wrap the peer mock so the well-known descriptor resolves in the
     // no-roaming-routes sub-case.
     const httpLayer = Layer.effect(

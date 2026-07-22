@@ -530,12 +530,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
-  /**
-   * Enables the roaming workspace subsystem (blob mirror, registry,
-   * enrollment). Roaming reactors start with the server but no-op while
-   * this is off.
-   */
-  roaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // NOTE: there is deliberately no stored `roaming` flag (D3, 2026-07-22).
+  // The subsystem's master gate is derived from peer existence — auto-on at
+  // first pairing, auto-off when the last peer is removed. Settings rows
+  // written by older builds may still carry the key; Schema.Struct ignores
+  // unknown keys on decode, so they parse without migration.
   /**
    * Consent to capture and mirror this machine's secret files (vault).
    * Per-machine and never mirrored: each machine consents to shipping its
@@ -674,7 +673,6 @@ export const ServerSettingsPatch = Schema.Struct({
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
     }),
   ),
-  roaming: Schema.optionalKey(Schema.Boolean),
   roamingSecretsSync: Schema.optionalKey(Schema.Boolean),
   roamingWipSync: Schema.optionalKey(Schema.Boolean),
   providers: Schema.optionalKey(
