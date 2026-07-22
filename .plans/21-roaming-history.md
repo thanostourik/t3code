@@ -2092,7 +2092,7 @@ roamingThreads shell surface, permissive wire kinds), #84 (server:
 TranscriptSync reactor, park/brief flow, TextGeneration op across five
 adapters, shell projection + ws overlay + routes), #85 (web: sidebar
 mirrored rows, /mirrored read-only view, Hand off dialog, Continue here,
-Conversations pairing row), #86/#87 (acceptance + doc hygiene).
+Conversations pairing row), #86 (acceptance + doc hygiene).
 
 Independent reviews (opus) caught two real defects before/at merge:
 
