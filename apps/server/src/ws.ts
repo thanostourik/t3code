@@ -77,6 +77,7 @@ import {
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { Materializer } from "./roaming/Materializer.ts";
+import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -356,6 +357,7 @@ const makeWsRpcLayer = (
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const roamingBlobStore = yield* RoamingBlobStore;
+      const roamingPeers = yield* RoamingPeers;
       const materializer = yield* Materializer;
       const wipSnapshotReactor = yield* WipSnapshotReactor;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -1133,13 +1135,11 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
-              // Roaming visibility follows the setting at subscribe time
-              // (consistent with the roaming routes 404ing while off);
-              // flipping the flag takes effect on the next subscription.
-              const roamingEnabled = yield* serverSettings.getSettings.pipe(
-                Effect.map((settings) => settings.roaming),
-                Effect.orElseSucceed(() => false),
-              );
+              // Roaming visibility follows the derived gate (peers exist,
+              // D3) at subscribe time — consistent with the roaming routes
+              // 404ing while off; a flip takes effect on the next
+              // subscription.
+              const roamingEnabled = yield* roamingPeers.roamingEnabled;
 
               // Coalesce the live shell stream per aggregate over a small window
               // so bursts of high-frequency events (streaming message deltas,

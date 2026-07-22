@@ -2004,7 +2004,6 @@ export function ConnectionsSettings() {
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
     reportFailure: false,
   });
-  const roamingEnabled = usePrimarySettings((settings) => settings.roaming);
   const roamingSecretsSync = usePrimarySettings((settings) => settings.roamingSecretsSync);
   const roamingWipSync = usePrimarySettings((settings) => settings.roamingWipSync);
   const updatePrimarySettings = useUpdatePrimarySettings();
@@ -2107,6 +2106,9 @@ export function ConnectionsSettings() {
   useEffect(() => {
     refreshRoamingPeers();
   }, [refreshRoamingPeers]);
+  // Roaming has no stored flag (D3): it is on iff at least one peer exists,
+  // mirroring the server's derived gate.
+  const roamingEnabled = roamingPeersById.size > 0;
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");

@@ -77,14 +77,14 @@ for (const inst of [A, B]) {
 }
 
 // Capture consent lives on the authoring machine only (per-machine setting);
-// B needs just the subsystem flag to mirror, list, and materialize.
+// D3: no stored roaming flag — the gate turns on at pairing (below). Only
+// A's secrets-capture consent is a setting.
 writeFileSync(
   join(A.base, "userdata", "settings.json"),
-  JSON.stringify({ roaming: true, roamingSecretsSync: true }),
+  JSON.stringify({ roamingSecretsSync: true }),
 );
-writeFileSync(join(B.base, "userdata", "settings.json"), JSON.stringify({ roaming: true }));
 await sleep(1500); // settings watcher debounce + reactor reaction
-pass("roaming enabled on both instances (secrets capture on A)");
+pass("secrets-capture consent set on A (gate follows pairing, D3)");
 
 // ── 1. two test repositories: P1 with secrets, P2 without ────────────
 const p1Dir = join(HARNESS_DIR, "m2-p1");

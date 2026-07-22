@@ -565,20 +565,23 @@ const make = Effect.gen(function* () {
           enrolledAt: yield* nowIso,
           syncEnabled: true,
         };
+        // The peer row IS the on-switch: roaming derives from peer existence
+        // (D3), so upserting the first peer turns the subsystem on.
         yield* peers.upsert(peer).pipe(Effect.mapError(internalError("peer record failed")));
-        // Pairing IS how roaming turns on locally; the dialog's sync options
-        // are the local user's explicit choice, so they apply unconditionally.
-        yield* settingsService
-          .updateSettings({
-            roaming: true,
-            ...(input.syncOptions?.secretsSync !== undefined
-              ? { roamingSecretsSync: input.syncOptions.secretsSync }
-              : {}),
-            ...(input.syncOptions?.wipSync !== undefined
-              ? { roamingWipSync: input.syncOptions.wipSync }
-              : {}),
-          })
-          .pipe(Effect.mapError(internalError("local settings update failed")));
+        // The dialog's sync options are the local user's explicit choice, so
+        // they apply unconditionally.
+        if (input.syncOptions !== undefined) {
+          yield* settingsService
+            .updateSettings({
+              ...(input.syncOptions.secretsSync !== undefined
+                ? { roamingSecretsSync: input.syncOptions.secretsSync }
+                : {}),
+              ...(input.syncOptions.wipSync !== undefined
+                ? { roamingWipSync: input.syncOptions.wipSync }
+                : {}),
+            })
+            .pipe(Effect.mapError(internalError("local settings update failed")));
+        }
         yield* peerMirror.syncNow();
       }
 
@@ -602,34 +605,40 @@ const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError(internalError("machine credential issue failed")));
 
+    // First pairing or re-pair? Decided BEFORE the caller's row lands: the
+    // received sync options may only seed consents on a machine that has
+    // never paired (G8) — an explicit prior choice is never overridden by a
+    // re-pair.
+    const isFirstPairing = !(yield* peers.roamingEnabled);
+
     // Record the caller's existence only. Its advertised base URLs are
     // deliberately ignored: a caller identifying itself is not authority to
     // (re)direct our outbound mirror traffic, and we hold no credential for
-    // it anyway — data flows when it contacts us.
+    // it anyway — data flows when it contacts us. Since D3 this row is also
+    // what turns roaming on for this machine.
     yield* peers
       .ensurePeer(input.callerEnvironmentId, yield* nowIso)
       .pipe(Effect.mapError(internalError("caller peer record failed")));
 
     // ONE secrets decision for the pairing (2026-07-06, user override of the
-    // M2 'each machine consents to its own files' rule): pairing turns
-    // roaming on, and the pairing dialog's Secret-files choice ALWAYS applies
-    // here — so the machine holding a project captures its secrets without a
-    // second toggle anywhere. There is deliberately no secrets control on
-    // this (the paired-into) machine; the choice rides the pairing.
-    // The same one-decision rule covers Work in progress: WIP snapshots are
-    // captured by the machine holding each project, so the dialog's choice
-    // must land here too.
-    yield* settingsService
-      .updateSettings({
-        roaming: true,
-        ...(input.syncOptions?.secretsSync !== undefined
-          ? { roamingSecretsSync: input.syncOptions.secretsSync }
-          : {}),
-        ...(input.syncOptions?.wipSync !== undefined
-          ? { roamingWipSync: input.syncOptions.wipSync }
-          : {}),
-      })
-      .pipe(Effect.mapError(internalError("settings update failed")));
+    // M2 'each machine consents to its own files' rule): on FIRST pairing the
+    // dialog's Secret-files choice applies here — so the machine holding a
+    // project captures its secrets without a second toggle anywhere. There is
+    // deliberately no secrets control on this (the paired-into) machine; the
+    // choice rides the pairing. The same one-decision rule covers Work in
+    // progress. A re-pair never overrides this machine's existing choice.
+    if (isFirstPairing && input.syncOptions !== undefined) {
+      yield* settingsService
+        .updateSettings({
+          ...(input.syncOptions.secretsSync !== undefined
+            ? { roamingSecretsSync: input.syncOptions.secretsSync }
+            : {}),
+          ...(input.syncOptions.wipSync !== undefined
+            ? { roamingWipSync: input.syncOptions.wipSync }
+            : {}),
+        })
+        .pipe(Effect.mapError(internalError("settings update failed")));
+    }
 
     return {
       environmentId,
