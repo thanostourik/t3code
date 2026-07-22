@@ -36,6 +36,7 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import { PeerMirror } from "./roaming/PeerMirror.ts";
 import { RoamingAutoEnroll } from "./roaming/RoamingAutoEnroll.ts";
+import { TranscriptSync } from "./roaming/TranscriptSync.ts";
 import { VaultSync } from "./roaming/VaultSync.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import {
@@ -300,6 +301,7 @@ export const make = Effect.gen(function* () {
   const peerMirror = yield* PeerMirror;
   const roamingAutoEnroll = yield* RoamingAutoEnroll;
   const vaultSync = yield* VaultSync;
+  const transcriptSync = yield* TranscriptSync;
   const wipSnapshotReactor = yield* WipSnapshotReactor;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -354,6 +356,7 @@ export const make = Effect.gen(function* () {
         yield* peerMirror.start().pipe(Scope.provide(reactorScope));
         yield* roamingAutoEnroll.start().pipe(Scope.provide(reactorScope));
         yield* vaultSync.start().pipe(Scope.provide(reactorScope));
+        yield* transcriptSync.start().pipe(Scope.provide(reactorScope));
         yield* wipSnapshotReactor.start().pipe(Scope.provide(reactorScope));
       }),
     );

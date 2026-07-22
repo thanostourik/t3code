@@ -292,6 +292,10 @@ function createTextGeneration(
       Effect.succeed({
         title: "Update workflow",
       }),
+    generateResumptionBrief: () =>
+      Effect.succeed({
+        markdown: "# Brief",
+      }),
     ...overrides,
   };
 
@@ -340,6 +344,7 @@ function createTextGeneration(
             }),
         ),
       ),
+    generateResumptionBrief: (input) => implementation.generateResumptionBrief(input),
   };
 }
 
