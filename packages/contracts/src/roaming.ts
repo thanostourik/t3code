@@ -20,15 +20,9 @@ import { RepositoryIdentity } from "./environment.ts";
 // version with a different contentHash means concurrent writes and is
 // surfaced as a conflict, never auto-merged.
 
-export const RoamingBlobKind = Schema.Literals([
-  "registry",
-  "vault",
-  "recipe",
-  "wip",
-  "transcript",
-  "brief",
-  "lease",
-]);
+// Speculative kinds (recipe/transcript/brief) were removed 2026-07-22 (O2);
+// they return with their milestones' contracts PRs.
+export const RoamingBlobKind = Schema.Literals(["registry", "vault", "wip", "lease"]);
 export type RoamingBlobKind = typeof RoamingBlobKind.Type;
 
 /**
@@ -93,11 +87,12 @@ export const RoamingBlobManifestEntry = Schema.Struct({
 export type RoamingBlobManifestEntry = typeof RoamingBlobManifestEntry.Type;
 
 /**
- * Concurrent writes to the same (kind, key) at the same version. Recorded
- * locally by the blob store and surfaced to the user; resolution is always
- * an explicit pick, never a merge. The full remote record is retained so
- * the resolution flow can show both payloads (the local one lives in the
- * store).
+ * Concurrent writes to the same (kind, key) at the same version. The store
+ * auto-resolves newest-updatedAt-wins (D1, 2026-07-22) and records the
+ * outcome here: `localContentHash` is the winner this machine now holds,
+ * `remote` the full losing concurrent write, preserved for inspection. The
+ * record surfaces as a notice on the project row and is superseded by the
+ * next accepted write for the key.
  */
 export const RoamingBlobConflict = Schema.Struct({
   kind: RoamingBlobKind,
@@ -151,14 +146,6 @@ export const ROAMING_WIP_BUNDLE_MAX_BYTES = 8 * 1024 * 1024;
  * dropped-in dataset (git hosts commonly refuse >100 MB blobs anyway).
  */
 export const ROAMING_WIP_MAX_FILE_BYTES = 50 * 1024 * 1024;
-
-export const RoamingVaultOverrides = Schema.Struct({
-  /** Repo-relative paths (posix separators), added to the default matches. */
-  include: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-  /** Repo-relative paths to drop from the default matches. */
-  exclude: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-});
-export type RoamingVaultOverrides = typeof RoamingVaultOverrides.Type;
 
 export const RoamingVaultFileEntry = Schema.Struct({
   /** Repo-relative, posix separators. */
@@ -236,11 +223,9 @@ export const RoamingRegistryPayload = Schema.Struct({
   workspaceProjectId: WorkspaceProjectId,
   title: TrimmedNonEmptyString,
   repository: RepositoryIdentity,
-  defaultBranch: Schema.optional(TrimmedNonEmptyString),
-  /** Per-project exceptions to the global vault defaults (rarely used). */
-  vaultOverrides: RoamingVaultOverrides.pipe(
-    Schema.withDecodingDefault(Effect.succeed({ include: [], exclude: [] })),
-  ),
+  // `defaultBranch` and `vaultOverrides` were retired 2026-07-22 (S4);
+  // Schema.Struct tolerates unknown keys on decode, so blobs minted by
+  // pre-fix machines still parse. No migration.
   /** Blob key of the bootstrap recipe (step 4), when one exists. */
   recipeRef: Schema.optional(TrimmedNonEmptyString),
   /** Where each machine materializes this project. */
@@ -362,36 +347,6 @@ export const RoamingMaterializeResponse = Schema.Struct({
   materialization: RoamingMaterializationRecord,
 });
 export type RoamingMaterializeResponse = typeof RoamingMaterializeResponse.Type;
-
-// ── Conflict surfacing / resolution ─────────────────────────────────
-//
-// POST bodies rather than path params — `wip` keys contain `/`. Resolution
-// is always an explicit pick; the chosen side is written as a new
-// higher-version local blob (which supersedes and clears the conflict) and
-// mirrors out like any write.
-
-export const RoamingConflictGetRequest = Schema.Struct({
-  ref: RoamingBlobRef,
-});
-export type RoamingConflictGetRequest = typeof RoamingConflictGetRequest.Type;
-
-export const RoamingConflictGetResponse = Schema.Struct({
-  conflict: RoamingBlobConflict,
-  /** The local record the remote one collided with. */
-  local: RoamingBlobRecord,
-});
-export type RoamingConflictGetResponse = typeof RoamingConflictGetResponse.Type;
-
-export const RoamingConflictResolveRequest = Schema.Struct({
-  ref: RoamingBlobRef,
-  pick: Schema.Literals(["local", "remote"]),
-});
-export type RoamingConflictResolveRequest = typeof RoamingConflictResolveRequest.Type;
-
-export const RoamingConflictResolveResponse = Schema.Struct({
-  record: RoamingBlobRecord,
-});
-export type RoamingConflictResolveResponse = typeof RoamingConflictResolveResponse.Type;
 
 export const RoamingWipStatusEntry = Schema.Struct({
   workspaceProjectId: WorkspaceProjectId,
@@ -788,5 +743,3 @@ export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_WIP_TAKEOVER_PATH = "/api/roaming/wip/takeover";
 export const ROAMING_WIP_DIVERGENCE_PATH = "/api/roaming/wip/divergence";
 export const ROAMING_WIP_DIVERGENCE_RESOLVE_PATH = "/api/roaming/wip/divergence/resolve";
-export const ROAMING_CONFLICT_GET_PATH = "/api/roaming/conflicts/get";
-export const ROAMING_CONFLICT_RESOLVE_PATH = "/api/roaming/conflicts/resolve";
