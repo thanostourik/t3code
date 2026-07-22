@@ -363,6 +363,51 @@ it.effect("Materializer completed records are idempotent and keep no-vault notic
   }),
 );
 
+it.effect("Materializer serializes concurrent requests for one project (G9)", () =>
+  Effect.gen(function* () {
+    const dispatches = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+    const cloneAttempts = yield* Ref.make(0);
+    const projectRows = yield* Ref.make<ReadonlyArray<ProjectionProject>>([]);
+
+    const program = Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const target = path.join(
+          yield* fs.makeTempDirectoryScoped({ prefix: "t3-mat-race-" }),
+          "repo",
+        );
+        const materializer = yield* Materializer;
+        yield* writeRegistry({ workspaceProjectId: WORKSPACE_PROJECT_ID });
+
+        // Both requests race; the second must attach to the first's outcome
+        // instead of running a second clone and a second project.create.
+        const [first, second] = yield* Effect.all(
+          [
+            materializer.materialize({
+              workspaceProjectId: WORKSPACE_PROJECT_ID,
+              targetPath: target,
+            }),
+            materializer.materialize({
+              workspaceProjectId: WORKSPACE_PROJECT_ID,
+              targetPath: target,
+            }),
+          ],
+          { concurrency: 2 },
+        );
+
+        assert.equal(first.status, "completed");
+        assert.deepEqual(second, first);
+        assert.equal(yield* Ref.get(cloneAttempts), 1);
+        const commands = yield* Ref.get(dispatches);
+        assert.equal(commands.filter((command) => command.type === "project.create").length, 1);
+      }),
+    );
+
+    yield* program.pipe(Effect.provide(makeLayer({ dispatches, cloneAttempts, projectRows })));
+  }),
+);
+
 it.effect("Materializer registers the new project with the existing workspaceProjectId", () =>
   Effect.gen(function* () {
     const dispatches = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);

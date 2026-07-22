@@ -34,6 +34,7 @@ import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
@@ -466,9 +467,31 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  // G3: takeover and divergence resolution mutate the worktree (branch
+  // switch, reset --hard, clean -fd) and must never interleave with a
+  // concurrent capture or per-file apply. One lock per project serializes
+  // the worker's passes and those explicit mutations against each other.
+  // The shutdown finalizer deliberately bypasses this (and the worker) —
+  // pass fibers are already interrupted there.
+  const projectLocks = yield* Ref.make(new Map<WorkspaceProjectId, Semaphore.Semaphore>());
+  const withProjectLock =
+    (workspaceProjectId: WorkspaceProjectId) =>
+    <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+      Ref.modify(projectLocks, (locks) => {
+        const existing = locks.get(workspaceProjectId);
+        if (existing !== undefined) {
+          return [existing, locks] as const;
+        }
+        const created = Semaphore.makeUnsafe(1);
+        const next = new Map(locks);
+        next.set(workspaceProjectId, created);
+        return [created, next] as const;
+      }).pipe(Effect.flatMap((lock) => lock.withPermits(1)(effect)));
+
   const worker = yield* makeKeyedCoalescingWorker<WorkspaceProjectId, WipTarget, never, never>({
     merge: (_current, next) => next,
-    process: (_workspaceProjectId, target) => processTarget(target).pipe(Effect.asVoid),
+    process: (workspaceProjectId, target) =>
+      withProjectLock(workspaceProjectId)(processTarget(target).pipe(Effect.asVoid)),
   });
 
   const watcherScopes = yield* Ref.make(new Map<WorkspaceProjectId, Scope.Scope>());
@@ -628,7 +651,9 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const takeover: WipSnapshotReactor["Service"]["takeover"] = (workspaceProjectId, snapshotOid) =>
+  // Unlocked core — resolveDivergence's take-the-peer path runs it while
+  // already holding the project lock.
+  const runTakeover = (workspaceProjectId: WorkspaceProjectId, snapshotOid?: string) =>
     Effect.gen(function* () {
       if (!(yield* isEnabled)) return { applied: false as const };
       const target = (yield* listTargets).find(
@@ -680,7 +705,10 @@ const make = Effect.gen(function* () {
       yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
       yield* processTarget(target, { acknowledgeApplied: true });
       return { applied: true as const };
-    }).pipe(
+    });
+
+  const takeover: WipSnapshotReactor["Service"]["takeover"] = (workspaceProjectId, snapshotOid) =>
+    withProjectLock(workspaceProjectId)(runTakeover(workspaceProjectId, snapshotOid)).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("roaming wip: takeover failed", { workspaceProjectId, cause }).pipe(
           Effect.as({ applied: false as const }),
@@ -710,66 +738,68 @@ const make = Effect.gen(function* () {
     pick,
     peerSnapshotOid,
   ) =>
-    Effect.gen(function* () {
-      if (!(yield* isEnabled)) {
-        return { resolved: false as const, reason: "sync is not enabled for this project" };
-      }
-      const target = (yield* listTargets).find(
-        (candidate) => candidate.workspaceProjectId === workspaceProjectId,
-      );
-      if (target === undefined) {
-        return { resolved: false as const, reason: "project is not on this machine" };
-      }
-      if (pick === "peer") {
-        // Re-verify the divergence still exists on exactly this snapshot: a
-        // fast-forward that settled things between render and click must not
-        // turn "take the other version" into a surprise backward reset.
-        const current = yield* providePassDeps(getWipDivergenceForTarget(target));
-        if (current === null || current.peer.snapshotOid !== peerSnapshotOid) {
+    withProjectLock(workspaceProjectId)(
+      Effect.gen(function* () {
+        if (!(yield* isEnabled)) {
+          return { resolved: false as const, reason: "sync is not enabled for this project" };
+        }
+        const target = (yield* listTargets).find(
+          (candidate) => candidate.workspaceProjectId === workspaceProjectId,
+        );
+        if (target === undefined) {
+          return { resolved: false as const, reason: "project is not on this machine" };
+        }
+        if (pick === "peer") {
+          // Re-verify the divergence still exists on exactly this snapshot: a
+          // fast-forward that settled things between render and click must not
+          // turn "take the other version" into a surprise backward reset.
+          const current = yield* providePassDeps(getWipDivergenceForTarget(target));
+          if (current === null || current.peer.snapshotOid !== peerSnapshotOid) {
+            return {
+              resolved: false as const,
+              reason:
+                "the machines no longer disagree on this project (or the other machine's work changed); review the latest state",
+            };
+          }
+          // Taking the peer side IS a pinned takeover; the losing local state
+          // lands on the per-branch parked ref written before the HEAD move.
+          const branch = yield* git.execute({
+            operation: "WipSnapshotReactor.divergenceLocalBranch",
+            cwd: target.workspaceRoot,
+            args: ["symbolic-ref", "-q", "HEAD"],
+            allowNonZeroExit: true,
+          });
+          const parkedRef =
+            branch.exitCode === 0
+              ? yield* wipParkedRefName(target.workspaceProjectId, branch.stdout.trim()).pipe(
+                  Effect.orElseSucceed(() => undefined),
+                )
+              : undefined;
+          const result = yield* runTakeover(workspaceProjectId, peerSnapshotOid);
           return {
-            resolved: false as const,
-            reason:
-              "the machines no longer disagree on this project (or the other machine's work changed); review the latest state",
+            resolved: result.applied,
+            ...(result.applied && parkedRef !== undefined ? { preservedRef: parkedRef } : {}),
+            ...(!result.applied && result.reason !== undefined ? { reason: result.reason } : {}),
           };
         }
-        // Taking the peer side IS a pinned takeover; the losing local state
-        // lands on the per-branch parked ref written before the HEAD move.
-        const branch = yield* git.execute({
-          operation: "WipSnapshotReactor.divergenceLocalBranch",
-          cwd: target.workspaceRoot,
-          args: ["symbolic-ref", "-q", "HEAD"],
-          allowNonZeroExit: true,
-        });
-        const parkedRef =
-          branch.exitCode === 0
-            ? yield* wipParkedRefName(target.workspaceProjectId, branch.stdout.trim()).pipe(
-                Effect.orElseSucceed(() => undefined),
-              )
-            : undefined;
-        const result = yield* takeover(workspaceProjectId, peerSnapshotOid);
-        return {
-          resolved: result.applied,
-          ...(result.applied && parkedRef !== undefined ? { preservedRef: parkedRef } : {}),
-          ...(result.reason !== undefined ? { reason: result.reason } : {}),
-        };
-      }
-      const result = yield* providePassDeps(resolveKeptLocalDivergence(target, peerSnapshotOid));
-      if (!result.resolved) {
-        return { resolved: false as const, reason: result.reason };
-      }
-      // Keeping local IS an explicit user action here — move the lease like
-      // takeover does (the acknowledgement ship itself never renews).
-      yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
-      // The acknowledgement capture ships our kept-local state naming the
-      // rejected snapshot. That pass classifies BEFORE it ships, so it still
-      // reports the divergence; run one more pass so the settled state
-      // (conflictAlreadyResolved → skip) publishes the cleared pill NOW
-      // instead of on the next interval tick (field finding 2026-07-22:
-      // "Review changes" lingered up to 2 minutes after a successful keep).
-      yield* processTarget(target, { acknowledgeApplied: true });
-      yield* processTarget(target);
-      return { resolved: true as const, preservedRef: result.preservedRef };
-    }).pipe(
+        const result = yield* providePassDeps(resolveKeptLocalDivergence(target, peerSnapshotOid));
+        if (!result.resolved) {
+          return { resolved: false as const, reason: result.reason };
+        }
+        // Keeping local IS an explicit user action here — move the lease like
+        // takeover does (the acknowledgement ship itself never renews).
+        yield* providePassDeps(renewLease({ workspaceProjectId, environmentId, force: true }));
+        // The acknowledgement capture ships our kept-local state naming the
+        // rejected snapshot. That pass classifies BEFORE it ships, so it still
+        // reports the divergence; run one more pass so the settled state
+        // (conflictAlreadyResolved → skip) publishes the cleared pill NOW
+        // instead of on the next interval tick (field finding 2026-07-22:
+        // "Review changes" lingered up to 2 minutes after a successful keep).
+        yield* processTarget(target, { acknowledgeApplied: true });
+        yield* processTarget(target);
+        return { resolved: true as const, preservedRef: result.preservedRef };
+      }),
+    ).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("roaming wip: divergence resolution failed", {
           workspaceProjectId,
