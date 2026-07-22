@@ -28,6 +28,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+// D3: roaming has no stored flag — the gate derives from peer records in
+// state.sqlite, so freshness/on-ness checks read the peers table.
+const hasRoamingPeers = (base) => {
+  try {
+    const db = new DatabaseSync(join(base, "userdata", "state.sqlite"), { readOnly: true });
+    try {
+      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+};
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
 const A = {
@@ -107,8 +122,8 @@ for (const inst of [A, B]) {
     () => false,
   );
   if (!up) fail("preflight", `${inst.name} is not running — start the harness fresh`);
-  if (readSettings(inst).roaming === true)
-    fail("preflight", `${inst.name} already has roaming on — restart the harness fresh`);
+  if (hasRoamingPeers(inst.base))
+    fail("preflight", `${inst.name} already has roaming peers — restart the harness fresh`);
 }
 pass("fresh harness, roaming off on both");
 
@@ -192,10 +207,11 @@ const environmentIdA = readFileSync(join(A.base, "userdata", "environment-id"), 
 const settingsAfterPair = await waitFor("wip consent on both machines", 15_000, async () => {
   const a = readSettings(A);
   const b = readSettings(B);
-  return a.roaming === true &&
+  // D3: peer records carry the gate; settings carry only the consents.
+  return hasRoamingPeers(A.base) &&
     a.roamingWipSync === true &&
     a.roamingSecretsSync === true &&
-    b.roaming === true &&
+    hasRoamingPeers(B.base) &&
     b.roamingWipSync === true
     ? { a, b }
     : null;

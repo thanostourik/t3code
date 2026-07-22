@@ -617,9 +617,8 @@ export type RoamingWaitChangesResponse = typeof RoamingWaitChangesResponse.Type;
 /**
  * Sync choices made in the pairing dialog (M2.5). Travels with the unified
  * handshake so one pairing action configures both machines. A peer applies
- * received options only when the same request flips its `roaming` setting
- * off→on (first pairing) — an explicit prior choice on a machine is never
- * overridden remotely.
+ * received options only when it has no enrolled peers yet (first pairing) —
+ * an explicit prior choice on a machine is never overridden remotely.
  */
 export const RoamingPairSyncOptions = Schema.Struct({
   /** Maps to the `roamingSecretsSync` setting (vault capture consent). */

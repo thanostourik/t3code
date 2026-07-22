@@ -12,6 +12,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -45,6 +46,13 @@ export class RoamingPeers extends Context.Service<
       contactAt: string,
     ) => Effect.Effect<void, RoamingPeersError>;
     readonly subscribeChanges: Effect.Effect<PubSub.Subscription<void>, never, Scope.Scope>;
+    /**
+     * The subsystem's master gate (D3): roaming is on iff at least one peer
+     * exists — auto-on at first pairing, auto-off when the last peer goes.
+     * In-memory (seeded from the table, refreshed on every peer mutation) so
+     * hot paths pay no DB read. Consent sites AND their consent flag on top.
+     */
+    readonly roamingEnabled: Effect.Effect<boolean>;
   }
 >()("t3/roaming/RoamingPeers") {}
 
@@ -59,6 +67,16 @@ const sqlError = (operation: string) => (cause: unknown) =>
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const changes = yield* PubSub.unbounded<void>();
+
+  const countPeers = sql<{ readonly count: number }>`
+    SELECT COUNT(*) AS count FROM roaming_peers
+  `.pipe(
+    Effect.map((rows) => (rows[0]?.count ?? 0) > 0),
+    Effect.mapError(sqlError("roaming.peers.count")),
+  );
+  // Migrations run inside the SQLite layer, so the table exists here.
+  const hasPeers = yield* Ref.make(yield* countPeers.pipe(Effect.orDie));
+  const refreshHasPeers = countPeers.pipe(Effect.flatMap((value) => Ref.set(hasPeers, value)));
 
   const upsert: RoamingPeers["Service"]["upsert"] = Effect.fn("RoamingPeers.upsert")(
     function* (peer) {
@@ -75,6 +93,7 @@ const make = Effect.gen(function* () {
         last_contact_at = COALESCE(excluded.last_contact_at, roaming_peers.last_contact_at),
         sync_enabled = excluded.sync_enabled
     `.pipe(Effect.mapError(sqlError("roaming.peers.upsert")));
+      yield* refreshHasPeers;
       yield* PubSub.publish(changes, undefined);
     },
   );
@@ -89,6 +108,7 @@ const make = Effect.gen(function* () {
         VALUES (${environmentId}, ${"[]"}, ${null}, ${enrolledAt})
         ON CONFLICT (environment_id) DO NOTHING
       `.pipe(Effect.mapError(sqlError("roaming.peers.ensure")));
+      yield* refreshHasPeers;
       yield* PubSub.publish(changes, undefined);
     },
   );
@@ -100,6 +120,7 @@ const make = Effect.gen(function* () {
         WHERE environment_id = ${environmentId}
         RETURNING environment_id AS "environmentId"
       `.pipe(Effect.mapError(sqlError("roaming.peers.remove")));
+      yield* refreshHasPeers;
       yield* PubSub.publish(changes, undefined);
       return rows.length > 0;
     },
@@ -175,7 +196,30 @@ const make = Effect.gen(function* () {
     list,
     recordContact,
     subscribeChanges: PubSub.subscribe(changes),
+    roamingEnabled: Ref.get(hasPeers),
   } satisfies RoamingPeers["Service"];
 });
 
 export const layer = Layer.effect(RoamingPeers, make);
+
+/**
+ * In-memory stub for tests that only need the derived gate (D3) and inert
+ * peer plumbing — no persistence, mutations are no-ops.
+ */
+export const layerTest = (options?: { readonly hasPeers?: boolean }) =>
+  Layer.effect(
+    RoamingPeers,
+    Effect.gen(function* () {
+      const changes = yield* PubSub.unbounded<void>();
+      return {
+        upsert: () => Effect.void,
+        ensurePeer: () => Effect.void,
+        remove: () => Effect.succeed(false),
+        setSyncEnabled: () => Effect.succeed(false),
+        list: () => Effect.succeed([]),
+        recordContact: () => Effect.void,
+        subscribeChanges: PubSub.subscribe(changes),
+        roamingEnabled: Effect.succeed(options?.hasPeers ?? false),
+      } satisfies RoamingPeers["Service"];
+    }),
+  );

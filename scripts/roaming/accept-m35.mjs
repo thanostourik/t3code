@@ -16,6 +16,21 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+// D3: roaming has no stored flag — the gate derives from peer records in
+// state.sqlite, so freshness/on-ness checks read the peers table.
+const hasRoamingPeers = (base) => {
+  try {
+    const db = new DatabaseSync(join(base, "userdata", "state.sqlite"), { readOnly: true });
+    try {
+      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+};
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
 const A = {
@@ -94,10 +109,10 @@ for (const inst of [A, B]) {
     () => false,
   );
   if (!up) fail("preflight", `${inst.name} is not running — start the harness fresh`);
-  if (readSettings(inst).roaming === true)
-    fail("preflight", `${inst.name} already has roaming on — restart the harness fresh`);
+  if (hasRoamingPeers(inst.base))
+    fail("preflight", `${inst.name} already has roaming peers — restart the harness fresh`);
 }
-pass("fresh harness, roaming off on both");
+pass("fresh harness, no roaming peers on either");
 
 // ── 1. one project on A with .gitignore + .t3sync + .idea ─────────────
 const p1Dir = join(HARNESS_DIR, "m35-p1");
@@ -275,11 +290,11 @@ pass("oversize untracked file warned and kept off the origin");
 
 // ── 7. roaming off ⇒ the HTTP shell snapshot hides every roaming field ─
 // (the ws path always stripped them; the HTTP-first load must too)
-// Restart B with the flag off: this step tests the ROUTE's gating, and
+// Restart B with its peer records removed (D3: no stored flag — deleting
+// the last peer IS turning roaming off): this step tests the ROUTE's gating, and
 // runtime file-watch delivery proved flaky under harness inotify pressure
 // (flagged in the plan as a follow-up — the recursive project watchers are
 // the suspected budget hog).
-const settingsB = readSettings(B);
 const bPid = Number(readFileSync(join(HARNESS_DIR, "instance-b/server.pid"), "utf8").trim());
 process.kill(bPid, "SIGKILL");
 // Wait until the process is fully REAPED: harness.sh start probes the pid
@@ -298,10 +313,11 @@ await waitFor(
   },
   200,
 );
-writeFileSync(
-  join(B.base, "userdata", "settings.json"),
-  JSON.stringify({ ...settingsB, roaming: false }),
-);
+{
+  const dbB = new DatabaseSync(join(B.base, "userdata", "state.sqlite"));
+  dbB.exec("DELETE FROM roaming_peers");
+  dbB.close();
+}
 execFileSync(join(REPO_ROOT, "scripts/roaming/harness.sh"), ["start"], { encoding: "utf8" });
 const adminB2 = cli(["auth", "session", "issue", "--base-dir", B.base, "--token-only"]);
 await waitFor("HTTP shell snapshot empties with roaming off", 60_000, async () => {

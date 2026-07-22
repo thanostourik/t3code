@@ -30,6 +30,7 @@ import { ProjectionProjectRepository } from "../persistence/Services/ProjectionP
 import { ServerSettingsService } from "../serverSettings.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
+import { RoamingPeers } from "./RoamingPeers.ts";
 
 const WATCH_DEBOUNCE = Duration.millis(500);
 // Interval backbone, the vault analogue of WipSnapshotReactor's WIP_INTERVAL.
@@ -620,6 +621,7 @@ const make = Effect.gen(function* () {
   const blobStore = yield* RoamingBlobStore;
   const projectRepository = yield* ProjectionProjectRepository;
   const serverSettings = yield* ServerSettingsService;
+  const peers = yield* RoamingPeers;
   const watcherScopes = yield* Ref.make(new Map<string, Scope.Scope>());
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -642,8 +644,13 @@ const make = Effect.gen(function* () {
       Effect.provideService(ServerConfig.ServerConfig, serverConfig),
     );
 
-  const isEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.roaming && settings.roamingSecretsSync),
+  const isEnabled = Effect.gen(function* () {
+    if (!(yield* peers.roamingEnabled)) {
+      return false;
+    }
+    const settings = yield* serverSettings.getSettings;
+    return settings.roamingSecretsSync;
+  }).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("roaming vault: failed to read settings", { cause }).pipe(Effect.as(false)),
     ),
@@ -810,12 +817,11 @@ const make = Effect.gen(function* () {
 
   // Delivery half (M3.6): an arrived vault bundle applies to the linked
   // checkout instead of waiting for a materialize that already happened.
-  // Gated on `roaming` only — the CAPTURING machine's consent decided what
-  // is in the bundle; the receiver merely lands its own mirrored data.
+  // Gated on the master gate only — the CAPTURING machine's consent decided
+  // what is in the bundle; the receiver merely lands its own mirrored data.
   const deliverArrivedVault = (workspaceProjectId: WorkspaceProjectId) =>
     Effect.gen(function* () {
-      const settings = yield* serverSettings.getSettings;
-      if (!settings.roaming) {
+      if (!(yield* peers.roamingEnabled)) {
         return;
       }
       const ownEnvironmentId = yield* serverEnvironment.getEnvironmentId;
@@ -865,21 +871,31 @@ const make = Effect.gen(function* () {
         ),
       );
 
+      // Consent flips arrive via settings changes; the master gate flips via
+      // peer changes (pairing/unpairing writes no setting since D3). Both
+      // recompute the same way.
+      const recomputeEnabled = Effect.gen(function* () {
+        const enabled = yield* isEnabled;
+        const wasEnabled = yield* Ref.getAndSet(enabledRef, enabled);
+        if (enabled) {
+          yield* rescanAll();
+        } else if (wasEnabled) {
+          yield* closeAllWatchers;
+        }
+      });
       yield* Effect.forkScoped(
         serverSettings.streamChanges.pipe(
-          Stream.runForEach((settings) =>
-            Effect.gen(function* () {
-              const enabled = settings.roaming && settings.roamingSecretsSync;
-              const wasEnabled = yield* Ref.getAndSet(enabledRef, enabled);
-              if (enabled) {
-                yield* rescanAll();
-              } else if (wasEnabled) {
-                yield* closeAllWatchers;
-              }
-            }),
-          ),
+          Stream.runForEach(() => recomputeEnabled),
           Effect.ignoreCause({ log: true }),
         ),
+      );
+      yield* Effect.forkScoped(
+        Effect.gen(function* () {
+          const peerChanges = yield* peers.subscribeChanges;
+          return yield* Effect.forever(
+            PubSub.take(peerChanges).pipe(Effect.andThen(recomputeEnabled)),
+          );
+        }).pipe(Effect.ignoreCause({ log: true })),
       );
 
       // Interval fallback: re-capture local changes AND re-deliver arrived
