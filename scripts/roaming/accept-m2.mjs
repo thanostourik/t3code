@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
 const A = {
@@ -229,7 +230,9 @@ if (Buffer.from(envEntry.contentBase64, "base64").toString() !== P1_ENV)
   fail("vault content", ".env content mismatch");
 pass("P1's vault reached B: .env captured, committed .env.example excluded");
 
-// ── 4. concurrent vault edit surfaces as conflict, never a merge ─────
+// ── 4. concurrent vault edit auto-resolves newest-wins (D1) ──────────
+// The forged concurrent write carries an OLDER updatedAt, so B's copy wins
+// deterministically and the loser is preserved in the conflict record.
 const forgedPayload = JSON.stringify({
   ...vaultBundle,
   files: [
@@ -254,7 +257,7 @@ const conflictPush = await api(B.url, "/api/roaming/mirror/push", {
         version: vaultBlob.version, // same version, different content = concurrent write
         contentHash: createHash("sha256").update(forgedPayload, "utf8").digest("hex"),
         authorEnvironmentId: environmentIdA,
-        updatedAt: new Date().toISOString(),
+        updatedAt: "2020-01-01T00:00:00.000Z", // older concurrent write → B wins
         payload: forgedPayload,
       },
     ],
@@ -269,16 +272,23 @@ const localAfterConflict = await fetchBlobFromB("vault", wpidP1);
 if (localAfterConflict.contentHash !== vaultBlob.contentHash)
   fail("conflict", "B's local vault blob changed — concurrent write was merged/overwritten");
 
-const conflictGet = await api(B.url, "/api/roaming/conflicts/get", {
-  method: "POST",
-  token: adminB,
-  body: { ref: { kind: "vault", key: wpidP1 } },
-});
-if (!conflictGet.ok) fail("conflict get", `${conflictGet.status} ${await conflictGet.text()}`);
-const conflictBody = await conflictGet.json();
-if (conflictBody.conflict.remote.payload !== forgedPayload)
-  fail("conflict get", "conflict record does not retain the remote payload");
-pass("concurrent vault edit recorded as a conflict; local copy untouched; both payloads retained");
+const readConflictLoser = () => {
+  const db = new DatabaseSync(join(B.base, "userdata", "state.sqlite"), { readOnly: true });
+  try {
+    const row = db
+      .prepare(
+        "SELECT remote_record AS loser FROM roaming_blob_conflicts WHERE kind='vault' AND key=?",
+      )
+      .get(wpidP1);
+    return row ? JSON.parse(row.loser) : null;
+  } finally {
+    db.close();
+  }
+};
+const loser = readConflictLoser();
+if (loser === null || loser.payload !== forgedPayload)
+  fail("conflict record", "losing concurrent write not preserved in the conflict record");
+pass("concurrent vault edit auto-resolved newest-wins: winner kept, loser preserved");
 
 // ── 5. kill A ─────────────────────────────────────────────────────────
 const pidA = Number(readFileSync(join(HARNESS_DIR, "instance-a/server.pid"), "utf8").trim());
@@ -328,23 +338,11 @@ if (cloneStep?.status !== "completed" || vaultStep?.status !== "completed")
   fail("materialize p1", `unexpected steps: ${JSON.stringify(p1Result.steps)}`);
 pass("one action took B from empty to a registered checkout with vault files, A offline");
 
-// ── 8. resolve the conflict: explicit pick, supersedes both sides ─────
-const resolveResponse = await api(B.url, "/api/roaming/conflicts/resolve", {
-  method: "POST",
-  token: adminB,
-  body: { ref: { kind: "vault", key: wpidP1 }, pick: "local" },
-});
-if (!resolveResponse.ok)
-  fail("resolve", `${resolveResponse.status} ${await resolveResponse.text()}`);
-const resolved = (await resolveResponse.json()).record;
-if (resolved.version <= vaultBlob.version)
-  fail("resolve", "resolution did not supersede the conflicted version");
-const conflictAfterResolve = await api(B.url, "/api/roaming/conflicts/get", {
-  method: "POST",
-  token: adminB,
-  body: { ref: { kind: "vault", key: wpidP1 } },
-});
-if (conflictAfterResolve.status !== 404) fail("resolve", "conflict still present after resolution");
-pass("conflict resolved by explicit pick; superseding version wins everywhere");
+// ── 8. the resolved conflict record survives as an inspectable notice ─
+// (D1: resolution is automatic; the record is superseded by the next
+// accepted write for the key — covered by unit tests.)
+if (readConflictLoser() === null)
+  fail("conflict record", "auto-resolved conflict record disappeared without a superseding write");
+pass("auto-resolved conflict record retained for inspection (no manual resolve surface)");
 
 console.log("\nM2 ACCEPTANCE: ALL CRITERIA PASS");

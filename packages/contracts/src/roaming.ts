@@ -158,11 +158,31 @@ export const RoamingVaultFileEntry = Schema.Struct({
 });
 export type RoamingVaultFileEntry = typeof RoamingVaultFileEntry.Type;
 
+/**
+ * A synced secret file the capturing machine deliberately no longer has
+ * (G4). Without it, deleting a synced file on one machine resurrected it on
+ * the next capture from the other. Delivery removes the local copy (into a
+ * recoverable holding dir) only when the user has not edited it since the
+ * last sync; a file re-created after `deletedAt` lives again and drops the
+ * tombstone on the next capture.
+ */
+export const RoamingVaultTombstone = Schema.Struct({
+  /** Repo-relative, posix separators. */
+  path: TrimmedNonEmptyString,
+  /** When the capturing machine observed the file gone. */
+  deletedAt: IsoDateTime,
+});
+export type RoamingVaultTombstone = typeof RoamingVaultTombstone.Type;
+
 /** Payload of blob kind=vault (key=workspaceProjectId), JSON-encoded. */
 export const RoamingVaultBundle = Schema.Struct({
   schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
   capturedAt: IsoDateTime,
   files: Schema.Array(RoamingVaultFileEntry),
+  /** Absent in pre-G4 bundles, which keep the old never-delete semantics. */
+  tombstones: Schema.Array(RoamingVaultTombstone).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type RoamingVaultBundle = typeof RoamingVaultBundle.Type;
 
