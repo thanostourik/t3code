@@ -39,6 +39,7 @@ import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -268,6 +269,7 @@ const make = Effect.gen(function* () {
   const projectRepository = yield* ProjectionProjectRepository;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const engine = yield* OrchestrationEngineService;
+  const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const textGeneration = yield* TextGeneration;
   const wipReactor = yield* WipSnapshotReactor;
 
@@ -337,10 +339,21 @@ const make = Effect.gen(function* () {
       const threadRow = yield* threadRepository
         .getById({ threadId })
         .pipe(Effect.orElseSucceed(() => Option.none()));
+      // Author-only writes: a transcript blob that arrived from the PEER has
+      // no local thread row either — tombstoning it here would win
+      // reconciliation and kill the peer's live mirrored thread on both
+      // machines (M5 review, critical 1). Only ever tombstone what this
+      // machine authored.
+      const ownEnvironmentId = yield* serverEnvironment.getEnvironmentId.pipe(
+        Effect.orElseSucceed(() => null),
+      );
 
       const tombstone = (workspaceProjectId: WorkspaceProjectId, title: string) =>
         Effect.gen(function* () {
           if (existing === null || existing.payload.deleted === true) {
+            return;
+          }
+          if (existing.record.authorEnvironmentId !== ownEnvironmentId) {
             return;
           }
           const capturedAt = yield* nowIso;
@@ -382,11 +395,17 @@ const make = Effect.gen(function* () {
         return;
       }
       const capturedAt = yield* nowIso;
+      // `parked` sticks until the thread actually changes again — a plain
+      // coalesced capture racing park must not silently strip the marker.
+      const keepParked =
+        options.parked === true ||
+        (existing?.payload.parked === true &&
+          existing.payload.updatedAt === threadRow.value.updatedAt);
       const payload = buildTranscriptPayload({
         thread: detail.value,
         workspaceProjectId,
         capturedAt,
-        ...(options.parked === true ? { parked: true } : {}),
+        ...(keepParked ? { parked: true } : {}),
       });
       if (existing !== null && sameTranscript(existing.payload, payload)) {
         return;
