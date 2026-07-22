@@ -18,38 +18,26 @@
 // preset drives) and entered on B (the "laptop", whose own server runs the
 // handshake via POST /api/roaming/peers).
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-// D3: roaming has no stored flag — the gate derives from peer records in
-// state.sqlite, so freshness/on-ness checks read the peers table.
-const hasRoamingPeers = (base) => {
-  try {
-    const db = new DatabaseSync(join(base, "userdata", "state.sqlite"), { readOnly: true });
-    try {
-      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
-    } finally {
-      db.close();
-    }
-  } catch {
-    return false;
-  }
-};
 
-const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const A = {
-  name: "instance-a",
-  url: "http://127.0.0.1:14801",
-  base: join(HARNESS_DIR, "instance-a/basedir"),
-};
-const B = {
-  name: "instance-b",
-  url: "http://127.0.0.1:14802",
-  base: join(HARNESS_DIR, "instance-b/basedir"),
-};
-const REPO_ROOT = new URL("../..", import.meta.url).pathname;
+import {
+  A,
+  B,
+  HARNESS_DIR,
+  REPO_ROOT,
+  api,
+  cli,
+  fail,
+  pass,
+  sleep,
+  waitFor,
+  makeGit,
+  readSettings,
+  hasRoamingPeers,
+} from "./harness-lib.mjs";
+const git = makeGit("m25");
 
 const STANDARD_SCOPES = [
   "orchestration:read",
@@ -59,54 +47,6 @@ const STANDARD_SCOPES = [
   "relay:read",
 ];
 const ADMIN_SCOPES = [...STANDARD_SCOPES, "access:read", "access:write", "relay:write"];
-
-const fail = (step, detail) => {
-  console.error(`FAIL at ${step}: ${detail}`);
-  process.exit(1);
-};
-const pass = (step) => console.log(`PASS ${step}`);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const cli = (args) =>
-  execFileSync("node", [join(REPO_ROOT, "apps/server/src/bin.ts"), ...args], {
-    encoding: "utf8",
-  }).trim();
-
-const api = async (base, path, { method = "GET", token, body } = {}) => {
-  const response = await fetch(`${base}${path}`, {
-    method,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  return response;
-};
-
-const waitFor = async (step, timeoutMs, probe) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await probe();
-    if (value) return value;
-    await sleep(1000);
-  }
-  fail(step, `condition not met within ${timeoutMs / 1000}s`);
-};
-
-const readSettings = (inst) => {
-  const path = join(inst.base, "userdata", "settings.json");
-  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-};
-
-const gitEnv = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "m25",
-  GIT_AUTHOR_EMAIL: "m25@test",
-  GIT_COMMITTER_NAME: "m25",
-  GIT_COMMITTER_EMAIL: "m25@test",
-};
-const git = (args) => execFileSync("git", args, { env: gitEnv });
 
 // ── 0. preconditions: both up, roaming OFF on both, gating asymmetry ──
 for (const inst of [A, B]) {

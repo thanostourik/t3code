@@ -16,57 +16,25 @@
 // in step 6 is byte-for-byte what instance A's mirror would send after a
 // concurrent edit while the machines were apart.
 
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const A = {
-  name: "instance-a",
-  url: "http://127.0.0.1:14801",
-  base: join(HARNESS_DIR, "instance-a/basedir"),
-};
-const B = {
-  name: "instance-b",
-  url: "http://127.0.0.1:14802",
-  base: join(HARNESS_DIR, "instance-b/basedir"),
-};
-const REPO_ROOT = new URL("../..", import.meta.url).pathname;
-
-const fail = (step, detail) => {
-  console.error(`FAIL at ${step}: ${detail}`);
-  process.exit(1);
-};
-const pass = (step) => console.log(`PASS ${step}`);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const cli = (args) =>
-  execFileSync("node", [join(REPO_ROOT, "apps/server/src/bin.ts"), ...args], {
-    encoding: "utf8",
-  }).trim();
-
-const api = async (base, path, { method = "GET", token, body } = {}) => {
-  const response = await fetch(`${base}${path}`, {
-    method,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  return response;
-};
-
-const gitEnv = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "m2",
-  GIT_AUTHOR_EMAIL: "m2@test",
-  GIT_COMMITTER_NAME: "m2",
-  GIT_COMMITTER_EMAIL: "m2@test",
-};
-const git = (args) => execFileSync("git", args, { env: gitEnv });
+import {
+  A,
+  B,
+  HARNESS_DIR,
+  REPO_ROOT,
+  api,
+  cli,
+  fail,
+  pass,
+  sleep,
+  waitFor,
+  makeGit,
+} from "./harness-lib.mjs";
+const git = makeGit("m2");
 
 // ── 0. preconditions + roaming settings via hot-reload ───────────────
 for (const inst of [A, B]) {
@@ -188,16 +156,6 @@ const fetchBlobFromB = async (kind, key) => {
   if (!response.ok) return null;
   const { blobs } = await response.json();
   return blobs[0] ?? null;
-};
-
-const waitFor = async (step, timeoutMs, probe) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await probe();
-    if (value) return value;
-    await sleep(1000);
-  }
-  fail(step, `condition not met within ${timeoutMs / 1000}s`);
 };
 
 const registryBlobs = await waitFor("mirror registry", 45_000, async () => {

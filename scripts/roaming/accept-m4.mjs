@@ -16,39 +16,29 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import { DatabaseSync } from "node:sqlite";
-// D3: roaming has no stored flag — the gate derives from peer records in
-// state.sqlite, so freshness/on-ness checks read the peers table.
-const hasRoamingPeers = (base) => {
-  try {
-    const db = new DatabaseSync(NodePath.join(base, "userdata", "state.sqlite"), {
-      readOnly: true,
-    });
-    try {
-      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
-    } finally {
-      db.close();
-    }
-  } catch {
-    return false;
-  }
-};
 
+import {
+  A,
+  B,
+  HARNESS_DIR,
+  REPO_ROOT,
+  api,
+  cli,
+  fail,
+  pass,
+  sleep,
+  waitFor,
+  makeGitTrimmed,
+  readSettings,
+  hasRoamingPeers,
+} from "./harness-lib.mjs";
+const git = makeGitTrimmed("m4");
+const settings = readSettings;
 const { execFileSync } = NodeChildProcess;
 const { randomUUID } = NodeCrypto;
 const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = NodeFS;
 const { join } = NodePath;
 
-const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const REPO_ROOT = new URL("../..", import.meta.url).pathname;
-const A = {
-  url: "http://127.0.0.1:14801",
-  base: join(HARNESS_DIR, "instance-a/basedir"),
-};
-const B = {
-  url: "http://127.0.0.1:14802",
-  base: join(HARNESS_DIR, "instance-b/basedir"),
-};
 const ADMIN_SCOPES = [
   "orchestration:read",
   "orchestration:operate",
@@ -60,46 +50,6 @@ const ADMIN_SCOPES = [
   "relay:write",
 ];
 
-const fail = (step, detail) => {
-  console.error(`FAIL at ${step}: ${detail}`);
-  process.exit(1);
-};
-const pass = (step) => console.log(`PASS ${step}`);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const cli = (args) =>
-  execFileSync("node", [join(REPO_ROOT, "apps/server/src/bin.ts"), ...args], {
-    encoding: "utf8",
-  }).trim();
-const gitEnv = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "m4",
-  GIT_AUTHOR_EMAIL: "m4@test",
-  GIT_COMMITTER_NAME: "m4",
-  GIT_COMMITTER_EMAIL: "m4@test",
-};
-const git = (args) => execFileSync("git", args, { env: gitEnv, encoding: "utf8" }).trim();
-const api = (base, path, { method = "GET", token, body } = {}) =>
-  fetch(`${base}${path}`, {
-    method,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-const waitFor = async (step, timeoutMs, probe, intervalMs = 1000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await probe();
-    if (value) return value;
-    await sleep(intervalMs);
-  }
-  fail(step, `condition not met within ${timeoutMs / 1000}s`);
-};
-const settings = (instance) => {
-  const file = join(instance.base, "userdata/settings.json");
-  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
-};
 const shellOf = async (instance, token) => {
   const response = await api(instance.url, "/api/orchestration/shell", { token });
   return response.ok ? response.json() : null;
