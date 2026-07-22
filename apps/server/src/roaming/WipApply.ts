@@ -8,15 +8,9 @@
  * tree with causality-gated bases. Also owns parked-ref restoration and
  * explicit takeover (the same classifier with the guards bypassed).
  */
-import {
-  CheckpointRef,
-  EnvironmentId,
-  type RoamingWipDivergence,
-  type RoamingWipPayload,
-} from "@t3tools/contracts";
+import { CheckpointRef, EnvironmentId, type RoamingWipDivergence } from "@t3tools/contracts";
 import * as NodeCrypto from "node:crypto";
 
-import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -25,14 +19,12 @@ import * as Path from "effect/Path";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
-import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import {
   bundleShipped,
-  decodeWipPayloadJson,
   isGitWorktree,
   inProgressOperationExists,
   payloadForCommit,
-  primaryRemoteName,
+  scanPeerWipRefs,
   vaultExcludePathsFor,
   type WipTarget,
 } from "./WipShared.ts";
@@ -46,7 +38,6 @@ import {
   wipAppliedMarkerRefName,
   wipParkedRefName,
   wipPushedMarkerRefName,
-  wipRefGlob,
   wipRefName,
   wipRejectedRefName,
   writeWorktreeTree,
@@ -393,157 +384,31 @@ export type NewestPeerSnapshot =
  */
 export const selectNewestPeerSnapshot = Effect.fn("WipSnapshotReactor.selectNewestPeerSnapshot")(
   function* (target: WipTarget) {
-    const git = yield* GitVcsDriver;
-    const fs = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-    const blobStore = yield* RoamingBlobStore;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
     const environmentId = yield* serverEnvironment.getEnvironmentId;
     const cwd = target.workspaceRoot;
-    const glob = yield* wipRefGlob(target.workspaceProjectId);
     const ownRef = yield* wipRefName(target.workspaceProjectId, environmentId);
 
-    // Freshen peer snapshots: origin refs when reachable, bundle blobs from
-    // the mirror always (both non-fatal — apply works from whatever arrived).
-    const remote = yield* primaryRemoteName(cwd);
-    if (remote !== null) {
-      const fetchStartedMs = yield* Clock.currentTimeMillis;
-      yield* git.execute({
-        operation: "WipSnapshotReactor.fetchPeerWipRefs",
-        cwd,
-        args: ["fetch", remote, `+${glob}:${glob}`],
-        allowNonZeroExit: true,
-      });
-      const fetchDoneMs = yield* Clock.currentTimeMillis;
-      yield* Effect.logInfo("roaming timing: peer-refs-fetched", {
-        workspaceProjectId: target.workspaceProjectId,
-        durationMs: fetchDoneMs - fetchStartedMs,
-      });
-    }
-    const manifest = yield* blobStore.manifest().pipe(Effect.orElseSucceed(() => []));
-    const payloads = new Map<string, RoamingWipPayload>();
-    for (const entry of manifest) {
-      if (
-        entry.kind !== "wip" ||
-        !entry.key.startsWith(`${target.workspaceProjectId}/`) ||
-        entry.key === `${target.workspaceProjectId}/${environmentId}`
-      ) {
-        continue;
-      }
-      const blob = yield* blobStore
-        .get({ kind: "wip", key: entry.key })
-        .pipe(Effect.orElseSucceed(() => null));
-      if (blob === null) {
-        continue;
-      }
-      const payload = yield* decodeWipPayloadJson(blob.payload).pipe(
-        Effect.orElseSucceed(() => null),
-      );
-      if (payload === null) {
-        continue;
-      }
-      payloads.set(`${payload.refName}\0${payload.commitOid}`, payload);
-      // Beacons carry no pack (origin mode); the origin fetch above is the
-      // transport there. Skip the import when the local ref already has this
-      // exact commit.
-      if (
-        payload.bundleBase64.length === 0 ||
-        (yield* resolveOid(cwd, payload.refName)) === payload.commitOid
-      ) {
-        continue;
-      }
-      const tempDir = yield* fs
-        .makeTempDirectory({ prefix: "t3-wip-apply-" })
-        .pipe(Effect.orElseSucceed(() => null));
-      if (tempDir === null) {
-        continue;
-      }
-      yield* Effect.gen(function* () {
-        const bundlePath = pathService.join(tempDir, "wip.bundle");
-        yield* fs.writeFile(bundlePath, Buffer.from(payload.bundleBase64, "base64"));
-        let imported = yield* git.execute({
-          operation: "WipSnapshotReactor.fetchPeerWipBundle",
-          cwd,
-          args: ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
-          allowNonZeroExit: true,
-        });
-        // Bundle creation omits objects advertised by the normal remote. The
-        // receiver may not have fetched a newly pushed branch/merge yet, so an
-        // otherwise valid bundle can report a missing prerequisite. Refresh
-        // ordinary remote refs and retry once before rejecting the payload.
-        if (imported.exitCode !== 0 && remote !== null) {
-          yield* git.execute({
-            operation: "WipSnapshotReactor.fetchBundlePrerequisites",
-            cwd,
-            args: ["fetch", remote],
-            allowNonZeroExit: true,
-          });
-          imported = yield* git.execute({
-            operation: "WipSnapshotReactor.retryPeerWipBundle",
-            cwd,
-            args: ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
-            allowNonZeroExit: true,
-          });
-        }
-        if (imported.exitCode !== 0) {
-          yield* Effect.logWarning("roaming wip: peer bundle import failed", {
-            workspaceProjectId: target.workspaceProjectId,
-            stderr: imported.stderr.trim().slice(0, 200),
-          });
-        }
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logDebug("roaming wip: peer bundle import failed", { cause }),
-        ),
-        Effect.ensuring(fs.remove(tempDir, { recursive: true, force: true }).pipe(Effect.ignore)),
-      );
-    }
+    const scan = yield* scanPeerWipRefs({
+      cwd,
+      workspaceProjectId: target.workspaceProjectId,
+      excludeEnvironmentId: environmentId,
+    });
+    const payloads = scan.payloads;
 
     // Newest peer snapshot (own env excluded).
-    const listing = yield* git.execute({
-      operation: "WipSnapshotReactor.listPeerWipRefs",
-      cwd,
-      args: [
-        "for-each-ref",
-        "--format=%(refname) %(committerdate:unix) %(committerdate:iso-strict)",
-        glob.slice(0, -1),
-      ],
-      allowNonZeroExit: true,
-    });
-    const candidates =
-      listing.exitCode !== 0
-        ? []
-        : listing.stdout
-            .split("\n")
-            .map((line) => line.trim().split(" "))
-            .flatMap((parts) =>
-              parts.length === 3 && parts[0]!.length > 0 && parts[0] !== ownRef
-                ? [
-                    {
-                      refName: parts[0]!,
-                      unix: Number(parts[1]!),
-                      iso: parts[2]!,
-                    },
-                  ]
-                : [],
-            );
+    const candidates = scan.candidates.filter((candidate) => candidate.refName !== ownRef);
     // Reinstalls and interrupted bundle imports can leave orphan refs behind.
     // Never let an unmatched stale ref outrank the current mirrored snapshot
     // and manufacture a false legacy/takeover state.
-    let newest: (typeof candidates)[number] | undefined;
-    let newestCommit: string | null = null;
-    let payload: RoamingWipPayload | undefined;
-    for (const candidate of [...candidates].sort((left, right) => right.unix - left.unix)) {
-      const commit = yield* resolveOid(cwd, candidate.refName);
-      const candidatePayload =
-        commit === null ? undefined : payloads.get(`${candidate.refName}\0${commit}`);
-      if (candidatePayload !== undefined) {
-        newest = candidate;
-        newestCommit = commit;
-        payload = candidatePayload;
-        break;
-      }
-    }
+    const newest = [...candidates]
+      .sort((left, right) => right.committedAtUnix - left.committedAtUnix)
+      .find(
+        (candidate) => payloads.get(`${candidate.refName}\0${candidate.commitOid}`) !== undefined,
+      );
+    const newestCommit = newest?.commitOid ?? null;
+    const payload =
+      newest === undefined ? undefined : payloads.get(`${newest.refName}\0${newest.commitOid}`);
     if (newest === undefined || newestCommit === null || payload === undefined) {
       return { _tag: "none" } as NewestPeerSnapshot;
     }
@@ -576,8 +441,8 @@ export const selectNewestPeerSnapshot = Effect.fn("WipSnapshotReactor.selectNewe
       headOid: payload.headOid,
       peerHeadTree,
       capturedAt: payload.capturedAt,
-      unix: newest.unix,
-      iso: newest.iso,
+      unix: newest.committedAtUnix,
+      iso: newest.committedAtIso,
       fromEnvironmentId,
     } as NewestPeerSnapshot;
   },
@@ -607,7 +472,6 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   const git = yield* GitVcsDriver;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const blobStore = yield* RoamingBlobStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* serverEnvironment.getEnvironmentId;
   const cwd = target.workspaceRoot;
@@ -653,7 +517,8 @@ export const runWipApplyForTarget = Effect.fn("WipSnapshotReactor.runWipApplyFor
   ) {
     return {
       _tag: "blocked",
-      reason: "the other machine's work changed since you looked; review the latest state and try again",
+      reason:
+        "the other machine's work changed since you looked; review the latest state and try again",
       snapshotOid: newest.commitOid,
       fromEnvironmentId: newest.fromEnvironmentId,
       divergence: false,
@@ -1246,63 +1111,63 @@ const divergencePatch = (cwd: string, baseSpec: string, sideSpec: string) =>
  * local side diffs the live worktree tree (vault-subtracted), so its
  * `snapshotOid` is a TREE oid — current state, not a captured snapshot.
  */
-export const getWipDivergenceForTarget = Effect.fn(
-  "WipSnapshotReactor.getWipDivergenceForTarget",
-)(function* (target: WipTarget) {
-  const git = yield* GitVcsDriver;
-  const cwd = target.workspaceRoot;
-  if (!(yield* isGitWorktree(cwd))) return null;
-  const newest = yield* selectNewestPeerSnapshot(target);
-  if (newest._tag !== "snapshot") return null;
-  const excludePaths = yield* vaultExcludePathsFor(target);
-  if (excludePaths === null) return null;
-  const localState = yield* writeWorktreeTree({ cwd, vaultExcludePaths: excludePaths });
-  if (newest.branchRef !== localState.branchRef || newest.headOid === localState.headOid) {
-    return null;
-  }
-  if (
-    (yield* isAncestor(cwd, localState.headOid, newest.headOid)) ||
-    (yield* isAncestor(cwd, newest.headOid, localState.headOid))
-  ) {
-    return null;
-  }
-  const mergeBase = yield* git.execute({
-    operation: "WipSnapshotReactor.divergenceMergeBase",
-    cwd,
-    args: ["merge-base", localState.headOid, newest.headOid],
-    allowNonZeroExit: true,
-  });
-  // Unrelated histories have no merge-base: diff both sides in full.
-  const baseOid =
-    mergeBase.exitCode === 0 && mergeBase.stdout.trim().length > 0
-      ? mergeBase.stdout.trim()
-      : EMPTY_TREE_OID;
-  const localPatch = yield* divergencePatch(cwd, baseOid, localState.treeOid);
-  const peerPatch = yield* divergencePatch(cwd, baseOid, newest.commitOid);
-  if (localPatch === null || peerPatch === null) return null;
-  const nowIso = yield* Effect.map(DateTime.now, DateTime.formatIso);
-  return {
-    workspaceProjectId: target.workspaceProjectId,
-    baseOid,
-    local: {
-      branchRef: localState.branchRef,
-      headOid: localState.headOid,
-      snapshotOid: localState.treeOid,
-      capturedAt: nowIso,
-      patch: localPatch.patch,
-      ...(localPatch.truncated ? { truncated: true } : {}),
-    },
-    peer: {
-      environmentId: newest.fromEnvironmentId,
-      branchRef: newest.branchRef,
-      headOid: newest.headOid,
-      snapshotOid: newest.commitOid,
-      capturedAt: newest.capturedAt,
-      patch: peerPatch.patch,
-      ...(peerPatch.truncated ? { truncated: true } : {}),
-    },
-  } satisfies RoamingWipDivergence;
-});
+export const getWipDivergenceForTarget = Effect.fn("WipSnapshotReactor.getWipDivergenceForTarget")(
+  function* (target: WipTarget) {
+    const git = yield* GitVcsDriver;
+    const cwd = target.workspaceRoot;
+    if (!(yield* isGitWorktree(cwd))) return null;
+    const newest = yield* selectNewestPeerSnapshot(target);
+    if (newest._tag !== "snapshot") return null;
+    const excludePaths = yield* vaultExcludePathsFor(target);
+    if (excludePaths === null) return null;
+    const localState = yield* writeWorktreeTree({ cwd, vaultExcludePaths: excludePaths });
+    if (newest.branchRef !== localState.branchRef || newest.headOid === localState.headOid) {
+      return null;
+    }
+    if (
+      (yield* isAncestor(cwd, localState.headOid, newest.headOid)) ||
+      (yield* isAncestor(cwd, newest.headOid, localState.headOid))
+    ) {
+      return null;
+    }
+    const mergeBase = yield* git.execute({
+      operation: "WipSnapshotReactor.divergenceMergeBase",
+      cwd,
+      args: ["merge-base", localState.headOid, newest.headOid],
+      allowNonZeroExit: true,
+    });
+    // Unrelated histories have no merge-base: diff both sides in full.
+    const baseOid =
+      mergeBase.exitCode === 0 && mergeBase.stdout.trim().length > 0
+        ? mergeBase.stdout.trim()
+        : EMPTY_TREE_OID;
+    const localPatch = yield* divergencePatch(cwd, baseOid, localState.treeOid);
+    const peerPatch = yield* divergencePatch(cwd, baseOid, newest.commitOid);
+    if (localPatch === null || peerPatch === null) return null;
+    const nowIso = yield* Effect.map(DateTime.now, DateTime.formatIso);
+    return {
+      workspaceProjectId: target.workspaceProjectId,
+      baseOid,
+      local: {
+        branchRef: localState.branchRef,
+        headOid: localState.headOid,
+        snapshotOid: localState.treeOid,
+        capturedAt: nowIso,
+        patch: localPatch.patch,
+        ...(localPatch.truncated ? { truncated: true } : {}),
+      },
+      peer: {
+        environmentId: newest.fromEnvironmentId,
+        branchRef: newest.branchRef,
+        headOid: newest.headOid,
+        snapshotOid: newest.commitOid,
+        capturedAt: newest.capturedAt,
+        patch: peerPatch.patch,
+        ...(peerPatch.truncated ? { truncated: true } : {}),
+      },
+    } satisfies RoamingWipDivergence;
+  },
+);
 
 export type KeptLocalResolution =
   | { readonly resolved: true; readonly preservedRef: string }
@@ -1332,7 +1197,10 @@ export const resolveKeptLocalDivergence = Effect.fn(
   if (newest._tag !== "snapshot" || newest.commitOid !== expectedPeerSnapshotOid) {
     return { resolved: false, reason: changedReason } as KeptLocalResolution;
   }
-  const rejectedRef = yield* wipRejectedRefName(target.workspaceProjectId, newest.fromEnvironmentId);
+  const rejectedRef = yield* wipRejectedRefName(
+    target.workspaceProjectId,
+    newest.fromEnvironmentId,
+  );
   yield* git.execute({
     operation: "WipSnapshotReactor.pinRejectedSnapshot",
     cwd,
