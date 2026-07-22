@@ -438,6 +438,8 @@ describe("OrchestrationEngine", () => {
               updatedAt: projectionSnapshot.updatedAt,
             }),
           listRoamingProjectShells: () => Effect.succeed([]),
+          listRoamingThreadShells: () => Effect.succeed([]),
+          getRoamingThreadShellById: () => Effect.succeed(Option.none()),
           getArchivedShellSnapshot: () =>
             Effect.succeed({
               snapshotSequence: projectionSnapshot.snapshotSequence,

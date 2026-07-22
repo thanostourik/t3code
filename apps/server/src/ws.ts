@@ -1563,21 +1563,39 @@ const makeWsRpcLayer = (
                 });
 
               yield* attachRoamingSource(roamingBlobStore.subscribeChanges, (record) =>
-                projectionSnapshotQuery.listRoamingProjectShells().pipe(
-                  Effect.map((shells) =>
-                    shells.find((shell) => shell.workspaceProjectId === record.workspaceProjectId),
-                  ),
-                  Effect.orElseSucceed(() => undefined),
-                  Effect.map((shell) =>
-                    shell === undefined
-                      ? undefined
-                      : {
-                          kind: "roaming-project-upserted" as const,
-                          sequence: 0,
-                          roamingProject: shell,
-                        },
-                  ),
-                ),
+                record.kind === "transcript" || record.kind === "brief"
+                  ? // Mirrored-thread rows (M5): tombstoned transcripts still
+                    // emit (deleted: true tells the reducer to drop the row).
+                    projectionSnapshotQuery.getRoamingThreadShellById(record.key as ThreadId).pipe(
+                      Effect.map(Option.getOrUndefined),
+                      Effect.orElseSucceed(() => undefined),
+                      Effect.map((shell) =>
+                        shell === undefined
+                          ? undefined
+                          : {
+                              kind: "roaming-thread-upserted" as const,
+                              sequence: 0,
+                              roamingThread: shell,
+                            },
+                      ),
+                    )
+                  : projectionSnapshotQuery.listRoamingProjectShells().pipe(
+                      Effect.map((shells) =>
+                        shells.find(
+                          (shell) => shell.workspaceProjectId === record.workspaceProjectId,
+                        ),
+                      ),
+                      Effect.orElseSucceed(() => undefined),
+                      Effect.map((shell) =>
+                        shell === undefined
+                          ? undefined
+                          : {
+                              kind: "roaming-project-upserted" as const,
+                              sequence: 0,
+                              roamingProject: shell,
+                            },
+                      ),
+                    ),
               );
               yield* attachRoamingSource(materializer.subscribeUpdates, (materialization) =>
                 Effect.succeed({
@@ -1719,6 +1737,13 @@ const makeWsRpcLayer = (
                             kind: "roaming-project-upserted",
                             sequence: 0,
                             roamingProject,
+                          });
+                        }
+                        for (const roamingThread of shell.roamingThreads) {
+                          items.push({
+                            kind: "roaming-thread-upserted",
+                            sequence: 0,
+                            roamingThread,
                           });
                         }
                         for (const materialization of materializations) {

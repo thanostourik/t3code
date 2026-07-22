@@ -24,6 +24,7 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildResumptionBriefPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
@@ -102,7 +103,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateResumptionBrief",
     value: unknown,
     detail: string,
   ): Effect.Effect<string, TextGenerationError> =>
@@ -132,7 +134,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateResumptionBrief";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -408,10 +411,30 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       };
     });
 
+  const generateResumptionBrief: TextGeneration.TextGeneration["Service"]["generateResumptionBrief"] =
+    Effect.fn("ClaudeTextGeneration.generateResumptionBrief")(function* (input) {
+      const { prompt, outputSchema } = buildResumptionBriefPrompt({
+        title: input.title,
+        branch: input.branch,
+        transcriptText: input.transcriptText,
+      });
+
+      const generated = yield* runClaudeJson({
+        operation: "generateResumptionBrief",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+
+      return { markdown: generated.markdown.trim() };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateResumptionBrief,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

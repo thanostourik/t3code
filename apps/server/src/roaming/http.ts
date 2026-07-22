@@ -20,6 +20,9 @@ import {
   ROAMING_WIP_DIVERGENCE_PATH,
   ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
   ROAMING_WIP_TAKEOVER_PATH,
+  ROAMING_THREAD_TRANSCRIPT_PATH,
+  ROAMING_THREAD_PARK_PATH,
+  ROAMING_BRIEF_SAVE_PATH,
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
   ROAMING_MIRROR_PUSH_PATH,
@@ -56,6 +59,14 @@ import {
   RoamingWipDivergenceResponse,
   RoamingWipTakeoverRequest,
   RoamingWipTakeoverResponse,
+  RoamingBriefPayload,
+  RoamingBriefSaveRequest,
+  RoamingBriefSaveResponse,
+  RoamingThreadParkRequest,
+  RoamingThreadParkResponse,
+  RoamingThreadTranscriptRequest,
+  RoamingThreadTranscriptResponse,
+  RoamingTranscriptPayload,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -74,6 +85,7 @@ import { Materializer } from "./Materializer.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingService } from "./RoamingService.ts";
+import { TranscriptSync } from "./TranscriptSync.ts";
 import { WipSnapshotReactor } from "./WipSnapshotReactor.ts";
 
 class RoamingRouteRejection extends Schema.TaggedErrorClass<RoamingRouteRejection>()(
@@ -540,6 +552,94 @@ const wipDivergenceResolveRoute = HttpRouter.add(
   ),
 );
 
+const decodeTranscriptPayloadJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(RoamingTranscriptPayload),
+);
+const decodeBriefPayloadJson = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(RoamingBriefPayload),
+);
+
+const threadTranscriptRoute = HttpRouter.add(
+  "POST",
+  ROAMING_THREAD_TRANSCRIPT_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingThreadTranscriptRequest);
+      const blobStore = yield* RoamingBlobStore;
+      const transcriptRecord = yield* blobStore
+        .get({ kind: "transcript", key: body.threadId })
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      const briefRecord = yield* blobStore
+        .get({ kind: "brief", key: body.threadId })
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      const transcript =
+        transcriptRecord === null
+          ? null
+          : yield* decodeTranscriptPayloadJson(transcriptRecord.payload).pipe(
+              Effect.orElseSucceed(() => null),
+            );
+      const brief =
+        briefRecord === null
+          ? null
+          : yield* decodeBriefPayloadJson(briefRecord.payload).pipe(
+              Effect.orElseSucceed(() => null),
+            );
+      return yield* respondJson(RoamingThreadTranscriptResponse, {
+        transcript,
+        brief,
+        authorEnvironmentId: transcriptRecord?.authorEnvironmentId ?? null,
+      });
+    }),
+  ),
+);
+
+const threadParkRoute = HttpRouter.add(
+  "POST",
+  ROAMING_THREAD_PARK_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingThreadParkRequest);
+      const transcripts = yield* TranscriptSync;
+      const result = yield* transcripts
+        .park(body.threadId)
+        .pipe(
+          Effect.mapError((error) =>
+            error.reason === "thread-not-found"
+              ? reject(404, "Thread not found")
+              : error.reason === "project-not-enrolled"
+                ? reject(409, "This project does not sync between machines")
+                : reject(500, "Internal Server Error"),
+          ),
+        );
+      return yield* respondJson(RoamingThreadParkResponse, result);
+    }),
+  ),
+);
+
+const briefSaveRoute = HttpRouter.add(
+  "POST",
+  ROAMING_BRIEF_SAVE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingBriefSaveRequest);
+      const transcripts = yield* TranscriptSync;
+      const brief = yield* transcripts
+        .saveBrief(body.threadId, body.markdown)
+        .pipe(
+          Effect.mapError((error) =>
+            error.reason === "thread-unknown"
+              ? reject(404, "No mirrored conversation exists for that thread")
+              : reject(500, "Internal Server Error"),
+          ),
+        );
+      return yield* respondJson(RoamingBriefSaveResponse, { brief });
+    }),
+  ),
+);
+
 export const roamingRoutesLayer = Layer.mergeAll(
   manifestRoute,
   fetchRoute,
@@ -556,4 +656,7 @@ export const roamingRoutesLayer = Layer.mergeAll(
   wipTakeoverRoute,
   wipDivergenceRoute,
   wipDivergenceResolveRoute,
+  threadTranscriptRoute,
+  threadParkRoute,
+  briefSaveRoute,
 );

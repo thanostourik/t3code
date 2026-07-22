@@ -111,6 +111,7 @@ import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
+import { TranscriptSync } from "./roaming/TranscriptSync.ts";
 import { Materializer } from "./roaming/Materializer.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -1073,6 +1074,15 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(Layer.mock(RoamingService)({})),
       Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
+      Layer.provide(
+        Layer.succeed(TranscriptSync, {
+          start: () => Effect.void,
+          captureThread: () => Effect.void,
+          captureAll: () => Effect.void,
+          park: () => Effect.die("unused"),
+          saveBrief: () => Effect.die("unused"),
+        } satisfies TranscriptSync["Service"]),
+      ),
       Layer.provide(
         Layer.succeed(WipSnapshotReactor, {
           start: () => Effect.void,

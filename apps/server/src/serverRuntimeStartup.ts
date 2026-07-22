@@ -46,6 +46,7 @@ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { PeerMirror } from "./roaming/PeerMirror.ts";
 import { RoamingAutoEnroll } from "./roaming/RoamingAutoEnroll.ts";
+import { TranscriptSync } from "./roaming/TranscriptSync.ts";
 import { VaultSync } from "./roaming/VaultSync.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import {
@@ -815,6 +816,7 @@ export const make = (options?: StartupOptions) =>
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
     const peerMirror = yield* PeerMirror;
+    const transcriptSync = yield* TranscriptSync;
     const wipSnapshotReactor = yield* WipSnapshotReactor;
     const roamingAutoEnroll = yield* RoamingAutoEnroll;
     const vaultSync = yield* VaultSync;
@@ -881,6 +883,7 @@ export const make = (options?: StartupOptions) =>
           yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
           yield* peerMirror.start().pipe(Scope.provide(reactorScope));
+          yield* transcriptSync.start().pipe(Scope.provide(reactorScope));
           yield* wipSnapshotReactor.start().pipe(Scope.provide(reactorScope));
           yield* roamingAutoEnroll.start().pipe(Scope.provide(reactorScope));
           yield* vaultSync.start().pipe(Scope.provide(reactorScope));

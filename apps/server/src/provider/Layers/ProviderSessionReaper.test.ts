@@ -238,6 +238,8 @@ describe("ProviderSessionReaper", () => {
           getSnapshot: () => Effect.die("unused"),
           getShellSnapshot: () => Effect.die("unused"),
           listRoamingProjectShells: () => Effect.die("unused in this test"),
+          listRoamingThreadShells: () => Effect.succeed([]),
+          getRoamingThreadShellById: () => Effect.succeed(Option.none()),
           getArchivedShellSnapshot: () => Effect.die("unused"),
           getSnapshotSequence: () =>
             Effect.succeed({ snapshotSequence: input.readModel.snapshotSequence }),

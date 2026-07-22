@@ -73,6 +73,20 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface ResumptionBriefGenerationInput {
+  cwd: string;
+  title: string;
+  branch: string | null;
+  /** Role-labelled conversation text, already truncated to a sane budget. */
+  transcriptText: string;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export interface ResumptionBriefGenerationResult {
+  markdown: string;
+}
+
 /**
  * TextGeneration - Service tag for commit and change request text generation.
  */
@@ -104,6 +118,14 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /**
+     * Generate a resumption brief for a parked conversation (roaming M5) —
+     * a background job like the others, never a thread turn.
+     */
+    readonly generateResumptionBrief: (
+      input: ResumptionBriefGenerationInput,
+    ) => Effect.Effect<ResumptionBriefGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -111,7 +133,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateResumptionBrief";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -150,6 +173,10 @@ export const makeTextGenerationFromRegistry = (
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+      ),
+    generateResumptionBrief: (input) =>
+      resolveInstance(registry, "generateResumptionBrief", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateResumptionBrief(input)),
       ),
   });
 
