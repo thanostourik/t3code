@@ -547,6 +547,12 @@ export const ServerSettings = Schema.Struct({
    * applied to both machines.
    */
   roamingWipSync: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Consent to mirror this machine's conversation transcripts to paired
+   * machines (P2P only — never the origin host). Set by the pairing
+   * dialog's "Conversations" row, one decision applied to both machines.
+   */
+  roamingTranscriptSync: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -675,6 +681,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   roamingSecretsSync: Schema.optionalKey(Schema.Boolean),
   roamingWipSync: Schema.optionalKey(Schema.Boolean),
+  roamingTranscriptSync: Schema.optionalKey(Schema.Boolean),
   providers: Schema.optionalKey(
     Schema.Struct({
       codex: Schema.optionalKey(CodexSettingsPatch),
