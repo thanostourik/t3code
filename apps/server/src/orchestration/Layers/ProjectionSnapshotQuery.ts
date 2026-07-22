@@ -29,6 +29,8 @@ import {
   RoamingLeasePayload,
   RoamingProjectShell,
   RoamingRegistryPayload,
+  RoamingThreadShell,
+  RoamingTranscriptPayload,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
@@ -1570,6 +1572,103 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       return shells;
     });
 
+  const decodeTranscriptPayload = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(RoamingTranscriptPayload),
+  );
+
+  interface RoamingThreadRow {
+    readonly key: string;
+    readonly payload: string;
+    readonly authorEnvironmentId: string;
+    readonly updatedAt: string;
+    readonly localThreadId: string | null;
+    readonly hasBrief: number;
+  }
+
+  const roamingThreadRowToShell = (row: RoamingThreadRow) =>
+    Effect.gen(function* () {
+      // A payload this machine cannot decode (newer schema from a peer) must
+      // not take down the whole shell — skip it and log.
+      const payload = yield* decodeTranscriptPayload(row.payload).pipe(
+        Effect.map(Option.some),
+        Effect.catch((cause) =>
+          Effect.logWarning("roaming: undecodable transcript payload", {
+            key: row.key,
+            cause,
+          }).pipe(Effect.as(Option.none())),
+        ),
+      );
+      if (Option.isNone(payload)) {
+        return Option.none<RoamingThreadShell>();
+      }
+      return Option.some<RoamingThreadShell>({
+        threadId: payload.value.threadId,
+        workspaceProjectId: payload.value.workspaceProjectId,
+        title: payload.value.title,
+        authorEnvironmentId: row.authorEnvironmentId as RoamingThreadShell["authorEnvironmentId"],
+        capturedAt: payload.value.capturedAt,
+        updatedAt: payload.value.updatedAt,
+        messageCount: payload.value.messages.length,
+        ...(payload.value.lastTurnState !== undefined
+          ? { lastTurnState: payload.value.lastTurnState }
+          : {}),
+        ...(payload.value.parked === true ? { parked: true } : {}),
+        hasBrief: row.hasBrief > 0,
+        ...(payload.value.deleted === true ? { deleted: true } : {}),
+      });
+    });
+
+  const selectRoamingThreadRows = (threadId: ThreadId | null) =>
+    sql<RoamingThreadRow>`
+      SELECT
+        blobs.key AS "key",
+        blobs.payload AS "payload",
+        blobs.author_environment_id AS "authorEnvironmentId",
+        blobs.updated_at AS "updatedAt",
+        local.thread_id AS "localThreadId",
+        CASE WHEN briefs.key IS NULL THEN 0 ELSE 1 END AS "hasBrief"
+      FROM roaming_blobs AS blobs
+      LEFT JOIN projection_threads AS local ON local.thread_id = blobs.key
+      LEFT JOIN roaming_blobs AS briefs ON briefs.kind = 'brief' AND briefs.key = blobs.key
+      WHERE blobs.kind = 'transcript'
+        AND local.thread_id IS NULL
+        AND (${threadId} IS NULL OR blobs.key = ${threadId})
+      ORDER BY blobs.key
+    `;
+
+  const listRoamingThreadShells: ProjectionSnapshotQueryShape["listRoamingThreadShells"] = () =>
+    Effect.gen(function* () {
+      const rows = yield* selectRoamingThreadRows(null).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingThreadShells:query"),
+        ),
+      );
+      const shells: RoamingThreadShell[] = [];
+      for (const row of rows) {
+        const shell = yield* roamingThreadRowToShell(row);
+        if (Option.isSome(shell) && shell.value.deleted !== true) {
+          shells.push(shell.value);
+        }
+      }
+      return shells;
+    });
+
+  const getRoamingThreadShellById: ProjectionSnapshotQueryShape["getRoamingThreadShellById"] = (
+    threadId,
+  ) =>
+    Effect.gen(function* () {
+      const rows = yield* selectRoamingThreadRows(threadId).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSnapshotQuery.getRoamingThreadShellById:query"),
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined) {
+        return Option.none<RoamingThreadShell>();
+      }
+      return yield* roamingThreadRowToShell(row);
+    });
+
   const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
     sql
       .withTransaction(
@@ -1683,6 +1782,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   : Result.failVoid,
               ),
               roamingProjects: yield* listRoamingProjectShells(),
+              roamingThreads: yield* listRoamingThreadShells(),
               // D2: materialization progress is in-memory only; the ws/HTTP
               // shell entry points overlay live runs from the Materializer.
               roamingMaterializations: [],
@@ -2240,6 +2340,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getSnapshot,
     getShellSnapshot,
     listRoamingProjectShells,
+    listRoamingThreadShells,
+    getRoamingThreadShellById,
     getArchivedShellSnapshot,
     getSnapshotSequence,
     getCounts,
