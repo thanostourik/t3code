@@ -578,6 +578,9 @@ const make = Effect.gen(function* () {
               ...(input.syncOptions.wipSync !== undefined
                 ? { roamingWipSync: input.syncOptions.wipSync }
                 : {}),
+              ...(input.syncOptions.transcriptSync !== undefined
+                ? { roamingTranscriptSync: input.syncOptions.transcriptSync }
+                : {}),
             })
             .pipe(Effect.mapError(internalError("local settings update failed")));
         }
@@ -634,6 +637,9 @@ const make = Effect.gen(function* () {
             : {}),
           ...(input.syncOptions.wipSync !== undefined
             ? { roamingWipSync: input.syncOptions.wipSync }
+            : {}),
+          ...(input.syncOptions.transcriptSync !== undefined
+            ? { roamingTranscriptSync: input.syncOptions.transcriptSync }
             : {}),
         })
         .pipe(Effect.mapError(internalError("settings update failed")));

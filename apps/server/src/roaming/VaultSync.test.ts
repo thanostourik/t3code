@@ -665,7 +665,7 @@ testLayer("VaultSync", (it) => {
         assert.equal(yield* store.applyRemote(remote), "conflict");
 
         const resolved = yield* store.writeLocal({
-          kind: remote.kind,
+          kind: "vault",
           key: remote.key,
           workspaceProjectId: WORKSPACE_PROJECT_ID,
           payload: remote.payload,
