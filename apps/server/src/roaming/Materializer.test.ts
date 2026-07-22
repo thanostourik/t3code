@@ -73,7 +73,6 @@ const writeRegistry = (input: {
         },
         name: "materializer",
       },
-      vaultOverrides: { include: [], exclude: [] },
       perMachineRoots: input.perMachineRoots ?? {},
     });
     yield* store.writeLocal({
@@ -584,7 +583,6 @@ const setupAuthorAndOrigin = (input: { readonly workspaceProjectId: WorkspacePro
         locator: { source: "git-remote", remoteName: "origin", remoteUrl: originPath },
         name: "wip-restore",
       },
-      vaultOverrides: { include: [], exclude: [] },
       perMachineRoots: {},
     });
     yield* store.writeLocal({

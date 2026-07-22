@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { diffManifests } from "./PeerMirror.ts";
 import { RoamingBlobStore, layer as roamingBlobStoreLayer } from "./RoamingBlobStore.ts";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("env-local");
@@ -32,6 +33,7 @@ const remoteRecord = (input: {
   readonly key: string;
   readonly version: number;
   readonly payload: string;
+  readonly updatedAt?: string;
 }): RoamingBlobRecord =>
   decodeRoamingBlobRecord({
     schemaVersion: 1,
@@ -41,7 +43,7 @@ const remoteRecord = (input: {
     version: input.version,
     contentHash: NodeCrypto.createHash("sha256").update(input.payload, "utf8").digest("hex"),
     authorEnvironmentId: REMOTE_ENVIRONMENT_ID,
-    updatedAt: "2026-07-04T00:00:00.000Z",
+    updatedAt: input.updatedAt ?? "2026-07-04T00:00:00.000Z",
     payload: input.payload,
   });
 
@@ -129,7 +131,8 @@ layer("RoamingBlobStore", (it) => {
       );
       assert.equal(idempotent, "applied");
 
-      // Equal version, different hash → conflict; local kept, remote retained.
+      // Equal version, different hash, equal updatedAt and author → the
+      // deterministic tie-break keeps local; the loser is retained.
       const conflicting = remoteRecord({ key: "wp-rec", version: 3, payload: '{"v":"other"}' });
       const conflict = yield* store.applyRemote(conflicting);
       assert.equal(conflict, "conflict");
@@ -164,8 +167,9 @@ layer("RoamingBlobStore", (it) => {
         remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":5}' }),
       );
       assert.equal(applied, "applied");
-      // Stale and idempotent equal-version applies are silent; conflicts emit
-      // the current local record so shell subscribers refresh conflict state.
+      // Stale and idempotent equal-version applies are silent, and so is a
+      // conflict the local copy wins — republishing the unchanged local
+      // record was the mirror hot loop (G2).
       const staleOutcome = yield* store.applyRemote(
         remoteRecord({ key: "wp-changes", version: 2, payload: '{"c":2}' }),
       );
@@ -178,7 +182,7 @@ layer("RoamingBlobStore", (it) => {
         remoteRecord({ key: "wp-changes", version: 5, payload: '{"c":5}' }),
       );
       assert.equal(idempotentOutcome, "applied");
-      // The fourth emission must be this trailing local write.
+      // The third emission must be this trailing local write.
       yield* store.writeLocal({
         kind: "registry",
         key: "wp-changes",
@@ -190,16 +194,13 @@ layer("RoamingBlobStore", (it) => {
         yield* PubSub.take(changes),
         yield* PubSub.take(changes),
         yield* PubSub.take(changes),
-        yield* PubSub.take(changes),
       ];
       assert.equal(emissions[0]?.version, 1);
       assert.equal(emissions[0]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
       assert.equal(emissions[1]?.version, 5);
       assert.equal(emissions[1]?.authorEnvironmentId, REMOTE_ENVIRONMENT_ID);
-      assert.equal(emissions[2]?.version, 5);
-      assert.equal(emissions[2]?.authorEnvironmentId, REMOTE_ENVIRONMENT_ID);
-      assert.equal(emissions[3]?.version, 6);
-      assert.equal(emissions[3]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
+      assert.equal(emissions[2]?.version, 6);
+      assert.equal(emissions[2]?.authorEnvironmentId, LOCAL_ENVIRONMENT_ID);
       assert.deepEqual(Array.from(yield* PubSub.takeUpTo(changes, 10)), []);
     }),
   );
@@ -232,6 +233,91 @@ layer("RoamingBlobStore", (it) => {
       assert.deepEqual([...outcomes].sort(), ["applied", "conflict"]);
       const conflicts = yield* store.listConflicts();
       assert.equal(conflicts.filter((conflict) => conflict.key === "wp-race").length, 1);
+    }),
+  );
+
+  it.effect("newest remote wins an equal-version conflict; the loser is preserved", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      const changes = yield* store.subscribeChanges;
+      const local = yield* store.writeLocal({
+        kind: "registry",
+        key: "wp-newest",
+        workspaceProjectId: WORKSPACE_PROJECT_ID,
+        payload: '{"n":"local"}',
+      });
+      const newer = remoteRecord({
+        key: "wp-newest",
+        version: 1,
+        payload: '{"n":"remote"}',
+        updatedAt: "2999-01-01T00:00:00.000Z",
+      });
+
+      const outcome = yield* store.applyRemote(newer);
+      assert.equal(outcome, "conflict");
+      // The store adopted the newer remote copy and published the change...
+      assert.equal(
+        (yield* store.get({ kind: "registry", key: "wp-newest" }))?.payload,
+        '{"n":"remote"}',
+      );
+      const emissions = [yield* PubSub.take(changes), yield* PubSub.take(changes)];
+      assert.equal(emissions[1]?.payload, '{"n":"remote"}');
+      // ...and preserved the losing local write in the conflict record.
+      const conflicts = yield* store.listConflicts();
+      const recorded = conflicts.find((conflict) => conflict.key === "wp-newest");
+      assert.equal(recorded?.localContentHash, newer.contentHash);
+      assert.deepEqual(recorded?.remote, local);
+    }),
+  );
+
+  it.effect("equal-version conflict converges without feeding the mirror loop (G2)", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      const changes = yield* store.subscribeChanges;
+      const local = yield* store.writeLocal({
+        kind: "registry",
+        key: "wp-loop",
+        workspaceProjectId: WORKSPACE_PROJECT_ID,
+        payload: '{"l":"mine"}',
+      });
+      // Older concurrent write: local wins every pass. (Explicit timestamp —
+      // the TestClock pins writeLocal's updatedAt to the 1970 epoch.)
+      const older = remoteRecord({
+        key: "wp-loop",
+        version: 1,
+        payload: '{"l":"theirs"}',
+        updatedAt: "1969-01-01T00:00:00.000Z",
+      });
+
+      // Several mirror passes fetch the same conflicted record.
+      for (let pass = 0; pass < 3; pass += 1) {
+        assert.equal(yield* store.applyRemote(older), "conflict");
+      }
+
+      // Exactly one conflict record, stable across passes (no detected_at churn).
+      const conflicts = (yield* store.listConflicts()).filter(
+        (conflict) => conflict.key === "wp-loop",
+      );
+      assert.equal(conflicts.length, 1);
+      const detectedAt = conflicts[0]?.detectedAt;
+      assert.equal(yield* store.applyRemote(older), "conflict");
+      assert.equal(
+        (yield* store.listConflicts()).find((conflict) => conflict.key === "wp-loop")?.detectedAt,
+        detectedAt,
+      );
+
+      // Exactly one publish (the original local write) — the losing-side
+      // republish that re-triggered the mirror every pass is gone.
+      assert.equal((yield* PubSub.take(changes))?.payload, '{"l":"mine"}');
+      assert.deepEqual(Array.from(yield* PubSub.takeUpTo(changes, 10)), []);
+
+      // Once the peer adopts our copy by the same newest-wins rule, the
+      // manifests agree and nothing is re-queued for fetch.
+      const manifest = (yield* store.manifest()).filter((entry) => entry.key === "wp-loop");
+      const peerManifest = [
+        { kind: "registry", key: "wp-loop", version: 1, contentHash: local.contentHash } as const,
+      ];
+      assert.deepEqual(diffManifests(manifest, peerManifest), { toFetch: [], toPush: [] });
     }),
   );
 

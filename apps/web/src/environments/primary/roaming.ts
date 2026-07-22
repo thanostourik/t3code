@@ -6,8 +6,6 @@
  * browser sends the session cookie, desktop sends the bearer token.
  */
 import {
-  ROAMING_CONFLICT_GET_PATH,
-  ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_MATERIALIZE_PATH,
   ROAMING_WIP_DIVERGENCE_PATH,
   ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
@@ -18,10 +16,6 @@ import {
   ROAMING_PEERS_SYNC_PATH,
   RoamingAddPeerRequest,
   RoamingListPeersResponse,
-  RoamingConflictGetRequest,
-  RoamingConflictGetResponse,
-  RoamingConflictResolveRequest,
-  RoamingConflictResolveResponse,
   RoamingMaterializeRequest,
   RoamingMaterializeResponse,
   RoamingPairMachineResponse,
@@ -193,30 +187,6 @@ export function resolveRoamingWipDivergence(
     path: ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
     requestSchema: RoamingWipDivergenceResolveRequest,
     responseSchema: RoamingWipDivergenceResolveResponse,
-    body,
-  });
-}
-
-export function getRoamingConflict(
-  body: RoamingConflictGetRequest,
-): Promise<RoamingConflictGetResponse> {
-  return postRoaming({
-    operation: "roaming.conflict-get",
-    path: ROAMING_CONFLICT_GET_PATH,
-    requestSchema: RoamingConflictGetRequest,
-    responseSchema: RoamingConflictGetResponse,
-    body,
-  });
-}
-
-export function resolveRoamingConflict(
-  body: RoamingConflictResolveRequest,
-): Promise<RoamingConflictResolveResponse> {
-  return postRoaming({
-    operation: "roaming.conflict-resolve",
-    path: ROAMING_CONFLICT_RESOLVE_PATH,
-    requestSchema: RoamingConflictResolveRequest,
-    responseSchema: RoamingConflictResolveResponse,
     body,
   });
 }

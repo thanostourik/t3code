@@ -70,8 +70,6 @@ const initGit = (cwd: string) =>
 const writeRegistry = (input: {
   readonly workspaceProjectId: WorkspaceProjectId;
   readonly workspaceRoot: string;
-  readonly include?: readonly string[];
-  readonly exclude?: readonly string[];
 }) =>
   Effect.gen(function* () {
     const store = yield* RoamingBlobStore;
@@ -85,10 +83,6 @@ const writeRegistry = (input: {
           remoteName: "origin",
           remoteUrl: "https://example.test/repo.git",
         },
-      },
-      vaultOverrides: {
-        include: [...(input.include ?? [])],
-        exclude: [...(input.exclude ?? [])],
       },
       perMachineRoots: { [LOCAL_ENVIRONMENT_ID]: input.workspaceRoot },
     });
