@@ -162,7 +162,6 @@ const makeLayer = (input: {
       Layer.provideMerge(makeProjectRepositoryLayer(input.projectRows)),
       Layer.provideMerge(
         ServerSettingsService.layerTest({
-          roaming: true,
           addProjectBaseDirectory: "/tmp",
         }),
       ),
@@ -499,9 +498,7 @@ const makeRealGitLayer = (input: {
       Layer.provideMerge(MaterializerLayer),
       Layer.provideMerge(RoamingBlobStoreLayer),
       Layer.provideMerge(makeProjectRepositoryLayer(input.projectRows)),
-      Layer.provideMerge(
-        ServerSettingsService.layerTest({ roaming: true, addProjectBaseDirectory: "/tmp" }),
-      ),
+      Layer.provideMerge(ServerSettingsService.layerTest({ addProjectBaseDirectory: "/tmp" })),
       Layer.provideMerge(serverEnvironmentStub),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(GitVcsDriverModule.vcsLayer),

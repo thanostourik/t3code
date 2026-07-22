@@ -8,8 +8,8 @@
  * fetches blobs this machine lacks, all under the blob store's
  * reconciliation rule.
  *
- * The reactor always starts and no-ops while the `roaming` server setting is
- * off (same pattern as AgentAwarenessRelay's internal disable).
+ * The reactor always starts and no-ops while roaming is off (no enrolled
+ * peers — the derived gate, D3).
  */
 import {
   ROAMING_MIRROR_FETCH_PATH,
@@ -47,7 +47,6 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
-import { ServerSettingsService } from "../serverSettings.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 
@@ -145,7 +144,6 @@ const make = Effect.gen(function* () {
   const peers = yield* RoamingPeers;
   const secretStore = yield* ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
-  const serverSettings = yield* ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
 
   // The slot carries the trigger's provenance so a delivery can be
@@ -306,8 +304,7 @@ const make = Effect.gen(function* () {
 
   const syncPass = (source: string) =>
     Effect.gen(function* () {
-      const settings = yield* serverSettings.getSettings;
-      if (!settings.roaming) {
+      if (!(yield* peers.roamingEnabled)) {
         return;
       }
       const enrolledPeers = yield* peers
@@ -347,8 +344,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       let since: number | null = null;
       while (true) {
-        const settings = yield* serverSettings.getSettings;
-        if (!settings.roaming) return;
+        if (!(yield* peers.roamingEnabled)) return;
         const peer = (yield* peers.list().pipe(Effect.orElseSucceed(() => []))).find(
           (candidate) => candidate.environmentId === peerEnvironmentId,
         );
@@ -391,8 +387,7 @@ const make = Effect.gen(function* () {
   const runningWaiters = yield* Ref.make(new Set<string>());
 
   const ensureWaiters = Effect.gen(function* () {
-    const settings = yield* serverSettings.getSettings;
-    if (!settings.roaming) return;
+    if (!(yield* peers.roamingEnabled)) return;
     const enrolledPeers = yield* peers.list().pipe(Effect.orElseSucceed(() => []));
     for (const peer of enrolledPeers) {
       if (!peer.syncEnabled || peer.baseUrls.length === 0) continue;

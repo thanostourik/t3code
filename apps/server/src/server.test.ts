@@ -782,7 +782,7 @@ const buildAppUnderTest = (options?: {
           } satisfies WipSnapshotReactor["Service"]),
         ),
         Layer.provide(Layer.mock(RoamingService)({})),
-        Layer.provide(Layer.mock(RoamingPeers)({})),
+        Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
       )
       .pipe(
         Layer.provide(

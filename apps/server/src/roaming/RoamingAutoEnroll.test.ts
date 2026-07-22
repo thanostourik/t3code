@@ -28,10 +28,7 @@ const serverEnvironmentStub = Layer.succeed(ServerEnvironment.ServerEnvironment,
   getDescriptor: Effect.die("descriptor unused in RoamingAutoEnroll tests"),
 });
 
-const makeLayer = (input: {
-  readonly roaming: boolean;
-  readonly enrollCalls: Ref.Ref<ReadonlyArray<ProjectId>>;
-}) =>
+const makeLayer = (input: { readonly enrollCalls: Ref.Ref<ReadonlyArray<ProjectId>> }) =>
   Layer.empty.pipe(
     Layer.provideMerge(RoamingAutoEnrollLayer),
     Layer.provideMerge(RoamingBlobStoreLayer),
@@ -39,7 +36,7 @@ const makeLayer = (input: {
     Layer.provideMerge(ProjectionProjectRepositoryLive),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(serverEnvironmentStub),
-    Layer.provideMerge(ServerSettingsService.layerTest({ roaming: input.roaming })),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(
       Layer.succeed(OrchestrationEngineService, {
         readEvents: () => Stream.empty,
@@ -62,9 +59,8 @@ const makeLayer = (input: {
     Layer.provideMerge(NodeServices.layer),
   );
 
-const seedProjectAndPeer = Effect.gen(function* () {
+const seedProject = Effect.gen(function* () {
   const projects = yield* ProjectionProjectRepository;
-  const peers = yield* RoamingPeers;
   const now = DateTime.formatIso(yield* DateTime.now);
   yield* projects.upsert({
     projectId: PROJECT_ID,
@@ -77,6 +73,14 @@ const seedProjectAndPeer = Effect.gen(function* () {
     updatedAt: now,
     deletedAt: null,
   });
+});
+
+// Seeding through the service (not raw SQL) keeps the derived gate's
+// in-memory hasPeers cache honest — and with D3 the peer row IS the gate.
+const seedProjectAndPeer = Effect.gen(function* () {
+  yield* seedProject;
+  const peers = yield* RoamingPeers;
+  const now = DateTime.formatIso(yield* DateTime.now);
   yield* peers.upsert({
     environmentId: PEER_ENVIRONMENT_ID,
     baseUrls: ["http://peer.example.test"],
@@ -101,7 +105,7 @@ it.effect(
           assert.deepEqual(yield* Ref.get(enrollCalls), [PROJECT_ID]);
         }),
       );
-      yield* program.pipe(Effect.provide(makeLayer({ roaming: true, enrollCalls })));
+      yield* program.pipe(Effect.provide(makeLayer({ enrollCalls })));
     }),
 );
 
@@ -134,16 +138,16 @@ it.effect(
           assert.deepEqual(yield* Ref.get(enrollCalls), []);
         }),
       );
-      yield* program.pipe(Effect.provide(makeLayer({ roaming: true, enrollCalls })));
+      yield* program.pipe(Effect.provide(makeLayer({ enrollCalls })));
     }),
 );
 
-it.effect("RoamingAutoEnroll skips projects while roaming is off", () =>
+it.effect("RoamingAutoEnroll skips projects while roaming is off (no peers)", () =>
   Effect.gen(function* () {
     const enrollCalls = yield* Ref.make<ReadonlyArray<ProjectId>>([]);
     const program = Effect.scoped(
       Effect.gen(function* () {
-        yield* seedProjectAndPeer;
+        yield* seedProject;
         const autoEnroll = yield* RoamingAutoEnroll;
         yield* autoEnroll.start();
         yield* Effect.yieldNow;
@@ -151,6 +155,6 @@ it.effect("RoamingAutoEnroll skips projects while roaming is off", () =>
         assert.deepEqual(yield* Ref.get(enrollCalls), []);
       }),
     );
-    yield* program.pipe(Effect.provide(makeLayer({ roaming: false, enrollCalls })));
+    yield* program.pipe(Effect.provide(makeLayer({ enrollCalls })));
   }),
 );

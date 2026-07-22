@@ -21,7 +21,6 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
-import { ServerSettingsService } from "../serverSettings.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers } from "./RoamingPeers.ts";
 import { RoamingService } from "./RoamingService.ts";
@@ -41,7 +40,6 @@ export class RoamingAutoEnroll extends Context.Service<
 >()("t3/roaming/RoamingAutoEnroll") {}
 
 const make = Effect.gen(function* () {
-  const settings = yield* ServerSettingsService;
   const peers = yield* RoamingPeers;
   const projectRepository = yield* ProjectionProjectRepository;
   const roamingService = yield* RoamingService;
@@ -51,10 +49,7 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const trigger = yield* Queue.sliding<void>(1);
 
-  const roamingEnabled = settings.getSettings.pipe(
-    Effect.map((currentSettings) => currentSettings.roaming === true),
-    Effect.orElseSucceed(() => false),
-  );
+  const roamingEnabled = peers.roamingEnabled;
 
   // Local rename → registry: push the new title into the registry blob so it
   // mirrors to peers. Event-triggered only (never pass-based): a stale
@@ -140,14 +135,7 @@ const make = Effect.gen(function* () {
   );
 
   const runPass = Effect.gen(function* () {
-    const currentSettings = yield* settings.getSettings.pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("roaming: auto-enroll settings lookup failed", { cause }).pipe(
-          Effect.as(null),
-        ),
-      ),
-    );
-    if (currentSettings?.roaming !== true) {
+    if (!(yield* roamingEnabled)) {
       return;
     }
 
@@ -253,11 +241,21 @@ const make = Effect.gen(function* () {
         }),
       );
 
+      // The master gate flips on peer changes (pairing writes no setting
+      // since D3): wake a pass whenever the peer set changes while enabled.
       yield* Effect.forkScoped(
-        settings.streamChanges.pipe(
-          Stream.filter((nextSettings) => nextSettings.roaming),
-          Stream.runForEach(() => Queue.offer(trigger, undefined)),
-        ),
+        Effect.gen(function* () {
+          const peerChanges = yield* peers.subscribeChanges;
+          return yield* Effect.forever(
+            PubSub.take(peerChanges).pipe(
+              Effect.andThen(
+                Effect.flatMap(roamingEnabled, (enabled) =>
+                  enabled ? Queue.offer(trigger, undefined) : Effect.void,
+                ),
+              ),
+            ),
+          );
+        }),
       );
     });
 

@@ -5,10 +5,10 @@
  * `roaming:mirror` scope carried by the D4 machine credential. Enrollment
  * RPCs mint credentials and register peers — device management — so they
  * require the administrative `access:write` scope, which standard client
- * sessions do not hold. Routes 404 while the `roaming` server setting is
- * off, so a disabled server does not advertise the feature — EXCEPT the two
+ * sessions do not hold. Routes 404 while roaming is off (no enrolled peers,
+ * D3), so a disabled server does not advertise the feature — EXCEPT the two
  * unified-pairing routes (peers, machine-credential): pairing is what turns
- * the setting on (M2.5), so a fresh machine must be able to answer them.
+ * roaming on (M2.5), so a fresh machine must be able to answer them.
  */
 import {
   AuthAccessWriteScope,
@@ -76,7 +76,6 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { ServerSettingsService } from "../serverSettings.ts";
 import { Materializer } from "./Materializer.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
@@ -116,14 +115,11 @@ const requireScope = (scope: AuthEnvironmentScope) =>
     return session;
   });
 
-/** 404 while the roaming setting is off; 401/403 on auth failures. */
+/** 404 while roaming is off (no peers, D3); 401/403 on auth failures. */
 const requireRoamingScope = (scope: AuthEnvironmentScope) =>
   Effect.gen(function* () {
-    const settings = yield* ServerSettingsService.pipe(
-      Effect.flatMap((service) => service.getSettings),
-      Effect.mapError(() => reject(500, "Internal Server Error")),
-    );
-    if (!settings.roaming) {
+    const enabled = yield* RoamingPeers.pipe(Effect.flatMap((service) => service.roamingEnabled));
+    if (!enabled) {
       return yield* reject(404, "Not Found");
     }
     return yield* requireScope(scope);

@@ -16,6 +16,23 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import { DatabaseSync } from "node:sqlite";
+// D3: roaming has no stored flag — the gate derives from peer records in
+// state.sqlite, so freshness/on-ness checks read the peers table.
+const hasRoamingPeers = (base) => {
+  try {
+    const db = new DatabaseSync(NodePath.join(base, "userdata", "state.sqlite"), {
+      readOnly: true,
+    });
+    try {
+      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return false;
+  }
+};
 
 const { execFileSync } = NodeChildProcess;
 const { randomUUID } = NodeCrypto;
@@ -94,7 +111,7 @@ for (const instance of [A, B]) {
     () => false,
   );
   if (!up) fail("preflight", `${instance.url} is not running`);
-  if (settings(instance).roaming === true) fail("preflight", "harness is not fresh");
+  if (hasRoamingPeers(instance.base)) fail("preflight", "harness is not fresh");
 }
 pass("fresh M0 harness");
 
