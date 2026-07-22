@@ -83,6 +83,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
                 roamingProjects: [],
                 roamingMaterializations: [],
                 roamingWipStatus: [],
+                roamingThreads: [],
               };
         }),
       )

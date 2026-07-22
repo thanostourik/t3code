@@ -47,7 +47,7 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
-import { RoamingBlobStore } from "./RoamingBlobStore.ts";
+import { isKnownBlobKind, RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 
 const MIRROR_INTERVAL = Duration.seconds(60);
@@ -114,6 +114,11 @@ export function diffManifests(
 
   const toFetch: RoamingBlobRef[] = [];
   for (const entry of remote) {
+    // A newer build's kinds are not ours to fetch (RoamingBlobWireKind):
+    // applyRemote would reject them anyway; skipping here saves the transfer.
+    if (!isKnownBlobKind(entry.kind)) {
+      continue;
+    }
     const mine = localByKey.get(manifestKey(entry));
     if (
       mine === undefined ||

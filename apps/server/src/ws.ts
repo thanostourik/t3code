@@ -1630,6 +1630,7 @@ const makeWsRpcLayer = (
                         roamingProjects: [],
                         roamingMaterializations: [],
                         roamingWipStatus: [],
+                        roamingThreads: [],
                       }),
                 ),
               );

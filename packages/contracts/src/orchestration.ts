@@ -34,6 +34,7 @@ import {
 import {
   RoamingMaterializationRecord,
   RoamingProjectShell,
+  RoamingThreadShell,
   RoamingWipStatusEntry,
 } from "./roaming.ts";
 
@@ -868,6 +869,14 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   roamingWipStatus: Schema.Array(RoamingWipStatusEntry).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /**
+   * Mirrored conversation transcripts from paired machines (M5), summary
+   * rows only; empty while roaming is off. Never contains this machine's
+   * own threads.
+   */
+  roamingThreads: Schema.Array(RoamingThreadShell).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -912,6 +921,12 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     kind: Schema.Literal("roaming-wip-status-replaced"),
     sequence: NonNegativeInt,
     wipStatuses: Schema.Array(RoamingWipStatusEntry),
+  }),
+  /** Removal rides an upsert with `deleted: true` (mirrored tombstone). */
+  Schema.Struct({
+    kind: Schema.Literal("roaming-thread-upserted"),
+    sequence: NonNegativeInt,
+    roamingThread: RoamingThreadShell,
   }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
