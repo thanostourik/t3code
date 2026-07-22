@@ -38,12 +38,27 @@ export const RoamingBlobKind = Schema.Literals([
 export type RoamingBlobKind = typeof RoamingBlobKind.Type;
 
 /**
+ * Kind as it appears in the mirror WIRE envelopes (refs, manifests, records,
+ * push results): deliberately a plain string, not the closed literal above.
+ * A closed literal would make every new kind a breaking wire change — a
+ * peer on an older build would fail to decode the entire manifest/push
+ * batch and ALL roaming sync (registry, vault, wip, lease) would wedge
+ * until both machines upgrade (M5 review, C1). Instead, unknown kinds are
+ * skipped by the mirror diff and rejected as `stale` by the store's
+ * applyRemote; the strict `RoamingBlobKind` stays the local typing for
+ * writes and rows.
+ */
+export const RoamingBlobWireKind = Schema.String;
+
+/**
  * The reconciliation address is `(kind, key)`. `key` must be globally unique
  * within its kind; the derivation is part of this contract:
  *
  * - `registry`, `vault`, `recipe` → `<workspaceProjectId>`
  * - `wip`, `lease`                → `<workspaceProjectId>/<environmentId>`
- * - `transcript`, `brief`         → `<threadId>`
+ * - `transcript`, `brief`         → `<threadId>` (UUID on every creation
+ *   path — cross-machine uniqueness is probabilistic and accepted; only the
+ *   authoring machine writes a thread's records)
  *
  * `lease` is per-machine deliberately: each machine only ever writes its
  * own record, so concurrent activity on two machines can never produce an
@@ -55,14 +70,14 @@ export type RoamingBlobKind = typeof RoamingBlobKind.Type;
  * (indexing, per-project listing), not part of the address.
  */
 export const RoamingBlobRef = Schema.Struct({
-  kind: RoamingBlobKind,
+  kind: RoamingBlobWireKind,
   key: TrimmedNonEmptyString,
 });
 export type RoamingBlobRef = typeof RoamingBlobRef.Type;
 
 export const RoamingBlobRecord = Schema.Struct({
   schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
-  kind: RoamingBlobKind,
+  kind: RoamingBlobWireKind,
   key: TrimmedNonEmptyString,
   workspaceProjectId: WorkspaceProjectId,
   /**
@@ -91,7 +106,7 @@ export const RoamingBlobRecord = Schema.Struct({
 export type RoamingBlobRecord = typeof RoamingBlobRecord.Type;
 
 export const RoamingBlobManifestEntry = Schema.Struct({
-  kind: RoamingBlobKind,
+  kind: RoamingBlobWireKind,
   key: TrimmedNonEmptyString,
   version: PositiveInt,
   contentHash: TrimmedNonEmptyString,
@@ -327,7 +342,7 @@ export const RoamingTranscriptPayload = Schema.Struct({
   threadId: ThreadId,
   workspaceProjectId: WorkspaceProjectId,
   title: TrimmedNonEmptyString,
-  branch: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(TrimmedNonEmptyString),
   capturedAt: IsoDateTime,
   /** Thread creation/update timestamps on the authoring machine. */
   createdAt: IsoDateTime,
@@ -343,7 +358,9 @@ export const RoamingTranscriptPayload = Schema.Struct({
   deleted: Schema.optional(Schema.Boolean),
   /** Set when the whole-payload cap forced dropping oldest entries. */
   truncated: Schema.optional(Schema.Boolean),
-  messages: Schema.Array(RoamingTranscriptMessage),
+  messages: Schema.Array(RoamingTranscriptMessage).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   proposedPlans: Schema.Array(RoamingTranscriptPlan).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -759,7 +776,7 @@ export type RoamingPushBlobsRequest = typeof RoamingPushBlobsRequest.Type;
 export const RoamingPushBlobsResponse = Schema.Struct({
   results: Schema.Array(
     Schema.Struct({
-      kind: RoamingBlobKind,
+      kind: RoamingBlobWireKind,
       key: TrimmedNonEmptyString,
       outcome: RoamingPushBlobOutcome,
     }),
