@@ -14,8 +14,6 @@ import {
   AuthAccessWriteScope,
   AuthRoamingMirrorScope,
   type AuthEnvironmentScope,
-  ROAMING_CONFLICT_GET_PATH,
-  ROAMING_CONFLICT_RESOLVE_PATH,
   ROAMING_ENROLL_PROJECT_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
   ROAMING_MATERIALIZE_PATH,
@@ -33,10 +31,6 @@ import {
   ROAMING_PEERS_SYNC_PATH,
   RoamingAddPeerRequest,
   RoamingListPeersResponse,
-  RoamingConflictGetRequest,
-  RoamingConflictGetResponse,
-  RoamingConflictResolveRequest,
-  RoamingConflictResolveResponse,
   RoamingEnrollProjectRequest,
   RoamingEnrollProjectResponse,
   RoamingFetchBlobsRequest,
@@ -546,71 +540,6 @@ const wipDivergenceResolveRoute = HttpRouter.add(
   ),
 );
 
-const conflictGetRoute = HttpRouter.add(
-  "POST",
-  ROAMING_CONFLICT_GET_PATH,
-  handleRejection(
-    Effect.gen(function* () {
-      yield* requireRoamingScope(AuthAccessWriteScope);
-      const body = yield* decodeBody(RoamingConflictGetRequest);
-      const blobStore = yield* RoamingBlobStore;
-      const conflicts = yield* blobStore
-        .listConflicts()
-        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      const conflict = conflicts.find(
-        (candidate) => candidate.kind === body.ref.kind && candidate.key === body.ref.key,
-      );
-      if (conflict === undefined) {
-        return yield* reject(404, "Conflict not found");
-      }
-      const local = yield* blobStore
-        .get(body.ref)
-        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      if (local === null) {
-        return yield* reject(404, "Local record not found");
-      }
-      return yield* respondJson(RoamingConflictGetResponse, { conflict, local });
-    }),
-  ),
-);
-
-const conflictResolveRoute = HttpRouter.add(
-  "POST",
-  ROAMING_CONFLICT_RESOLVE_PATH,
-  handleRejection(
-    Effect.gen(function* () {
-      yield* requireRoamingScope(AuthAccessWriteScope);
-      const body = yield* decodeBody(RoamingConflictResolveRequest);
-      const blobStore = yield* RoamingBlobStore;
-      const conflicts = yield* blobStore
-        .listConflicts()
-        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      const conflict = conflicts.find(
-        (candidate) => candidate.kind === body.ref.kind && candidate.key === body.ref.key,
-      );
-      if (conflict === undefined) {
-        return yield* reject(404, "Conflict not found");
-      }
-      const local = yield* blobStore
-        .get(body.ref)
-        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      if (local === null) {
-        return yield* reject(404, "Local record not found");
-      }
-      const picked = body.pick === "local" ? local : conflict.remote;
-      const record = yield* blobStore
-        .writeLocal({
-          kind: picked.kind,
-          key: picked.key,
-          workspaceProjectId: conflict.workspaceProjectId,
-          payload: picked.payload,
-        })
-        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
-      return yield* respondJson(RoamingConflictResolveResponse, { record });
-    }),
-  ),
-);
-
 export const roamingRoutesLayer = Layer.mergeAll(
   manifestRoute,
   fetchRoute,
@@ -627,6 +556,4 @@ export const roamingRoutesLayer = Layer.mergeAll(
   wipTakeoverRoute,
   wipDivergenceRoute,
   wipDivergenceResolveRoute,
-  conflictGetRoute,
-  conflictResolveRoute,
 );
