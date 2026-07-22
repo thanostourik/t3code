@@ -1616,10 +1616,15 @@ const makeWsRpcLayer = (
                 // path below goes through this one helper.
                 Effect.flatMap((snapshot) =>
                   roamingEnabled
-                    ? Effect.map(wipSnapshotReactor.listStatuses(), (wipStatus) => ({
-                        ...snapshot,
-                        roamingWipStatus: wipStatus,
-                      }))
+                    ? Effect.map(
+                        Effect.all([wipSnapshotReactor.listStatuses(), materializer.listRecords]),
+                        ([wipStatus, materializations]) => ({
+                          ...snapshot,
+                          roamingWipStatus: wipStatus,
+                          // D2: materialization progress lives in memory only.
+                          roamingMaterializations: materializations,
+                        }),
+                      )
                     : Effect.succeed({
                         ...snapshot,
                         roamingProjects: [],
@@ -1702,9 +1707,10 @@ const makeWsRpcLayer = (
                 const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = yield* (
                   roamingEnabled
                     ? Effect.gen(function* () {
-                        const [shell, wipStatuses] = yield* Effect.all([
+                        const [shell, wipStatuses, materializations] = yield* Effect.all([
                           projectionSnapshotQuery.getShellSnapshot(),
                           wipSnapshotReactor.listStatuses(),
+                          materializer.listRecords,
                         ]);
                         const items: OrchestrationShellStreamItem[] = [];
                         for (const roamingProject of shell.roamingProjects) {
@@ -1714,7 +1720,7 @@ const makeWsRpcLayer = (
                             roamingProject,
                           });
                         }
-                        for (const materialization of shell.roamingMaterializations) {
+                        for (const materialization of materializations) {
                           items.push({
                             kind: "roaming-materialization-updated",
                             sequence: 0,
