@@ -168,6 +168,20 @@ const makeLayer = (input: {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mat-test-" })),
       Layer.provideMerge(
+        // The shared wip scan (S1) runs through GitVcsDriver; same
+        // empty-success semantics as the VcsDriver mock below.
+        Layer.mock(GitVcsDriverModule.GitVcsDriver)({
+          execute: () =>
+            Effect.succeed({
+              exitCode: 0 as VcsProcess.VcsProcessOutput["exitCode"],
+              stdout: "",
+              stderr: "",
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+        }),
+      ),
+      Layer.provideMerge(
         Layer.mock(VcsDriver)({
           capabilities: {
             kind: "git",

@@ -1,6 +1,17 @@
 import * as Arr from "effect/Array";
 import type { OrchestrationShellSnapshot, OrchestrationShellStreamEvent } from "@t3tools/contracts";
 
+/** Keyed upsert for the roaming lists (S2): replace by workspaceProjectId, else append. */
+const upsertByWsid = <T extends { readonly workspaceProjectId: string }>(
+  entries: ReadonlyArray<T>,
+  next: T,
+): ReadonlyArray<T> =>
+  entries.some((entry) => entry.workspaceProjectId === next.workspaceProjectId)
+    ? Arr.map(entries, (entry) =>
+        entry.workspaceProjectId === next.workspaceProjectId ? next : entry,
+      )
+    : Arr.append(entries, next);
+
 /**
  * Reduce a single shell stream event into an existing snapshot, returning a new
  * snapshot with the event's changes applied. This is a pure reducer that both
@@ -16,48 +27,24 @@ export function applyShellStreamEvent(
   // Roaming events ride outside the event-log sequence (the server emits
   // them with sequence 0): apply by key and leave snapshotSequence alone.
   if (event.kind === "roaming-project-upserted") {
-    const exists = snapshot.roamingProjects.some(
-      (entry) => entry.workspaceProjectId === event.roamingProject.workspaceProjectId,
-    );
     return {
       ...snapshot,
-      roamingProjects: exists
-        ? Arr.map(snapshot.roamingProjects, (entry) =>
-            entry.workspaceProjectId === event.roamingProject.workspaceProjectId
-              ? event.roamingProject
-              : entry,
-          )
-        : Arr.append(snapshot.roamingProjects, event.roamingProject),
+      roamingProjects: upsertByWsid(snapshot.roamingProjects, event.roamingProject),
     };
   }
   if (event.kind === "roaming-materialization-updated") {
-    const exists = snapshot.roamingMaterializations.some(
-      (entry) => entry.workspaceProjectId === event.materialization.workspaceProjectId,
-    );
     return {
       ...snapshot,
-      roamingMaterializations: exists
-        ? Arr.map(snapshot.roamingMaterializations, (entry) =>
-            entry.workspaceProjectId === event.materialization.workspaceProjectId
-              ? event.materialization
-              : entry,
-          )
-        : Arr.append(snapshot.roamingMaterializations, event.materialization),
+      roamingMaterializations: upsertByWsid(
+        snapshot.roamingMaterializations,
+        event.materialization,
+      ),
     };
   }
   if (event.kind === "roaming-wip-status-updated") {
-    const exists = snapshot.roamingWipStatus.some(
-      (entry) => entry.workspaceProjectId === event.wipStatus.workspaceProjectId,
-    );
     return {
       ...snapshot,
-      roamingWipStatus: exists
-        ? Arr.map(snapshot.roamingWipStatus, (entry) =>
-            entry.workspaceProjectId === event.wipStatus.workspaceProjectId
-              ? event.wipStatus
-              : entry,
-          )
-        : Arr.append(snapshot.roamingWipStatus, event.wipStatus),
+      roamingWipStatus: upsertByWsid(snapshot.roamingWipStatus, event.wipStatus),
     };
   }
   if (event.kind === "roaming-wip-status-replaced") {
