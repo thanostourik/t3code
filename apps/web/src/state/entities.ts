@@ -13,6 +13,7 @@ import type {
   OrchestrationProposedPlan,
   OrchestrationSession,
   OrchestrationThreadActivity,
+  RoamingThreadShell,
   RoamingWipStatusEntry,
   ScopedProjectRef,
   ScopedThreadRef,
@@ -26,6 +27,9 @@ import { environmentProjects } from "./projects";
 
 const EMPTY_WIP_STATUS_ATOM = Atom.make((): ReadonlyArray<RoamingWipStatusEntry> => []).pipe(
   Atom.withLabel("web-wip-status:empty"),
+);
+const EMPTY_ROAMING_THREADS_ATOM = Atom.make((): ReadonlyArray<RoamingThreadShell> => []).pipe(
+  Atom.withLabel("web-roaming-threads:empty"),
 );
 import type {
   EnvironmentRoamingMaterialization,
@@ -127,6 +131,16 @@ export function useRoamingProjects(): ReadonlyArray<EnvironmentRoamingProject> {
 
 export function useRoamingMaterializations(): ReadonlyArray<EnvironmentRoamingMaterialization> {
   return useAtomValue(environmentProjects.roamingMaterializationsAtom);
+}
+
+export function useEnvironmentRoamingThreads(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<RoamingThreadShell> {
+  return useAtomValue(
+    environmentId === null
+      ? EMPTY_ROAMING_THREADS_ATOM
+      : environmentProjects.environmentRoamingThreadsAtom(environmentId),
+  );
 }
 
 export function useEnvironmentRoamingWipStatus(

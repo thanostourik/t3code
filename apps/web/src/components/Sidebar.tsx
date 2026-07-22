@@ -4,6 +4,7 @@ import {
   ChevronRightIcon,
   CloudIcon,
   ContainerIcon,
+  FileClockIcon,
   FolderPlusIcon,
   Globe2Icon,
   LoaderIcon,
@@ -82,6 +83,7 @@ import {
   readThreadShell,
   useProject,
   useProjects,
+  useEnvironmentRoamingThreads,
   useEnvironmentRoamingWipStatus,
   useRoamingMaterializations,
   useRoamingProjects,
@@ -899,6 +901,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 
 interface SidebarProjectThreadListProps {
   projectKey: string;
+  workspaceProjectId: string | null;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
@@ -950,6 +953,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 ) {
   const {
     projectKey,
+    workspaceProjectId,
     projectExpanded,
     hasOverflowingThreads,
     hiddenThreadStatus,
@@ -1035,6 +1039,9 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             />
           );
         })}
+      {shouldShowThreadPanel ? (
+        <SidebarMirroredThreadRows workspaceProjectId={workspaceProjectId} />
+      ) : null}
 
       {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
         <SidebarMenuSubItem className="w-full">
@@ -2454,6 +2461,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       <SidebarProjectThreadList
         projectKey={project.projectKey}
+        workspaceProjectId={
+          project.workspaceProjectId ??
+          project.memberProjects.find((member) => member.workspaceProjectId !== undefined)
+            ?.workspaceProjectId ??
+          null
+        }
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
@@ -3256,6 +3269,65 @@ function useMaterialize() {
   return { materialize, dialog };
 }
 
+/**
+ * Mirrored-conversation rows (M5): conversations from the user's other
+ * machine, readable here even while that machine is offline. Rendered inside
+ * the project's ONE thread list; opening one shows the read-only transcript.
+ */
+function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null }) {
+  const router = useRouter();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
+  const { environments } = useEnvironments();
+  if (props.workspaceProjectId === null) {
+    return null;
+  }
+  const rows = roamingThreads.filter(
+    (thread) => thread.workspaceProjectId === props.workspaceProjectId,
+  );
+  if (rows.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      {rows.map((thread) => {
+        const machineLabel =
+          environments.find((candidate) => candidate.environmentId === thread.authorEnvironmentId)
+            ?.label ?? "another machine";
+        return (
+          <SidebarMenuSubItem key={`mirrored:${thread.threadId}`} className="w-full">
+            <SidebarMenuSubButton
+              render={<div role="button" tabIndex={0} />}
+              size="sm"
+              className="h-6 w-full translate-x-0 cursor-pointer justify-start gap-1.5 px-2 text-left text-xs text-muted-foreground/80 hover:bg-accent"
+              title={`From ${machineLabel} — read-only`}
+              onClick={() => {
+                void router.navigate({
+                  to: "/mirrored/$threadId",
+                  params: { threadId: thread.threadId },
+                });
+              }}
+              onKeyDown={(event: React.KeyboardEvent) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  void router.navigate({
+                    to: "/mirrored/$threadId",
+                    params: { threadId: thread.threadId },
+                  });
+                }
+              }}
+            >
+              <FileClockIcon className="size-3 shrink-0 text-muted-foreground/50" />
+              <span className="min-w-0 flex-1 truncate">{thread.title}</span>
+              <span className="shrink-0 text-[10px] text-muted-foreground/50">{machineLabel}</span>
+            </SidebarMenuSubButton>
+          </SidebarMenuSubItem>
+        );
+      })}
+    </>
+  );
+}
+
 function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
   const { environmentId, roamingProject } = props.entry;
   const materializations = useRoamingMaterializations();
@@ -3342,6 +3414,9 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
           </button>
         )}
       </div>
+      <SidebarMenuSub className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1 py-0 sm:mx-1 sm:px-1.5">
+        <SidebarMirroredThreadRows workspaceProjectId={roamingProject.workspaceProjectId} />
+      </SidebarMenuSub>
       {materializeDialog}
     </SidebarMenuItem>
   );

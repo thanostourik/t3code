@@ -6,7 +6,10 @@
  * browser sends the session cookie, desktop sends the bearer token.
  */
 import {
+  ROAMING_BRIEF_SAVE_PATH,
   ROAMING_MATERIALIZE_PATH,
+  ROAMING_THREAD_PARK_PATH,
+  ROAMING_THREAD_TRANSCRIPT_PATH,
   ROAMING_WIP_DIVERGENCE_PATH,
   ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
   ROAMING_WIP_TAKEOVER_PATH,
@@ -29,6 +32,12 @@ import {
   RoamingWipDivergenceResponse,
   RoamingWipTakeoverRequest,
   RoamingWipTakeoverResponse,
+  RoamingBriefSaveRequest,
+  RoamingBriefSaveResponse,
+  RoamingThreadParkRequest,
+  RoamingThreadParkResponse,
+  RoamingThreadTranscriptRequest,
+  RoamingThreadTranscriptResponse,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -187,6 +196,40 @@ export function resolveRoamingWipDivergence(
     path: ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
     requestSchema: RoamingWipDivergenceResolveRequest,
     responseSchema: RoamingWipDivergenceResolveResponse,
+    body,
+  });
+}
+
+export function getRoamingThreadTranscript(
+  body: RoamingThreadTranscriptRequest,
+): Promise<RoamingThreadTranscriptResponse> {
+  return postRoaming({
+    operation: "roaming.thread-transcript",
+    path: ROAMING_THREAD_TRANSCRIPT_PATH,
+    requestSchema: RoamingThreadTranscriptRequest,
+    responseSchema: RoamingThreadTranscriptResponse,
+    body,
+  });
+}
+
+export function parkRoamingThread(
+  body: RoamingThreadParkRequest,
+): Promise<RoamingThreadParkResponse> {
+  return postRoaming({
+    operation: "roaming.thread-park",
+    path: ROAMING_THREAD_PARK_PATH,
+    requestSchema: RoamingThreadParkRequest,
+    responseSchema: RoamingThreadParkResponse,
+    body,
+  });
+}
+
+export function saveRoamingBrief(body: RoamingBriefSaveRequest): Promise<RoamingBriefSaveResponse> {
+  return postRoaming({
+    operation: "roaming.brief-save",
+    path: ROAMING_BRIEF_SAVE_PATH,
+    requestSchema: RoamingBriefSaveRequest,
+    responseSchema: RoamingBriefSaveResponse,
     body,
   });
 }
