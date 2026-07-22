@@ -5,6 +5,8 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import type * as Scope from "effect/Scope";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -1164,74 +1166,72 @@ const makeWsRpcLayer = (
               );
               const bufferedLiveStream = coalesceShellLiveStream(Stream.fromQueue(liveBuffer));
 
-              // Registry blob changes are not domain events; merge them in as
-              // roaming shell stream items (sequence 0 — applied by key, not
-              // by snapshot ordering). They bypass the coalescing buffer: they
-              // are keyed upserts, not sequenced domain events.
-              const roamingLive = Stream.unwrap(
-                roamingBlobStore.subscribeChanges.pipe(
-                  Effect.map((subscription) =>
-                    Stream.fromSubscription(subscription).pipe(
-                      Stream.mapEffect((record) =>
-                        projectionSnapshotQuery.listRoamingProjectShells().pipe(
-                          Effect.map((shells) =>
-                            shells.find(
-                              (shell) => shell.workspaceProjectId === record.workspaceProjectId,
-                            ),
-                          ),
-                          Effect.orElseSucceed(() => undefined),
+              // Roaming live sources (registry blobs, materializations, WIP
+              // statuses) are not domain events; they merge in as sequence-0
+              // items — applied by key, not by snapshot ordering — so they
+              // bypass the coalescing buffer. Like the domain events above,
+              // each source SUBSCRIBES HERE, before any snapshot or catch-up
+              // work: a publish while the snapshot query or resume replay is
+              // in flight lands in this scope-bound buffer instead of being
+              // dropped (the pre-2026-07-22 code attached them lazily with
+              // the live tail, losing anything published in that window).
+              const roamingBuffer = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+              const attachRoamingSource = <A>(
+                subscribe: Effect.Effect<PubSub.Subscription<A>, never, Scope.Scope>,
+                toItem: (value: A) => Effect.Effect<OrchestrationShellStreamItem | undefined>,
+              ) =>
+                Effect.gen(function* () {
+                  const subscription = yield* subscribe;
+                  yield* Effect.forkScoped(
+                    Effect.forever(
+                      PubSub.take(subscription).pipe(
+                        Effect.flatMap(toItem),
+                        Effect.flatMap((item) =>
+                          item === undefined ? Effect.void : Queue.offer(roamingBuffer, item),
                         ),
                       ),
-                      Stream.flatMap((shell) =>
-                        shell === undefined
-                          ? Stream.empty
-                          : Stream.succeed({
-                              kind: "roaming-project-upserted" as const,
-                              sequence: 0,
-                              roamingProject: shell,
-                            }),
-                      ),
                     ),
+                    { startImmediately: true },
+                  );
+                });
+
+              yield* attachRoamingSource(roamingBlobStore.subscribeChanges, (record) =>
+                projectionSnapshotQuery.listRoamingProjectShells().pipe(
+                  Effect.map((shells) =>
+                    shells.find((shell) => shell.workspaceProjectId === record.workspaceProjectId),
+                  ),
+                  Effect.orElseSucceed(() => undefined),
+                  Effect.map((shell) =>
+                    shell === undefined
+                      ? undefined
+                      : {
+                          kind: "roaming-project-upserted" as const,
+                          sequence: 0,
+                          roamingProject: shell,
+                        },
                   ),
                 ),
               );
-
-              const materializationLive = Stream.unwrap(
-                materializer.subscribeUpdates.pipe(
-                  Effect.map((subscription) =>
-                    Stream.fromSubscription(subscription).pipe(
-                      Stream.map((materialization) => ({
-                        kind: "roaming-materialization-updated" as const,
-                        sequence: 0,
-                        materialization,
-                      })),
-                    ),
-                  ),
-                ),
+              yield* attachRoamingSource(materializer.subscribeUpdates, (materialization) =>
+                Effect.succeed({
+                  kind: "roaming-materialization-updated" as const,
+                  sequence: 0,
+                  materialization,
+                }),
               );
-
-              const wipStatusLive = Stream.unwrap(
-                wipSnapshotReactor.subscribeUpdates.pipe(
-                  Effect.map((subscription) =>
-                    Stream.fromSubscription(subscription).pipe(
-                      Stream.map((wipStatus) => ({
-                        kind: "roaming-wip-status-updated" as const,
-                        sequence: 0,
-                        wipStatus,
-                      })),
-                    ),
-                  ),
-                ),
+              yield* attachRoamingSource(wipSnapshotReactor.subscribeUpdates, (wipStatus) =>
+                Effect.succeed({
+                  kind: "roaming-wip-status-updated" as const,
+                  sequence: 0,
+                  wipStatus,
+                }),
               );
 
               // Pairing turns roaming on after the shell subscription already
-              // exists. Keep the live sources attached so that transition can
+              // exists. The sources stay attached so that transition can
               // publish registry, materialization, and WIP status immediately;
               // the producers themselves are gated while roaming is off.
-              const liveTail = Stream.merge(
-                bufferedLiveStream,
-                Stream.merge(roamingLive, Stream.merge(materializationLive, wipStatusLive)),
-              );
+              const liveTail = Stream.merge(bufferedLiveStream, Stream.fromQueue(roamingBuffer));
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
