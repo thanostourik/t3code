@@ -11,6 +11,7 @@ import {
 import type { ScopedProjectRef, ScopedThreadRef, ServerConfig } from "@t3tools/contracts";
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { RoamingWipStatusEntry } from "@t3tools/contracts";
+import type { RoamingThreadShell } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -18,6 +19,9 @@ import { environmentProjects } from "./projects";
 
 const EMPTY_WIP_STATUS_ATOM = Atom.make((): ReadonlyArray<RoamingWipStatusEntry> => []).pipe(
   Atom.withLabel("web-wip-status:empty"),
+);
+const EMPTY_ROAMING_THREADS_ATOM = Atom.make((): ReadonlyArray<RoamingThreadShell> => []).pipe(
+  Atom.withLabel("web-roaming-threads:empty"),
 );
 import type {
   EnvironmentRoamingMaterialization,
@@ -85,6 +89,16 @@ export function useRoamingProjects(): ReadonlyArray<EnvironmentRoamingProject> {
 
 export function useRoamingMaterializations(): ReadonlyArray<EnvironmentRoamingMaterialization> {
   return useAtomValue(environmentProjects.roamingMaterializationsAtom);
+}
+
+export function useEnvironmentRoamingThreads(
+  environmentId: EnvironmentId | null,
+): ReadonlyArray<RoamingThreadShell> {
+  return useAtomValue(
+    environmentId === null
+      ? EMPTY_ROAMING_THREADS_ATOM
+      : environmentProjects.environmentRoamingThreadsAtom(environmentId),
+  );
 }
 
 export function useEnvironmentRoamingWipStatus(

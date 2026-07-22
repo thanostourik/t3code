@@ -1697,6 +1697,8 @@ function EnvironmentSyncControls(props: {
   onChangeSecrets: (checked: boolean) => void;
   wipSync: boolean;
   onChangeWip: (checked: boolean) => void;
+  transcriptSync: boolean;
+  onChangeTranscript: (checked: boolean) => void;
   wipStatus: ReadonlyArray<RoamingWipStatusEntry>;
   onChanged: () => void;
 }) {
@@ -1707,6 +1709,8 @@ function EnvironmentSyncControls(props: {
     onChangeSecrets,
     wipSync,
     onChangeWip,
+    transcriptSync,
+    onChangeTranscript,
     wipStatus,
     onChanged,
   } = props;
@@ -1749,7 +1753,7 @@ function EnvironmentSyncControls(props: {
         const paired = await addRoamingPeer({
           baseUrls: [httpBaseUrl],
           pairingCredential: trimmed,
-          syncOptions: { secretsSync },
+          syncOptions: { secretsSync, wipSync, transcriptSync },
         });
         await registerBearerGrant(paired.attach);
         if (paired.peer === null) {
@@ -1816,7 +1820,7 @@ function EnvironmentSyncControls(props: {
                 Secret files (.env and similar) travel between your machines
               </span>
             </label>
-            <label className="flex cursor-pointer items-center gap-2 pt-1 pb-3.5">
+            <label className="flex cursor-pointer items-center gap-2 pt-1 pb-1.5">
               <Checkbox
                 checked={wipSync}
                 disabled={busy}
@@ -1825,6 +1829,16 @@ function EnvironmentSyncControls(props: {
               <span className="text-xs text-muted-foreground">
                 Work in progress follows you as hidden snapshots on each project's git remote
                 (applies to this machine's projects — enable it on both machines)
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 pt-1 pb-3.5">
+              <Checkbox
+                checked={transcriptSync}
+                disabled={busy}
+                onCheckedChange={(checked) => onChangeTranscript(checked === true)}
+              />
+              <span className="text-xs text-muted-foreground">
+                Conversations from this machine are readable on your other machines
               </span>
             </label>
             {wipSync && wipStatus.some((entry) => entry.lastError !== undefined) ? (
@@ -2054,6 +2068,7 @@ export function ConnectionsSettings() {
   });
   const roamingSecretsSync = usePrimarySettings((settings) => settings.roamingSecretsSync);
   const roamingWipSync = usePrimarySettings((settings) => settings.roamingWipSync);
+  const roamingTranscriptSync = usePrimarySettings((settings) => settings.roamingTranscriptSync);
   const updatePrimarySettings = useUpdatePrimarySettings();
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
@@ -2116,6 +2131,7 @@ export function ConnectionsSettings() {
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
   const [savedBackendSecretsSync, setSavedBackendSecretsSync] = useState(true);
   const [savedBackendWipSync, setSavedBackendWipSync] = useState(true);
+  const [savedBackendTranscriptSync, setSavedBackendTranscriptSync] = useState(true);
   // Master switch (2026-07-06 product decision): sync defaults on but the
   // dialog must allow a plain connect with no sync at all.
   const [savedBackendSyncEnabled, setSavedBackendSyncEnabled] = useState(true);
@@ -2573,7 +2589,11 @@ export function ConnectionsSettings() {
         const paired = await addRoamingPeer({
           baseUrls: [target.httpBaseUrl],
           pairingCredential: target.credential,
-          syncOptions: { secretsSync: savedBackendSecretsSync, wipSync: savedBackendWipSync },
+          syncOptions: {
+            secretsSync: savedBackendSecretsSync,
+            wipSync: savedBackendWipSync,
+            transcriptSync: savedBackendTranscriptSync,
+          },
         });
         const registered = await registerBearerGrant(paired.attach);
         if (registered._tag === "Failure") {
@@ -2974,6 +2994,21 @@ export function ConnectionsSettings() {
                   <span className="block text-xs leading-snug text-muted-foreground">
                     Uncommitted changes ride along as hidden snapshots on each project's git remote,
                     so they follow you even when this machine is off.
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={savedBackendTranscriptSync}
+                  disabled={isAddingSavedBackend}
+                  onCheckedChange={(checked) => setSavedBackendTranscriptSync(checked === true)}
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-foreground">Conversations</span>
+                  <span className="block text-xs leading-snug text-muted-foreground">
+                    Read this machine's conversations from your other machine; they travel only
+                    between your own machines.
                   </span>
                 </span>
               </label>
@@ -3977,6 +4012,7 @@ export function ConnectionsSettings() {
                 // an explicit prior choice is never silently re-enabled.
                 setSavedBackendSecretsSync(roamingEnabled ? roamingSecretsSync : true);
                 setSavedBackendWipSync(roamingEnabled ? roamingWipSync : true);
+                setSavedBackendTranscriptSync(roamingEnabled ? roamingTranscriptSync : true);
                 setSavedBackendSyncEnabled(true);
               } else {
                 setSavedBackendError(null);
@@ -4053,6 +4089,10 @@ export function ConnectionsSettings() {
                 }
                 wipSync={roamingWipSync}
                 onChangeWip={(checked) => updatePrimarySettings({ roamingWipSync: checked })}
+                transcriptSync={roamingTranscriptSync}
+                onChangeTranscript={(checked) =>
+                  updatePrimarySettings({ roamingTranscriptSync: checked })
+                }
                 wipStatus={primaryWipStatus}
                 onChanged={refreshRoamingPeers}
               />

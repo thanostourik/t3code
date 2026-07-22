@@ -328,6 +328,7 @@ import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
+import { HandOffDialog } from "./HandOffDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
@@ -1666,6 +1667,7 @@ export default function ChatView(props: ChatViewProps) {
   const shouldUseRightPanelSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const isMobileViewport = useMediaQuery("max-sm");
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
+  const [handOffOpen, setHandOffOpen] = useState(false);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
@@ -8445,8 +8447,22 @@ export default function ChatView(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
+            onHandOff={
+              routeKind === "server" &&
+              activeProject?.workspaceProjectId !== undefined &&
+              activeThread.environmentId === primaryEnvironmentId
+                ? () => setHandOffOpen(true)
+                : undefined
+            }
           />
         </WorkspacePageHeader>
+        {handOffOpen ? (
+          <HandOffDialog
+            threadId={activeThread.id}
+            open={handOffOpen}
+            onOpenChange={setHandOffOpen}
+          />
+        ) : null}
 
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">

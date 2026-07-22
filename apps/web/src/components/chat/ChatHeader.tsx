@@ -47,6 +47,7 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
 import { cn } from "~/lib/utils";
+import { ArrowRightLeftIcon } from "lucide-react";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -73,6 +74,8 @@ interface ChatHeaderProps {
     input: NewProjectScriptInput,
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+  /** Hand this conversation off to another machine (roaming M5); absent = hidden. */
+  onHandOff?: (() => void) | undefined;
 }
 
 /**
@@ -139,6 +142,7 @@ export const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
+  onHandOff,
 }: ChatHeaderProps) {
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
@@ -428,6 +432,26 @@ export const ChatHeader = memo(function ChatHeader({
             availableEditors={availableEditors}
             openInCwd={openInCwd}
           />
+        )}
+        {onHandOff && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  data-chat-header-handoff
+                  className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  onClick={onHandOff}
+                >
+                  <ArrowRightLeftIcon className="size-3.5" />
+                  <span className="hidden @3xl/header-actions:inline">Hand off</span>
+                </button>
+              }
+            />
+            <TooltipPopup side="bottom">
+              Prepare this conversation to continue on your other machine
+            </TooltipPopup>
+          </Tooltip>
         )}
         {activeProjectName && (
           <GitActionsControl
