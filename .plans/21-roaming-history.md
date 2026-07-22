@@ -2083,3 +2083,58 @@ Key evidence and decisions (design deltas live in the plan):
 - Accepted v1 gaps: attachment bytes don't roam (names render, content
   unavailable); file/diff affordances inert in read-only view; park's
   final WIP capture is skip-not-fail when WIP consent is off.
+
+## 2026-07-22 — M5 briefs + transcripts (results)
+
+Landed as PRs #82 (analysis-pass doc deltas + remediation reconciliation),
+#83 (contracts: transcript/brief kinds, Conversations consent,
+roamingThreads shell surface, permissive wire kinds), #84 (server:
+TranscriptSync reactor, park/brief flow, TextGeneration op across five
+adapters, shell projection + ws overlay + routes), #85 (web: sidebar
+mirrored rows, /mirrored read-only view, Hand off dialog, Continue here,
+Conversations pairing row), #86/#87 (acceptance + doc hygiene).
+
+Independent reviews (opus) caught two real defects before/at merge:
+
+- **C1 — closed wire kinds:** `RoamingBlobKind` inside the mirror
+  envelopes meant a peer on an older build failed to decode the whole
+  manifest/push batch once any new kind existed — ALL roaming sync wedged
+  until both machines upgraded, and M6's recipe kind would have repeated
+  it. Wire envelopes are now plain-string kinds; unknown kinds skip at
+  diff and reject as stale on apply (regression unit test).
+- **Author-only tombstones:** `captureAll` re-enqueues every transcript
+  blob key; for a PEER-authored transcript (no local thread row) capture
+  tombstoned it at a higher version — killing the peer's live mirrored
+  thread on both machines, then flapping as the peer revived it.
+  Tombstones now require own authorship (fail-closed); accept-m5 carries
+  a restart-reconcile regression leg.
+
+Field findings from the acceptance run itself:
+
+- Park's direct capture raced the keyed worker's in-flight capture; the
+  plain rebuild overwrote the parked payload. Park now routes through the
+  worker + drainKey.
+- First parked-semantics rule ("parked until the thread row changes") was
+  wrong in practice: the in-flight turn erroring right after park updated
+  the thread and stripped the marker. Final rule: parked sticks until a
+  new USER message on the author machine (unpark on user message-sent).
+- `enrollProject` losing the decider race to peer-added auto-enroll
+  surfaced as a 500 (accept-m1 ladder flake — pre-existing, exposed by
+  rerun); the loser now adopts the winner's link.
+- The raw HTTP dispatch endpoint takes the SERVER command union — no
+  client-side `bootstrap`; acceptance scripts create + start explicitly
+  while the web UI uses the client RPC's atomic bootstrap.
+
+Acceptance: accept-m5.mjs all-pass on the fresh two-instance harness
+(consent propagation both machines, mirrored readability + author filter,
+park → editable brief → parked marker on B, materialize + resume seeding
+a local thread from the brief, restart author-only regression, deletion
+tombstone). Full ladder m1–m4 + canonical accept-m2.5 rerun green
+(ladder results below this entry's date in the log inventory; the
+contracts PR touched PeerMirror/BlobStore reconciliation, so the full
+ladder ran, not just m5 + canonical), plus accept-m37-stress and the
+origin-transport variants of m38/m4. Browser walk (playwright against the
+harness's prebuilt web dist on B): pairing-token login, mirrored row under
+the project tagged with the source machine, /mirrored read-only view with
+"From another machine"/"Handed off" chips, brief panel with Edit, and the
+Continue here action — screenshotted, matches the design.
