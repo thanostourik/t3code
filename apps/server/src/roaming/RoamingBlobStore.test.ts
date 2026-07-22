@@ -353,6 +353,26 @@ layer("RoamingBlobStore", (it) => {
     }),
   );
 
+  it.effect("an unknown wire kind is rejected as stale and never fetched (C1)", () =>
+    Effect.gen(function* () {
+      const store = yield* RoamingBlobStore;
+      // A newer build ships a kind this one doesn't know: rejected without
+      // wedging the exchange, and nothing lands in the local table.
+      const futureKind = {
+        ...remoteRecord({ key: "wp-future", version: 1, payload: '{"f":1}' }),
+        kind: "recipe",
+      };
+      assert.equal(yield* store.applyRemote(futureKind), "stale");
+      assert.equal(yield* store.get({ kind: "recipe", key: "wp-future" }), null);
+
+      // The mirror diff skips the peer's unknown kinds instead of fetching.
+      const peerManifest = [
+        { kind: "recipe", key: "wp-future", version: 1, contentHash: futureKind.contentHash },
+      ];
+      assert.deepEqual(diffManifests([], peerManifest), { toFetch: [], toPush: [] });
+    }),
+  );
+
   it.effect("a newer conflict for a key replaces the previously recorded one", () =>
     Effect.gen(function* () {
       const store = yield* RoamingBlobStore;

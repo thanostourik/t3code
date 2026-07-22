@@ -48,6 +48,7 @@ const LIVE_SHELL_SNAPSHOT: OrchestrationShellSnapshot = {
   roamingProjects: [],
   roamingMaterializations: [],
   roamingWipStatus: [],
+  roamingThreads: [],
   updatedAt: "2026-06-06T00:00:00.000Z",
 };
 
@@ -161,6 +162,7 @@ describe("environment shell synchronization", () => {
         roamingProjects: [],
         roamingMaterializations: [],
         roamingWipStatus: [],
+        roamingThreads: [],
         updatedAt: "2026-06-06T00:00:00.000Z",
       };
       const httpSnapshot: OrchestrationShellSnapshot = {

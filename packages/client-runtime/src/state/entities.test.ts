@@ -109,6 +109,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
   roamingProjects: [],
   roamingMaterializations: [],
   roamingWipStatus: [],
+  roamingThreads: [],
   projects: [
     {
       id: PROJECT_ID,
