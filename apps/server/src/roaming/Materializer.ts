@@ -35,13 +35,15 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
+import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { PeerMirror } from "./PeerMirror.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { deliverVaultBundle } from "./VaultSync.ts";
-import { wipAppliedMarkerRefName, wipRefGlob } from "./WipSnapshots.ts";
+import { scanPeerWipRefs } from "./WipShared.ts";
+import { wipAppliedMarkerRefName } from "./WipSnapshots.ts";
 
 // restore-wip runs BEFORE apply-vault: its cleanliness check and the
 // checkpoint restore's `git clean` then operate on the pristine clone instead
@@ -93,7 +95,6 @@ const decodeRegistryPayload = Schema.decodeUnknownEffect(
 const decodeRawJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 const encodeRawJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeVaultBundle = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
-const decodeWipPayload = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingWipPayload));
 const decodeMaterializationRecord = Schema.decodeUnknownEffect(RoamingMaterializationRecord);
 const RoamingMaterializeStepsJson = Schema.fromJsonString(
   RoamingMaterializationRecord.fields.steps,
@@ -240,6 +241,7 @@ const make = Effect.gen(function* () {
   const vcsProcess = yield* VcsProcess.VcsProcess;
   const sourceControl = yield* SourceControlRepositoryService;
   const git = yield* VcsDriver;
+  const gitDriver = yield* GitVcsDriver;
   const engine = yield* OrchestrationEngineService;
   const projectRepository = yield* ProjectionProjectRepository;
   const updates = yield* PubSub.unbounded<RoamingMaterializationRecord>();
@@ -629,110 +631,50 @@ const make = Effect.gen(function* () {
         };
       }
 
-      const glob = yield* wipRefGlob(record.workspaceProjectId).pipe(
-        Effect.mapError(internalError("workspace project id is not ref-safe")),
-      );
-      // Non-fatal: the origin may refuse (bundle-mode projects) or lack the
-      // namespace entirely; wildcard refspecs succeed with zero matches.
-      yield* gitExec(["fetch", "origin", `+${glob}:${glob}`], "roaming.materializer.wip-fetch");
-
-      const listWipRefs = gitExec(
-        [
-          "for-each-ref",
-          "--format=%(refname) %(committerdate:unix) %(committerdate:iso-strict) %(objectname)",
-          glob.slice(0, -1),
-        ],
-        "roaming.materializer.wip-list",
-      ).pipe(
-        Effect.map((listing) =>
-          listing.exitCode !== 0
-            ? []
-            : listing.stdout
-                .split("\n")
-                .map((line) => line.trim().split(" "))
-                .flatMap((parts) =>
-                  parts.length === 4 && parts[0]!.length > 0
-                    ? [
-                        {
-                          refName: parts[0]!,
-                          committedAtUnix: Number(parts[1]!),
-                          committedAtIso: parts[2]!,
-                          commitOid: parts[3]!,
-                        },
-                      ]
-                    : [],
-                ),
-        ),
+      // One freshen-and-scan recipe shared with the apply selector (S1):
+      // origin refs when reachable, mirrored bundle blobs always. The scan
+      // reports per-blob problems so the granular notices survive.
+      const scanOnce = scanPeerWipRefs({
+        cwd,
+        workspaceProjectId: record.workspaceProjectId,
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(GitVcsDriver, gitDriver),
+        Effect.provideService(RoamingBlobStore, blobStore),
+        Effect.mapError(internalError("work-in-progress scan failed")),
       );
 
-      // Mirrored bundle blobs (the no-push-rights transport) import into the
-      // same local namespace, then both sources compete on committer date.
-      const payloads = new Map<string, RoamingWipPayload>();
-      const importBundles = Effect.gen(function* () {
-        const manifest = yield* blobStore
-          .manifest()
-          .pipe(Effect.mapError(internalError("blob manifest failed")));
-        const refs = manifest.filter(
-          (entry) => entry.kind === "wip" && entry.key.startsWith(`${record.workspaceProjectId}/`),
-        );
-        let imported = record;
-        for (const ref of refs) {
-          const blob = yield* blobStore
-            .get({ kind: "wip", key: ref.key })
-            .pipe(Effect.orElseSucceed(() => null));
-          if (blob === null) {
-            continue;
-          }
-          const payload = yield* decodeWipPayload(blob.payload).pipe(
-            Effect.orElseSucceed(() => null),
-          );
-          if (payload === null) {
-            imported = addNotice(imported, `undecodable work-in-progress blob: ${ref.key}`);
-            continue;
-          }
-          payloads.set(`${payload.refName}\0${payload.commitOid}`, payload);
-          // Origin-mode freshness beacons carry no pack — the origin fetch
-          // above is their transport.
-          if (payload.bundleBase64.length === 0) {
-            continue;
-          }
-          const tempDir = yield* fs
-            .makeTempDirectory({ prefix: "t3-wip-restore-" })
-            .pipe(Effect.mapError(internalError("temp dir for wip bundle failed")));
-          const bundlePath = path.join(tempDir, "wip.bundle");
-          const applied = yield* Effect.gen(function* () {
-            yield* fs
-              .writeFile(bundlePath, Buffer.from(payload.bundleBase64, "base64"))
-              .pipe(Effect.mapError(internalError("wip bundle write failed")));
-            const fetched = yield* gitExec(
-              ["fetch", bundlePath, `+${payload.refName}:${payload.refName}`],
-              "roaming.materializer.wip-bundle-fetch",
-            );
-            return fetched.exitCode === 0;
-          }).pipe(
-            Effect.ensuring(
-              fs.remove(tempDir, { recursive: true, force: true }).pipe(Effect.ignore),
-            ),
-          );
-          if (!applied) {
-            imported = addNotice(
-              imported,
-              `work-in-progress bundle from ${ref.key.split("/")[1] ?? ref.key} did not apply`,
-            );
-          }
+      const noticesFromScan = (
+        current: RoamingMaterializationRecord,
+        scan: {
+          readonly undecodable: ReadonlyArray<string>;
+          readonly failedBundles: ReadonlyArray<string>;
+        },
+      ) => {
+        let annotated = current;
+        for (const key of scan.undecodable) {
+          annotated = addNotice(annotated, `undecodable work-in-progress blob: ${key}`);
         }
-        return imported;
-      });
+        for (const key of scan.failedBundles) {
+          annotated = addNotice(
+            annotated,
+            `work-in-progress bundle from ${key.split("/")[1] ?? key} did not apply`,
+          );
+        }
+        return annotated;
+      };
 
-      let next = yield* importBundles;
-      let candidates = yield* listWipRefs;
-      if (candidates.length === 0) {
+      let scan = yield* scanOnce;
+      if (scan.candidates.length === 0) {
         // Same on-demand pull as registry/vault: a freshly-paired machine may
         // not have mirrored the wip blob yet.
         yield* peerMirror.syncNowAndWait();
-        next = yield* importBundles;
-        candidates = yield* listWipRefs;
+        scan = yield* scanOnce;
       }
+      const payloads = scan.payloads;
+      const candidates = scan.candidates;
+      let next = noticesFromScan(record, scan);
       if (candidates.length === 0) {
         return { status: "skipped", detail: "no work in progress found", record: next };
       }
@@ -794,10 +736,10 @@ const make = Effect.gen(function* () {
         ["rev-parse", "-q", "--verify", "HEAD"],
         "roaming.materializer.wip-current-head",
       );
-      if (
-        branchBefore.stdout.trim() !== payload.branchRef ||
-        headBefore.stdout.trim() !== payload.headOid
-      ) {
+      const alreadyMatched =
+        branchBefore.stdout.trim() === payload.branchRef &&
+        headBefore.stdout.trim() === payload.headOid;
+      if (!alreadyMatched) {
         const switched = yield* gitExec(
           ["switch", "-C", branchName, payload.headOid],
           "roaming.materializer.wip-switch",
@@ -824,16 +766,10 @@ const make = Effect.gen(function* () {
           "roaming.materializer.wip-applied-marker",
         );
         return {
-          status:
-            branchBefore.stdout.trim() === payload.branchRef &&
-            headBefore.stdout.trim() === payload.headOid
-              ? "skipped"
-              : "completed",
-          detail:
-            branchBefore.stdout.trim() === payload.branchRef &&
-            headBefore.stdout.trim() === payload.headOid
-              ? "work in progress already matches the checkout"
-              : `checked out ${branchName}; no uncommitted changes to restore`,
+          status: alreadyMatched ? "skipped" : "completed",
+          detail: alreadyMatched
+            ? "work in progress already matches the checkout"
+            : `checked out ${branchName}; no uncommitted changes to restore`,
           record: next,
         };
       }
