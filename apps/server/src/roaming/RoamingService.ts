@@ -225,7 +225,7 @@ const make = Effect.gen(function* () {
     // Dispatch first: the decider is the gate against concurrent double
     // enrollment, so a losing race never leaves an orphan registry blob
     // that would mirror to peers as a ghost entry.
-    yield* engine
+    const dispatchError = yield* engine
       .dispatch({
         type: "project.roaming.enroll",
         commandId: CommandId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie)),
@@ -233,7 +233,25 @@ const make = Effect.gen(function* () {
         workspaceProjectId,
         createdAt: yield* nowIso,
       })
-      .pipe(Effect.mapError(internalError("project link dispatch failed")));
+      .pipe(
+        Effect.as(null),
+        Effect.catch((cause) => Effect.succeed(cause)),
+      );
+    if (dispatchError !== null) {
+      // Losing the decider race is the designed outcome of a concurrent
+      // enrollment (auto-enroll races the explicit route between the
+      // idempotency check above and this dispatch) — adopt the winner's
+      // link instead of surfacing an internal error (M5 ladder flake).
+      const rechecked = yield* projectRepository
+        .getById({ projectId })
+        .pipe(Effect.mapError(internalError("project lookup failed")));
+      const winner =
+        rechecked._tag === "Some" ? (rechecked.value.workspaceProjectId ?? null) : null;
+      if (winner === null) {
+        return yield* internalError("project link dispatch failed")(dispatchError);
+      }
+      return winner;
+    }
 
     yield* writeRegistryBlob({
       workspaceProjectId,
