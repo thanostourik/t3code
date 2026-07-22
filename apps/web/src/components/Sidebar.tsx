@@ -2627,7 +2627,17 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
     roamingProject.lastMirrorContactAt === null
       ? "never synced"
       : `synced ${formatRelativeTimeLabel(roamingProject.lastMirrorContactAt)}`;
-  const hasConflicts = roamingProject.conflicts.length > 0;
+  // Conflicts auto-resolve newest-wins (D1); the record that remains is a
+  // notice, dismissible per detection — a fresh conflict re-shows it.
+  const latestConflictAt = roamingProject.conflicts.reduce(
+    (latest, conflict) => (conflict.detectedAt > latest ? conflict.detectedAt : latest),
+    "",
+  );
+  const conflictDismissKey = `t3code:roaming-conflict-dismissed:${roamingProject.workspaceProjectId}`;
+  const [dismissedConflictAt, setDismissedConflictAt] = useState(() =>
+    localStorage.getItem(conflictDismissKey),
+  );
+  const showConflictNotice = latestConflictAt !== "" && dismissedConflictAt !== latestConflictAt;
 
   const handleMaterialize = useCallback(() => {
     materialize({
@@ -2647,10 +2657,20 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
         <div className="min-w-0 flex-1 opacity-60">
           <div className="flex items-center gap-1.5">
             <span className="truncate text-sm text-muted-foreground">{roamingProject.title}</span>
-            {hasConflicts ? (
-              <span title="Sync conflict — both machines changed this project's synced files while apart. Resolve from the project's sync details.">
+            {showConflictNotice ? (
+              <button
+                type="button"
+                className="shrink-0"
+                title="Sync conflict auto-resolved — both machines changed this project's synced settings while apart, and the newest change won. Click to dismiss."
+                aria-label="Dismiss resolved sync conflict"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  localStorage.setItem(conflictDismissKey, latestConflictAt);
+                  setDismissedConflictAt(latestConflictAt);
+                }}
+              >
                 <TriangleAlertIcon className="size-3 shrink-0 text-warning" />
-              </span>
+              </button>
             ) : null}
           </div>
           <div className="truncate text-[10px] text-muted-foreground/60">
