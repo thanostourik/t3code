@@ -23,8 +23,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -1081,63 +1083,86 @@ const make = Effect.gen(function* () {
       return linked !== undefined;
     });
 
-  const materialize: Materializer["Service"]["materialize"] = Effect.fn("Materializer.materialize")(
-    function* (request) {
-      const existing = yield* readRecord(request.workspaceProjectId);
-      if (existing?.status === "completed") {
-        if (yield* completedRecordStillValid(existing)) {
-          return existing;
-        }
+  // G9: one materialization per project at a time. A second concurrent
+  // request for a project already materializing waits for the running one
+  // and then re-reads the record — the completed-and-valid check at the top
+  // returns it instead of racing a second clone and a second project.create.
+  const materializeLocks = yield* Ref.make(new Map<string, Semaphore.Semaphore>());
+  const withMaterializeLock = <A, E, R>(
+    workspaceProjectId: string,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    Ref.modify(materializeLocks, (locks) => {
+      const existing = locks.get(workspaceProjectId);
+      if (existing !== undefined) {
+        return [existing, locks] as const;
       }
+      const created = Semaphore.makeUnsafe(1);
+      const next = new Map(locks);
+      next.set(workspaceProjectId, created);
+      return [created, next] as const;
+    }).pipe(Effect.flatMap((lock) => lock.withPermits(1)(effect)));
 
-      const freshRecord = () =>
-        Effect.gen(function* () {
-          return yield* saveRecord({
-            workspaceProjectId: request.workspaceProjectId,
-            status: "running",
-            steps: initialSteps(),
-            notices: [],
-            targetPath: null,
-            localProjectId: null,
-            error: null,
-            startedAt: yield* nowIso,
-            updatedAt: yield* nowIso,
-          });
-        });
+  const runMaterialize = Effect.fn("Materializer.materialize")(function* (
+    request: Parameters<Materializer["Service"]["materialize"]>[0],
+  ) {
+    const existing = yield* readRecord(request.workspaceProjectId);
+    if (existing?.status === "completed") {
+      if (yield* completedRecordStillValid(existing)) {
+        return existing;
+      }
+    }
 
-      let record =
-        existing === undefined || existing === null || existing.status === "completed"
-          ? yield* freshRecord()
-          : existing;
-
-      const registryResult = yield* loadRegistry(request.workspaceProjectId).pipe(Effect.result);
-      if (Result.isFailure(registryResult)) {
+    const freshRecord = () =>
+      Effect.gen(function* () {
         return yield* saveRecord({
-          ...replaceStep(record, "resolve-path", "failed", failureMessage(registryResult.failure)),
-          status: "failed",
-          error: failureMessage(registryResult.failure),
+          workspaceProjectId: request.workspaceProjectId,
+          status: "running",
+          steps: initialSteps(),
+          notices: [],
+          targetPath: null,
+          localProjectId: null,
+          error: null,
+          startedAt: yield* nowIso,
+          updatedAt: yield* nowIso,
         });
-      }
-      const registry = registryResult.success;
+      });
 
-      for (const step of STEP_ORDER) {
-        const currentStep = record.steps.find((entry) => entry.step === step);
-        if (currentStep !== undefined && hasFinishedStep(currentStep.status)) {
-          continue;
-        }
-        const result = yield* runStep(record, step, request, registry).pipe(Effect.result);
-        if (Result.isFailure(result)) {
-          return yield* failStep(record, step, result.failure);
-        }
-        record = result.success;
-      }
+    let record =
+      existing === undefined || existing === null || existing.status === "completed"
+        ? yield* freshRecord()
+        : existing;
 
-      if (record.status !== "completed") {
-        record = yield* saveRecord({ ...record, status: "completed", error: null });
+    const registryResult = yield* loadRegistry(request.workspaceProjectId).pipe(Effect.result);
+    if (Result.isFailure(registryResult)) {
+      return yield* saveRecord({
+        ...replaceStep(record, "resolve-path", "failed", failureMessage(registryResult.failure)),
+        status: "failed",
+        error: failureMessage(registryResult.failure),
+      });
+    }
+    const registry = registryResult.success;
+
+    for (const step of STEP_ORDER) {
+      const currentStep = record.steps.find((entry) => entry.step === step);
+      if (currentStep !== undefined && hasFinishedStep(currentStep.status)) {
+        continue;
       }
-      return record;
-    },
-  );
+      const result = yield* runStep(record, step, request, registry).pipe(Effect.result);
+      if (Result.isFailure(result)) {
+        return yield* failStep(record, step, result.failure);
+      }
+      record = result.success;
+    }
+
+    if (record.status !== "completed") {
+      record = yield* saveRecord({ ...record, status: "completed", error: null });
+    }
+    return record;
+  });
+
+  const materialize: Materializer["Service"]["materialize"] = (request) =>
+    withMaterializeLock(request.workspaceProjectId, runMaterialize(request));
 
   return {
     materialize,
