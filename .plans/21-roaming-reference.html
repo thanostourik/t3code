@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roaming workspace — technical reference</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.6; max-width: 52rem; margin: 0 auto; padding: 2rem 1.5rem 6rem;
+  color: #1f2328; background: #ffffff;
+}
+h1, h2, h3, h4 { line-height: 1.25; margin-top: 2em; }
+h1 { font-size: 1.9rem; border-bottom: 1px solid #d1d9e0; padding-bottom: .4rem; margin-top: .5em; }
+h2 { font-size: 1.4rem; border-bottom: 1px solid #d1d9e0; padding-bottom: .3rem; }
+h3 { font-size: 1.15rem; }
+a { color: #0969da; }
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  font-size: .875em;
+}
+code { background: #eff1f3; padding: .15em .35em; border-radius: 4px; }
+pre { background: #f6f8fa; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+blockquote { border-left: 4px solid #d1d9e0; margin-left: 0; padding-left: 1rem; color: #59636e; }
+table { border-collapse: collapse; margin: 1rem 0; display: block; overflow-x: auto; }
+th, td { border: 1px solid #d1d9e0; padding: .4rem .8rem; text-align: left; }
+th { background: #f6f8fa; }
+tr:nth-child(2n) { background: #f6f8fa; }
+li { margin: .25em 0; }
+input[type=checkbox] { margin-right: .5em; }
+hr { border: none; border-top: 1px solid #d1d9e0; margin: 2rem 0; }
+@media (prefers-color-scheme: dark) {
+  body { color: #e6edf3; background: #0d1117; }
+  h1, h2 { border-color: #30363d; }
+  a { color: #4493f8; }
+  code { background: #22272e; }
+  pre { background: #161b22; }
+  blockquote { border-color: #30363d; color: #9198a1; }
+  th, td { border-color: #30363d; }
+  th, tr:nth-child(2n) { background: #161b22; }
+  hr { border-color: #30363d; }
+}
+</style>
+</head>
+<body>
+<h1>Roaming workspace — technical reference</h1>
+<p>Current-state mechanics that bind future work: schemas, ref namespaces,
+invariants, harness facts. Updated alongside code changes (document-hygiene
+step of the plan&#39;s execution process). No narrative — results and rationale
+live in <code>21-roaming-history.md</code>.</p>
+<h2>Harness + acceptance</h2>
+<ul>
+<li><code>scripts/roaming/harness.sh start|stop|status</code> — two <code>t3 serve</code> instances
+from source on <code>127.0.0.1:14801/14802</code>, base dirs under
+<code>/tmp/t3-roaming-harness/instance-{a,b}/basedir</code>, distinct persisted
+environment-ids; state in <code>&lt;baseDir&gt;/userdata</code>; never pass
+<code>--tailscale-serve</code>.</li>
+<li>The harness serves the PREBUILT <code>apps/web/dist</code> bundle — rebuild
+(<code>cd apps/web &amp;&amp; pnpm run build</code>) after web changes or browser walks test
+stale UI. Headless web login: the <code>/pair</code> page + a one-time admin code.</li>
+<li><code>scripts/roaming/harness-lib.mjs</code> (2026-07-22, O6) owns the shared
+accept-script plumbing: instance layout, api/cli/git helpers (raw +
+trimmed git variants), admin login recipe, waitFor, settings/peer
+readers, D3 freshness preflight. Script semantics stay in the scripts.</li>
+<li>Acceptance scripts: <code>accept-m1.mjs</code>, <code>accept-m2.mjs</code>, <code>accept-m2.5.mjs</code>,
+<code>accept-m3.mjs</code>, <code>accept-m35.mjs</code>, <code>accept-m36.mjs</code>, <code>accept-m37.mjs</code>,
+<code>accept-m37-stress.mjs</code>, <code>accept-m38.mjs</code>, <code>accept-m4.mjs</code>.
+<code>accept-m2.5.mjs</code> is the canonical-workflow re-run every milestone ends
+with. <code>accept-m38.mjs</code> and <code>accept-m4.mjs</code> run their origins with
+<code>receive.hideRefs refs/t3</code> (bundle fallback) by default and again with
+<code>T3_M38_TRANSPORT=origin</code> / <code>T3_M4_TRANSPORT=origin</code>; both runs must
+pass — the transports take different classifier baselines. <code>accept-m4</code>
+builds its divergence under the peer sync pause, which only fully stops
+exchange in bundle mode.
+Server-to-server auth
+smoke test: <code>scripts/roaming/spike-server-to-server.mjs</code>.</li>
+<li>WIP-classifier changes re-run the FULL ladder (m35–m38 + canonical),
+never just the current milestone&#39;s script — the earlier suites hold the
+earlier guarantees (the m35 no-clobber regression hid behind m38-only
+reruns for four days).</li>
+<li>Run discipline: scripts and logs under /tmp, fresh harness state per
+acceptance script, no compound one-liners; stale accept-script semantics
+get revised with the milestone that changed them, never worked around.</li>
+<li>Timing instrumentation is permanent: every delivery stage logs a
+<code>roaming timing:</code> line keyed by commitOid/blob version (watch-trigger,
+captured, origin-pushed, beacon-written, mirror-exchange + trigger source,
+blobs-pushed-to-peer, wip-blob-ingested, arrival trigger,
+peer-refs-fetched, apply). Slow deliveries must be attributable from the
+two server.log files alone. Beacon write failure logs a WARNING.</li>
+<li>Honest steady-state delivery: ~5.5s (5s watch debounce + ~0.5s chain);
+~0.5s riding another trigger; 60s mirror interval is the guarantee.</li>
+</ul>
+<h2>Flags + settings</h2>
+<ul>
+<li><code>roaming</code> — DERIVED gate, not a stored setting (2026-07-22, D3): on iff
+at least one peer row exists (<code>RoamingPeers.roamingEnabled</code>, in-memory,
+refreshed on every peer mutation). Auto-on at first pairing, auto-off
+when the last peer is removed; reactors additionally wake on peer
+changes (no settings write happens at pairing). Reactors always start
+and internally no-op while off. Gate-off: shell snapshots (ws AND HTTP
+<code>GET /api/orchestration/shell</code>) strip all roaming fields; roaming routes
+404 EXCEPT the two pairing routes; local blob data is retained. The web
+UI derives roamingEnabled from the fetched peer list; acceptance
+scripts read <code>roaming_peers</code> from state.sqlite.</li>
+<li><code>roamingWipSync</code> — default false (WIP reaches the origin host; consent
+required). The pairing dialog&#39;s pre-checked &quot;Work in progress&quot; row is the
+consent, ONE decision applied to both machines (same rule as Secret
+files). The per-environment settings row writes its OWN machine only;
+propagation happens only in the pairing handshake — machines paired
+before M3 must enable it on both machines (or re-pair). Reactor gates
+<code>roaming &amp;&amp; roamingWipSync</code> per pass; statuses clear on disable.</li>
+<li><code>roamingSecretsSync</code> — per-machine capture consent, propagated at pairing
+(the paired-into machine has no settings UI for it — flagged for a future
+Authorized-clients sync row).</li>
+<li>The settings file stores non-default values only: a boolean set to its
+default reads back as absence.</li>
+<li>Settings freshness: an unconditional 2s mtime poll backs the settings
+watcher; an external settings.json edit is honored within ~2–4s even with
+zero inotify budget.</li>
+</ul>
+<h2>Ref namespaces (<code>refs/t3/*</code>)</h2>
+<ul>
+<li><code>refs/t3/wip/&lt;wsid&gt;/&lt;envid&gt;</code> — latest WIP snapshot per (project, machine);
+local and, in origin mode, on the primary remote. Ref components
+validated <code>[A-Za-z0-9._-]</code>.</li>
+<li><code>refs/t3/wip-pushed/&lt;wsid&gt;/&lt;envid&gt;</code> — local record of the last
+successfully origin-pushed snapshot: the force-with-lease expectation, a
+capture no-op baseline, and the &quot;last shipped&quot; base in per-file merge.
+Written only after a successful push, never by bundle mode.</li>
+<li><code>refs/t3/wip-applied/&lt;wsid&gt;</code> — project-scoped (NOT per-peer; fine at 2
+machines, revisit at 3+) record of incoming state consumed by this
+checkout. Supplies the <code>T3-Based-On</code> trailer on capture and the primary
+per-file merge base. After a conflicted pass it points to a synthetic
+commit with conflicted paths pinned to base and
+<code>T3-Peer-Snapshot: &lt;peer oid&gt;</code>.</li>
+<li><code>refs/t3/wip-history/&lt;wsid&gt;/&lt;envid&gt;/&lt;slot&gt;</code> — 20 local rolling retention
+slots, oldest overwritten; never pushed.</li>
+<li><code>refs/t3/wip-rejected/&lt;wsid&gt;/&lt;envid&gt;</code> — local pin of a peer snapshot
+rejected in divergence resolution (pick=local, M4); <code>&lt;envid&gt;</code> is the
+REJECTED peer&#39;s environmentId. Never pushed; keeps the losing side
+recoverable after the peer force-updates its moving wip ref.</li>
+<li><code>refs/t3/wip-parked/&lt;wsid&gt;/&lt;branch&gt;</code> — per-branch parked local
+state, written before any auto/explicit branch switch. A branch transition
+observed in the running process restores a clean checkout whose HEAD equals
+the parked snapshot parent, then deletes the ref (one-shot). Startup never
+restores merely because a parked ref matches the current branch;
+advanced/dirty branches leave it untouched and recoverable. Every reactor
+pass checks the branch/HEAD tuple directly, while the 10s context poll is a
+fallback, so a peer event cannot race branch-return restoration.</li>
+<li><code>refs/t3/checkpoints/&lt;base64url-threadId&gt;/turn/&lt;n&gt;</code> — thread-turn
+checkpoints (upstream checkpointing subsystem, not roaming&#39;s).</li>
+<li>The origin holds only the newest WIP snapshot per (project, machine); the
+default fetch refspec never sees <code>refs/t3/*</code>; WIP fetches are explicit.</li>
+</ul>
+<h2>Blob store + mirror</h2>
+<ul>
+<li>Record shape (D3): <code>{ schemaVersion, kind, key, workspaceProjectId, version (monotonic per key), contentHash, authorEnvironmentId, updatedAt, payload }</code> in SQLite <code>roaming_blobs</code>. Payload strings are
+byte-authoritative for hashing — never re-serialize before hashing. The
+store serializes read-modify-write and verifies <code>contentHash</code> on ingest.
+Conflict records retain the full remote record.</li>
+<li>Key derivation per kind: registry/vault/recipe → <code>&lt;wsid&gt;</code>; wip/lease →
+<code>&lt;wsid&gt;/&lt;envid&gt;</code> (lease per-machine so two active machines never produce
+an equal-version conflict); transcript/brief → <code>&lt;threadId&gt;</code>.</li>
+<li>Reconciliation: per key, higher version wins; same version + different
+hash auto-resolves newest-updatedAt-wins (author-id tie-break — both
+machines pick the same winner), never content-merged; the loser is
+preserved in the conflict record and surfaced as a dismissible notice
+(dismissal keyed by detection). The manual conflict get/resolve API was
+deleted 2026-07-22 (zero UI callers). A local win over an equal-version
+remote does NOT republish the local record (mirror hot-loop fix, G2).</li>
+<li>Mirror RPCs = raw authenticated HTTP routes (schemas in
+<code>packages/contracts/src/roaming.ts</code>): <code>syncManifest</code>, <code>fetchBlobs</code>,
+<code>pushBlobs</code>, plus <code>POST /api/roaming/mirror/wait</code> (long-poll, ≤25s
+against an in-memory per-boot change revision; 40s client cap; 15s
+failure backoff; 30s timeout on manifest/fetch/push requests — a
+black-holed peer degrades to a failed pass, G7). All mirror routes:
+roaming gate off → 404,
+<code>roaming:mirror</code> scope required, paused peer → 403. <code>roaming:mirror</code> is
+granted nowhere by default and NOT requestable via <code>/oauth/token</code>.
+Enrollment/administrative routes require <code>access:write</code>.</li>
+<li>Mirror connectivity is ONE-directional by design (callee holds no
+credential/URL for the initiator). PeerMirror runs on startup, 60s
+interval, local blob writes, and one waiter fiber per reachable enabled
+peer (atomic claim; self-terminates on pause/remove/roaming-off;
+reconciled every drain pass + 30s scan). The interval is the delivery
+guarantee; the waiter is the fast path.</li>
+<li>No server-side peer endpoint discovery: peer base URLs recorded at
+pairing, tried in order.</li>
+<li><code>lastMirrorContactAt</code> = global max across peers, written only by a
+completed mirror pass.</li>
+<li>Roaming shell stream events ride <code>sequence: 0</code>; the client reducer owns
+sequencing.</li>
+<li><code>workspaceProjectId</code> is persisted in the SQL projection path and carried
+by shell projections (sync pill depends on it).</li>
+</ul>
+<h2>Pairing + peers</h2>
+<ul>
+<li>ONE handshake, orchestrated by the initiator&#39;s server
+(<code>POST /api/roaming/peers</code>): exchange the single-use code at the peer&#39;s
+<code>/oauth/token</code> with NO scope parameter; with <code>access:write</code> it mints the
+365-day <code>roaming:mirror</code> credential AND a standard attach bearer; without
+it, attach-only with a typed reason (first-class outcome). The handshake
+session self-revokes via <code>POST /api/roaming/handshake-complete</code>.</li>
+<li>Peers/machine-credential routes are NOT gated on the <code>roaming</code> flag —
+pairing is what turns it on.</li>
+<li>Peer-introduction seam: <code>PeerIntroduction</code> + <code>registerBearerGrant</code> in
+<code>packages/client-runtime</code>; the manual dialog is producer #1, cloud
+discovery later constructs the same value.</li>
+<li>Sync on/off = <code>sync_enabled</code> on the peer row: gates outbound passes AND
+inbound mirror RPCs (403) while the credential survives. Codes are only
+for the first enable on an unpaired machine.
+<code>POST /api/roaming/peers/{list,sync,remove}</code>; Remove = full teardown
+(row + credential + revoke the peer&#39;s inbound sessions).</li>
+<li>One device = one Authorized-clients row (credentials collapse; user&#39;s
+pairing label wins over hostnames).</li>
+<li>Callee-side peer records are tamper-resistant: <code>ensurePeer</code> insert-only,
+callers&#39; advertised base URLs ignored. Initiator side deliberately not.</li>
+<li>Materialize on remote-only rows: enabled-iff-workable,
+disabled-with-reason otherwise; fetches registry + vault blobs on demand;
+auto-trusts well-known SSH host keys (github/gitlab/bitbucket/azure);
+prompts once for a projects folder. Revoked/auth-failed remotes leave the
+merged list and their mirrored offline+Materialize rows surface.</li>
+<li>Credential hygiene: bearer responses <code>cache-control: no-store</code>; tokens
+never logged; all network steps complete before anything persists.</li>
+<li><code>RoamingAutoEnroll</code> triggers on startup, peer-added (both directions),
+<code>project.created</code>, settings changes; skips any workspaceRoot that is a
+materialization target path. <code>project.roaming.enroll</code> dispatches before
+the registry blob write; re-enroll is idempotent and self-heals a missing
+blob. <code>ensureRegistryRoot</code> merges <code>perMachineRoots</code> on raw JSON so
+newer-schema peers&#39; fields survive.</li>
+</ul>
+<h2>Vault</h2>
+<ul>
+<li>Bundle = JSON <code>{ schemaVersion, capturedAt, files: [{ path, mode, sha256, contentBase64 }] }</code>; cap = total decoded bytes
+(<code>ROAMING_VAULT_BUNDLE_MAX_BYTES</code>, 16 MiB), enforced from <code>stat</code> before
+any read; oversize captures are skipped with a surfaced warning, never
+truncated.</li>
+<li>Effective vault set: global <code>&lt;stateDir&gt;/t3sync</code> (defaults written once,
+never regenerated) + optional repo-root <code>.t3sync</code> (user-created only),
+matched by git&#39;s own exclude engine global-then-project (project lines
+win, incl. <code>!</code> negation). A file is captured only if manifest-matched AND
+untracked per <code>git ls-files</code> (<code>check-ignore</code> is the wrong tool — flags
+committed lookalikes). Fail-closed: a genuine ls-files failure skips
+capture.</li>
+<li>Symlinks are never captured; apply refuses symlinked targets/parents
+outside the workspace root; new files written with their mode up front.</li>
+<li>Vault content is P2P-only — never reaches the origin host. WIP capture
+subtracts the effective vault set from its temp index (untracked
+candidates only; removing a tracked path would make restore delete it).</li>
+<li>Delivery on arrival + startup catch-up, per file: missing → write; equal
+to incoming → align; equal to what WE last applied (per-file sha256
+record under <code>&lt;stateDir&gt;/vault-applied/&lt;wsid&gt;.json</code>) → update; anything
+else = local edit, never overwritten (notice). Receiver gate = <code>roaming</code>
+only (the capturing machine&#39;s consent decided the bundle&#39;s contents).</li>
+<li>Tombstones (2026-07-22, G4): bundles carry <code>{ path, deletedAt }</code> per
+file the previous bundle had that is now absent on disk (absence from
+the candidate list alone is not a deletion); live tombstones carry
+forward; a tombstoned file re-ships only when its mtime is newer than
+<code>deletedAt</code> (re-created — it lives again). Delivery removes an
+untouched local copy into <code>&lt;stateDir&gt;/vault-trash/&lt;wsid&gt;/&lt;ts&gt;/</code>
+(recoverable; deliberately outside the workspace so t3sync patterns
+can&#39;t re-match it); a locally edited copy always survives (keyed by the
+applied-record hash, never mtime). Deletions are never silent: warning
+log + sticky per-project deletion notice merged into the sync status.
+Pre-tombstone bundles decode with the old never-delete semantics.</li>
+<li>Capture triggers: fs watch + 30s interval backbone (the watcher is an
+optimization, never a guarantee).</li>
+</ul>
+<h2>WIP sync</h2>
+<h3>Capture</h3>
+<ul>
+<li>Server file layout (split 2026-07-16): <code>WipSnapshots.ts</code> git primitives;
+<code>WipShared.ts</code> types/codecs/guards/blob reads; <code>WipCapture.ts</code> snapshot +
+origin push/bundle transport; <code>WipApply.ts</code> classifier + per-file merge +
+parking/takeover; <code>treeWatcher.ts</code> fs-watch stream; <code>WipSnapshotReactor.ts</code>
+triggers/coalescing/status only.</li>
+<li>Temp-index recipe in <code>roaming/WipSnapshots.ts</code> (NOT the driver op): seed
+from HEAD, <code>add -A</code>, subtract vault set, <code>write-tree</code>, <code>commit-tree</code> with
+<strong>parent = HEAD</strong> (thin bundles are ancestry-based; also M4 divergence&#39;s common
+ancestor) and <code>T3-Based-On: &lt;applied-marker oid&gt;</code> trailer. When that marker
+represents pinned conflicts, the same contiguous trailer block also carries
+<code>T3-Based-On-Peer: &lt;peer oid&gt;</code>; snapshot ancestry remains unchanged. Returns
+<code>{ commitOid, treeOid }</code>. Real index and worktree untouched. Fixed
+author/committer identity.</li>
+<li>Payload v2 adds <code>branchRef</code> (symbolic HEAD; sentinel for
+detached/unborn) and <code>headOid</code>. Origin refs get this context from the
+mirrored beacon only on an exact <code>(refName, commitOid)</code> match; a ref with
+no matching v2 metadata is legacy. Legacy payloads never auto-apply.</li>
+<li>The WIP ref mirrors the worktree tree even when clean (a stale dirty
+snapshot must never shadow committed work). No-op identity is
+<code>(branchRef, headOid, treeOid)</code>; branch/HEAD moves ship even when the tree
+is unchanged. The baseline is the last SHIPPED payload plus the
+<code>wip-pushed</code> marker in origin mode. The exact applied peer tuple is
+suppressed until our shipped snapshot names that applied commit in
+<code>T3-Based-On</code>; after locally-authored work ships, that suppression turns
+off so deletion causality still propagates.</li>
+<li>Untracked files over <code>ROAMING_WIP_MAX_FILE_BYTES</code> (50 MiB) are excluded
+with a surfaced warning that survives real push errors.</li>
+<li>Triggers: per-directory fs watch (5s debounce), 2-min interval sweep
+(also the only trigger under sustained sub-5s write storms), settings
+enable, <code>thread.turn-diff-completed</code>, <code>project.meta-updated</code> carrying a
+workspaceProjectId (enrollment), a 10s <code>(branchRef, headOid)</code> poll for
+clean CLI switches/commits (<code>.git</code> is not watched), graceful shutdown (one
+bounded final capture+ship per project, 10s cap, 4-wide). Keyed-coalesced
+per project; skips while MERGE/REBASE/CHERRY_PICK markers exist. Thread
+worktrees live under <code>&lt;baseDir&gt;/worktrees/</code>, outside project roots —
+excluded by construction.</li>
+<li>Watcher budget (Linux): per-DIRECTORY registration skipping
+<code>.git</code>/<code>node_modules</code>/<code>dist</code>/<code>build</code>/<code>target</code>/<code>out</code>/<code>.venv</code>/<code>__pycache__</code>
+at registration; 4096-dir cap per project; macOS/Windows keep native
+recursive. Watch death or cap → 10s capture sweep + <code>notice</code> on the
+status entry + real-watch retry ~5 min — never a silent fall to the 2-min
+interval. Notices live in reactor state; passes cannot wipe them.</li>
+</ul>
+<h3>Transport</h3>
+<ul>
+<li>Origin mode (default): <code>git push &lt;remote&gt; &lt;ref&gt;:&lt;ref&gt; --force-with-lease=&lt;ref&gt;:&lt;expected&gt;</code> where expected = the <code>wip-pushed</code>
+marker (empty = expect absent). Lease-shaped rejection → fetch-adopt the
+remote value into the marker, retry once. Permission-shaped stderr
+classifies BEFORE lease-shaped (git prints lease lines on denials too);
+permission → bundle mode (in-memory only, re-probed each boot); other
+failures stay origin mode and surface. Successful pushes ALSO write an
+empty-bundle beacon blob (metadata only) — peers run the project&#39;s apply
+pass on any arriving wip blob; importers skip empty-bundle payloads.</li>
+<li>Bundle mode (fallback): <code>git bundle create &lt;ref&gt; --not --remotes=&lt;remote&gt;</code>
+→ blob kind=wip, payload <code>{ schemaVersion, capturedAt, refName, commitOid, treeOid, branchRef, headOid, bundleBase64 }</code>, capped by
+<code>ROAMING_WIP_BUNDLE_MAX_BYTES</code> (8 MiB); oversize skipped with a surfaced
+warning.</li>
+</ul>
+<h3>Apply</h3>
+<ul>
+<li>Classification (same context / fast-forward / different branch /
+peer-behind / diverged) is the plan&#39;s decision table; the EXECUTABLE
+source of truth for guard precedence is <code>classifyWipApply</code> in
+<code>WipApply.ts</code> — a pure decision table over gathered <code>WipContextFacts</code>,
+with invariant tests enumerating the whole fact space. Not restated here.
+Mechanics that bind it:<ul>
+<li>Untouched (defined in the plan) mechanically requires the local
+branch/HEAD to match this machine&#39;s latest captured payload (or the
+applied payload before first local capture); the in-flight-turn guard
+uses a project-level projection query joining threads to sessions.</li>
+<li>Staleness is ancestry, never wall clock (the committer-timestamp gate
+is deleted, not kept alongside). Newest-peer selection across
+environments stays committer-timestamp (fine at 2 machines).</li>
+<li>Every blocked case sets a specific <code>blockedReason</code> and surfaces the
+takeover action.</li>
+<li>Echo/acknowledgement rules (each answers a field bug):<ul>
+<li>An exact provenance echo (Based-On + branch/HEAD/tree = our last
+shipment) advances marker bookkeeping only; it never reverses a
+newer local branch switch.</li>
+<li>A different-branch snapshot with a stale Based-On is a delayed echo
+ONLY when clean AND its HEAD is an ancestor of ours; unproven, it
+blocks with takeover offered — a silent skip settles both machines
+on &quot;Synced&quot; while divergent.</li>
+<li>A dirty stale snapshot is real work but stays blocked until it
+acknowledges our latest shipment; it can never auto-switch a newly
+reset branch.</li>
+<li>A pinned conflict marker&#39;s exact <code>T3-Peer-Snapshot</code> commit is
+resolved once this machine&#39;s kept-local result ships; it never
+recreates takeover on restart. A different peer commit re-evaluates.</li>
+</ul>
+</li>
+<li>Pre-apply causal baseline: the pushed marker in origin mode, the
+current mirrored payload commit in bundle mode — a missing origin
+marker must not disable causal classification in bundle fallback.</li>
+<li>Passes apply BEFORE capture, so a receiver never ships stale pre-apply
+context back to the author. Successful takeover forces one
+acknowledgement capture even on an exact applied tuple, so the peer
+clears its block.</li>
+<li>Parked refs: a manual git switch keeps carried WIP exactly as Git
+leaves it — the reactor never deletes files to force a parked snapshot
+into place; restore only when the returned checkout is clean at the
+parked snapshot&#39;s parent, and success consumes the ref.</li>
+</ul>
+</li>
+<li>Per-file merge (the same-context path). Executable source of truth:
+<code>resolveWipPathAction</code> (pure, table-tested). Base selection: a
+clean-at-HEAD checkout rebases to HEAD (a retained applied marker must
+not manufacture local edits); dirty checkouts use the applied marker,
+else HEAD, else the empty tree. A path missing from that base may use
+the last-shipped snapshot as base ONLY when it is provably common
+history — locally absent (our own deletion; the delete flap), a
+proof-gated shipped-only delete, or the peer&#39;s Based-On/Based-On-Peer
+naming our shipment (a reply, M3.6 delivery); an unproven concurrent
+snapshot conflicts and keeps ours (the m35 no-clobber rule). Per path
+over <code>{ baseOid, peerOid, ourOid }</code>: ours=peer → skip; local changed +
+peer unchanged → keep local silently; both changed → conflict, keep
+ours, surface; untouched + peer deleted → remove; untouched + peer
+content → <code>git restore --source=&lt;peer&gt; --worktree</code>; occupied path →
+conflict. Clean-at-HEAD deletion echo: exact shipped bytes stay deleted,
+different bytes are a recreated file and apply. Same-context apply never
+touches HEAD, branch refs, or the real index.</li>
+<li><code>POST /api/roaming/wip/takeover</code> reclassifies the newest snapshot, parks
+local state, reproduces the peer branch/HEAD/tree, and returns
+<code>{ applied, reason? }</code>. An optional <code>snapshotOid</code> pins the takeover to
+the snapshot the user was shown — a newer arrival refuses with a reason
+instead of applying unseen work (M4); omitted = newest-wins (harness/CLI).
+Per-file conflicts during takeover (an ignored file colliding
+with a peer path, a failed restore) still count as applied — the branch
+switch and reset have already happened, and the acknowledgement capture
+must still run so the peer clears its block. The blocked project pill is
+the action; the divergence dialog is the only additional sync surface.</li>
+<li>Divergence (M4): <code>divergence: true</code> on a blocked outcome means exactly
+same-branch + non-ancestor HEADs (<code>classifyWipApply</code> invariant 11);
+<code>takeoverServiceable === !hasInFlightTurn</code> (invariant 10) and maps to the
+status entry&#39;s <code>takeoverAvailable</code> — legacy/invalid-snapshot blocks are
+not serviceable. <code>POST /api/roaming/wip/divergence</code> returns merge-base +
+one capped patch per side (10 MB cap, <code>truncated</code> flag; the local side
+diffs the live vault-subtracted worktree TREE oid — its <code>snapshotOid</code> is
+a tree, not a captured commit; no merge-base → empty-tree base).
+<code>POST /api/roaming/wip/divergence/resolve</code> pins <code>peerSnapshotOid</code>:
+pick=peer re-verifies the divergence still exists, then runs the pinned
+takeover (losing side = per-branch parked ref); pick=local pins the
+rejected snapshot to <code>wip-rejected</code>, writes a kept-local applied marker
+(synthetic commit of the current worktree tree, <code>T3-Peer-Snapshot</code>
+trailer, dated 1s before the snapshot), touches no worktree state, and
+forces the acknowledgement capture — the existing
+<code>conflictAlreadyResolved</code> row then keeps that exact snapshot settled.
+Both routes <code>access:write</code>. <code>selectNewestPeerSnapshot</code> (fetch + bundle
+import + newest selection + integrity validation) is the shared
+selection for apply and both divergence routes.</li>
+<li>Deletion invariants (each was a field bug): (1) the applied marker
+advances EVERY pass that applies or records conflicts — clean passes to
+the peer snapshot, conflicted passes to a synthetic commit with only the
+conflicted paths pinned to base (dated 1s before the peer snapshot) — so
+one conflict can never unrecord another file&#39;s arrival. (2) Peer-absence
+counts as a deletion beyond the marker diff only for paths we SHIPPED and
+only when the peer&#39;s <code>T3-Based-On</code> state provably contained the path.
+If its synthetic marker is local-only, an exact <code>T3-Based-On-Peer</code> match
+proves acknowledgement against this machine&#39;s own shipped snapshot instead.
+Legacy snapshots missing that proof are re-captured once. (3) See the
+causality re-ship rule under Capture.</li>
+<li>TOCTOU guard: destructive decisions re-verify against a fresh worktree
+tree in the last instant before writing.</li>
+<li>Worktree mutations serialize (2026-07-22, G3): takeover and
+resolveDivergence run under a per-project lock shared with the keyed
+coalescing worker&#39;s passes; resolveDivergence&#39;s take-the-peer path
+calls the unlocked takeover core (already holds the lock). The
+shutdown finalizer bypasses worker and lock (pass fibers are
+interrupted there).</li>
+</ul>
+<h3>Status surfacing</h3>
+<ul>
+<li><code>roamingWipStatus</code> per project: <code>{ mode, lastCapturedAt, lastPushedAt, lastError?, blockedReason?, takeoverAvailable?, notice?, lastAppliedAt?, lastAppliedFrom? }</code>,
+merged at BOTH shell surfaces (ws subscribe point and HTTP shell route);
+flag-off = empty. Baseline publish on a project&#39;s first pass; seeds into
+resumed ws subscriptions; after restart, activity timestamps reconstruct
+from marker-ref commit dates (git is the durable store).</li>
+<li>Sync pill priority: error (red) &gt; blocked (amber, plain-language
+guidance) &gt; notice (amber) &gt; completed activity (green) &gt; idle. Capture and
+apply timestamps describe completed work, so they render <code>Synced</code>
+immediately; there is no timestamp-derived fake <code>Syncing</code> interval.
+Concept-free copy — no &quot;roaming&quot;/&quot;sync engine&quot; wording.</li>
+<li>M4 status fields: <code>blockedSnapshotOid</code> (the peer snapshot that produced
+the block — echo it in takeover requests), <code>blockedFrom</code> (its author
+environment), <code>divergenceAvailable</code> (block is a two-sided divergence).
+All blocked fields clear on every non-blocked pass; reasons are
+enumerated plain language (&quot;peer is on <branch>&quot;, &quot;peer moved <branch>
+forward; you have local edits&quot;, divergence, legacy snapshot). A dirty
+same-branch non-ancestor checkout reads &quot;has diverged&quot;, not &quot;moved
+forward&quot; (M4 correction).</li>
+<li>Pill actions (M4): divergence → &quot;Review changes&quot; opens the diff-and-choose
+dialog (takeover stays reachable inside it); serviceable block → &quot;Take
+over&quot; (pinned to <code>blockedSnapshotOid</code>); non-serviceable block →
+non-clickable &quot;Waiting&quot;; a red <code>lastError</code> pill never carries an action.</li>
+</ul>
+<h3>Leases + activity (M4)</h3>
+<ul>
+<li>One kind=lease blob per (project, machine), key <code>&lt;wsid&gt;/&lt;envid&gt;</code>, payload
+<code>RoamingLeasePayload { schemaVersion, environmentId, renewedAt, lastSnapshotAt? }</code>. &quot;The lease&quot; is derived: newest <code>renewedAt</code> wins;
+advisory only — never blocks anything.</li>
+<li>Renewal (<code>WipLease.renewLease</code>): after a successful ship of
+locally-authored work (both transports; always writes, carries
+<code>capturedAt</code>) — passes that applied peer content and acknowledgement
+captures suppress renewal, because an echo is not activity and would
+point the chip at the receiving machine after every delivery; while an
+agent turn is in flight (throttled to 60s, preserves <code>lastSnapshotAt</code>);
+on takeover and kept-local divergence resolution (forced past the
+throttle — explicit user actions move the lease even when the follow-up
+ship no-ops or fails). Renewals log-and-swallow failures.</li>
+<li><code>RoamingProjectShell.activity</code>: all lease records for the project, newest
+first, no peer filtering — stale machines age out visually via
+<code>ROAMING_LEASE_ACTIVE_WINDOW_MS</code> (2 min, shared server/client constant).
+The blob-change shell stream re-projects on lease arrival, so chips
+update live. Chip renders only when the newest record belongs to another
+machine and is inside the window.</li>
+<li><code>roamingWipStatus</code> is transient reactor state, not durable shell data. The
+client strips the entire array from shell-cache loads and writes so a cached
+blocked row cannot resurrect <code>Take over</code> before live status arrives. Warm
+resume receives an authoritative <code>roaming-wip-status-replaced</code> event,
+including an empty array, before replay/live events.</li>
+</ul>
+<h2>Materialize</h2>
+<ul>
+<li>Synchronous <code>POST /api/roaming/materialize</code>, stateless and idempotent
+(2026-07-22, O4/D2 — the persisted step machine and
+<code>roaming_materializations</code> table are gone, migration 037): resolve-path
+→ clone → restore-wip → apply-vault → register-project → bootstrap
+(M6). Records live in memory for the boot (progress streams unchanged
+over the shell — live overlay at the ws/HTTP entry points; the
+projection query returns []); a failed run continues in-boot; across
+restarts a fresh run is idempotent (clone-if-missing, recording vault
+delivery, already-matched WIP restore, register finds the linked
+project). The auto-enroll D1 fork guard reads a workspace marker file
+the clone step writes BEFORE any project.create. An interrupted-clone
+skeleton (registry remote configured, no resolvable HEAD, clean status)
+is wiped and re-cloned. Runs serialize per workspaceProjectId (G9); a
+concurrent request waits and returns the running result.</li>
+<li>A completed in-memory record short-circuits ONLY while its targetPath
+still holds a git checkout AND the registered project is live;
+otherwise a fresh run.</li>
+<li>restore-wip runs BEFORE apply-vault (cleanliness check + <code>git clean -fd</code>
+operate on the pristine clone; the file sets are disjoint by the vault
+subtraction). <code>restoreWip</code> flag defaults ON (pre-checked checkbox).
+Sources: origin <code>refs/t3/wip/&lt;wsid&gt;/*</code> (explicit fetch) then wip blobs
+(one on-demand mirror pull); newest committer date across environments
+wins; skip-not-fail on dirty target / equal tree / nothing found /
+disabled; an older-than-HEAD snapshot may legitimately win (recorded
+notice with age + authoring machine). Restore goes through checkpoint
+restore (whole tree; staged/unstaged flattened; <code>git clean -fd</code>; index
+reset to HEAD; HEAD itself never moves) and then writes the applied
+marker. Payload v2 is required; create + switch the snapshot branch to its
+<code>headOid</code> before restoring the dirty diff. Legacy snapshots skip with a
+notice.</li>
+<li>apply-vault never overwrites an existing differing file (notice;
+interactive overwrite belongs to the on-demand &quot;pull vault files&quot; path),
+and uses the recording variant so its files stay updatable by later
+vault delivery.</li>
+</ul>
+<h2>Accepted risks / known limits</h2>
+<ul>
+<li>Cloned state dir (two machines, one environmentId) → WIP ref ping-pong;
+re-install orphans one origin ref per abandoned environmentId (prunable
+by hand).</li>
+<li>A manual CLI branch/HEAD move is detected by the 10s context poll; a dirty
+tree under a sustained sub-5s write storm still waits for the interval.</li>
+<li>Peer clock skew can defeat timestamp-based newest-peer selection
+(recoverable via refs; apply safety decisions use ancestry).</li>
+<li>Two machines materializing from the same registry version → equal-version
+conflict (disjoint perMachineRoots not auto-merged).</li>
+<li>Initiator-side environmentId clobber; first-pairing settings TOCTOU
+(rationale in history).</li>
+<li>Total inotify-instance exhaustion at server boot crashes upstream watch
+paths before roaming runs (M3.7 removed the dominant consumer; state now
+unlikely).</li>
+<li>Base-diff peer deletions with NO applied marker yet are not
+Based-On-gated (narrow: markers appear on first exchange).</li>
+<li>Divergence pick=local reports <code>resolved: true</code> once the marker + rejected
+ref are durably written, but the settle rides the acknowledgement
+capture&#39;s SHIP — if that fails (origin down), the divergence pill returns
+until a later ship succeeds. Self-healing, idempotent to re-resolve; no
+data loss (inherited from the conflict-pin mechanism).</li>
+<li>Lease derivation trusts cross-machine wall clocks: under skew a fresh
+record can lose to a stale one and the chip lags. Advisory only.</li>
+<li>Stashes, in-progress rebases, the staged/unstaged split, reflog, and
+other local branches do not roam. Both
+machines must run ≥M3.8 builds before branch-aware behavior holds
+end-to-end.</li>
+</ul>
+</body>
+</html>

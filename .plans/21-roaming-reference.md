@@ -21,7 +21,12 @@ live in `21-roaming-history.md`.
   readers, D3 freshness preflight. Script semantics stay in the scripts.
 - Acceptance scripts: `accept-m1.mjs`, `accept-m2.mjs`, `accept-m2.5.mjs`,
   `accept-m3.mjs`, `accept-m35.mjs`, `accept-m36.mjs`, `accept-m37.mjs`,
-  `accept-m37-stress.mjs`, `accept-m38.mjs`, `accept-m4.mjs`.
+  `accept-m37-stress.mjs`, `accept-m38.mjs`, `accept-m4.mjs`,
+  `accept-m5.mjs` (transcripts ride the P2P mirror only — no transport
+  variants; includes a harness-restart leg asserting B's reconcile never
+  tombstones A's transcripts, and drives resume as explicit
+  thread.create + thread.turn.start — the raw dispatch endpoint has no
+  client-side bootstrap).
   `accept-m2.5.mjs` is the canonical-workflow re-run every milestone ends
   with. `accept-m38.mjs` and `accept-m4.mjs` run their origins with
   `receive.hideRefs refs/t3` (bundle fallback) by default and again with
@@ -66,6 +71,12 @@ live in `21-roaming-history.md`.
   propagation happens only in the pairing handshake — machines paired
   before M3 must enable it on both machines (or re-pair). Reactor gates
   `roaming && roamingWipSync` per pass; statuses clear on disable.
+- `roamingTranscriptSync` — default false; consent to mirror this
+  machine's conversation transcripts (P2P only, never the origin host).
+  The pairing dialog's pre-checked "Conversations" row is the consent,
+  ONE decision applied to both machines (first-pairing-only on the
+  callee, G8). Park bypasses the flag for its one thread (the explicit
+  action is the consent; surfaced as a notice).
 - `roamingSecretsSync` — per-machine capture consent, propagated at pairing
   (the paired-into machine has no settings UI for it — flagged for a future
   Authorized-clients sync row).
@@ -119,7 +130,14 @@ live in `21-roaming-history.md`.
   Conflict records retain the full remote record.
 - Key derivation per kind: registry/vault/recipe → `<wsid>`; wip/lease →
   `<wsid>/<envid>` (lease per-machine so two active machines never produce
-  an equal-version conflict); transcript/brief → `<threadId>`.
+  an equal-version conflict); transcript/brief → `<threadId>` (UUID —
+  probabilistic cross-machine uniqueness accepted; author machine only).
+- Wire kinds are PERMISSIVE (M5): the mirror envelopes (refs, manifests,
+  records, push results) type `kind` as a plain string — a closed literal
+  made every new kind a breaking wire change that wedged ALL sync against
+  an older build. Unknown kinds are skipped by `diffManifests` and
+  rejected as `stale` by `applyRemote`; the strict `RoamingBlobKind`
+  literal stays the local typing for writes and rows.
 - Reconciliation: per key, higher version wins; same version + different
   hash auto-resolves newest-updatedAt-wins (author-id tie-break — both
   machines pick the same winner), never content-merged; the loser is
@@ -181,6 +199,9 @@ live in `21-roaming-history.md`.
   merged list and their mirrored offline+Materialize rows surface.
 - Credential hygiene: bearer responses `cache-control: no-store`; tokens
   never logged; all network steps complete before anything persists.
+- `enrollProject` losing the decider race to a concurrent enrollment
+  (auto-enroll fires on peer-added while the route call is in flight)
+  adopts the winner's workspaceProjectId instead of erroring (M5).
 - `RoamingAutoEnroll` triggers on startup, peer-added (both directions),
   `project.created`, settings changes; skips any workspaceRoot that is a
   materialization target path. `project.roaming.enroll` dispatches before
@@ -451,6 +472,63 @@ live in `21-roaming-history.md`.
   blocked row cannot resurrect `Take over` before live status arrives. Warm
   resume receives an authoritative `roaming-wip-status-replaced` event,
   including an empty array, before replay/live events.
+
+## Transcripts + briefs (M5)
+
+- Blob kinds `transcript`/`brief`, key `<threadId>`, JSON payloads
+  (`RoamingTranscriptPayload` / `RoamingBriefPayload` in
+  `packages/contracts/src/roaming.ts`). Caps:
+  `ROAMING_TRANSCRIPT_MAX_BYTES` 4 MiB whole payload (drop oldest
+  activities, then oldest messages, `truncated` flag — newest turns
+  survive), `ROAMING_TRANSCRIPT_MAX_ACTIVITY_PAYLOAD_BYTES` 16 KiB per
+  activity payload (`payloadTruncated`, summary still ships),
+  `ROAMING_BRIEF_MAX_CHARS` 20k. Attachment bytes do not roam (name/mime/
+  size metadata only).
+- `TranscriptSync` (apps/server/src/roaming/TranscriptSync.ts): builds the
+  reduced payload from `getThreadDetailById` (committed projections, never
+  the event log), keyed-coalesced per threadId. Triggers: thread lifecycle
+  events (created / message-sent / turn-diff-completed / meta-updated /
+  proposed-plan-upserted / archived / unarchived / deleted / reverted —
+  deliberately NOT activity-appended), startup + settings + peer-change
+  reconcile (`captureAll`, which also re-enqueues every transcript blob key
+  so offline deletions tombstone). No-op compare excludes `capturedAt`.
+  Gate: derived roaming gate + `roamingTranscriptSync`; park forces past
+  the flag but never the gate.
+- AUTHOR-ONLY writes: tombstones require the existing record's
+  `authorEnvironmentId` to be this machine (fail-closed) — without the
+  guard, B's reconcile tombstoned A's mirrored threads at a higher version
+  and killed them on both machines (review critical; regression leg in
+  accept-m5).
+- `parked` is sticky: set by park, kept by every capture until a new USER
+  message on the author machine (`unpark` enqueue on user message-sent);
+  passive churn (a turn erroring after the handoff) never strips it. Park
+  runs THROUGH the worker + drainKey — a direct capture raced in-flight
+  event captures.
+- Park (`POST /api/roaming/threads/park`, access:write, roaming-gated):
+  forced parked capture → consent-gated WIP snapshot request
+  (skip-not-fail, surfaced in `notices`) → brief via
+  `TextGeneration.generateResumptionBrief` (background job on the thread's
+  modelSelection; all five provider adapters) with a deterministic
+  fallback digest + notice when no provider answers → kind=brief blob
+  write. `POST /api/roaming/briefs/save` writes edits as new versions
+  (either machine, newest-wins). `POST /api/roaming/threads/transcript`
+  returns local transcript + brief + author.
+- Shell: `roamingThreads` (`RoamingThreadShell`) from
+  `listRoamingThreadShells` — transcript blobs LEFT JOIN
+  projection_threads, excluding any threadId with a LOCAL row (the local
+  shell is authoritative; also the author filter) and tombstones;
+  `getRoamingThreadShellById` includes tombstones for live upserts.
+  Transcript/brief blob changes emit `roaming-thread-upserted`
+  (sequence 0; `deleted: true` upsert = removal, no separate event);
+  resume catch-up seeds the rows. Gate-off masks to `[]`.
+- Web: mirrored rows inside each project's thread list (live AND offline
+  registry rows), `/mirrored/$threadId` read-only view (timeline
+  components, affordances stubbed), Hand off header action + brief dialog,
+  Continue here = new local thread via the client bootstrap turn start
+  with the brief as the visible first user message (disabled-with-reason
+  until materialized). Concept-free copy throughout.
+- Resume threads are ordinary local threads (new UUID) — never mirrored
+  back as the same thread; no import path into the local event log exists.
 
 ## Materialize
 
