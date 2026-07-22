@@ -6,6 +6,7 @@ import type {
   RoamingMaterializationRecord,
   RoamingWipStatusEntry,
   RoamingProjectShell,
+  RoamingThreadShell,
   ScopedProjectRef,
 } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
@@ -18,6 +19,7 @@ import { arrayElementsEqual, parseProjectKey, projectKey, projectRefsEqual } fro
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = Object.freeze([]);
 const EMPTY_ROAMING_PROJECTS: ReadonlyArray<RoamingProjectShell> = Object.freeze([]);
 const EMPTY_ROAMING_WIP_STATUS: ReadonlyArray<RoamingWipStatusEntry> = Object.freeze([]);
+const EMPTY_ROAMING_THREADS: ReadonlyArray<RoamingThreadShell> = Object.freeze([]);
 const EMPTY_ROAMING_MATERIALIZATIONS: ReadonlyArray<RoamingMaterializationRecord> = Object.freeze(
   [],
 );
@@ -168,6 +170,13 @@ export function createEnvironmentProjectAtoms(input: {
     ).pipe(Atom.withLabel(`environment-roaming-wip-status:${environmentId}`)),
   );
 
+  const environmentRoamingThreadsAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make(
+      (get): ReadonlyArray<RoamingThreadShell> =>
+        get(input.snapshotAtom(environmentId))?.roamingThreads ?? EMPTY_ROAMING_THREADS,
+    ).pipe(Atom.withLabel(`environment-roaming-threads:${environmentId}`)),
+  );
+
   return {
     environmentProjectsAtom,
     environmentProjectIndexAtom,
@@ -180,6 +189,7 @@ export function createEnvironmentProjectAtoms(input: {
     environmentRoamingMaterializationsAtom,
     roamingMaterializationsAtom,
     environmentRoamingWipStatusAtom,
+    environmentRoamingThreadsAtom,
   };
 }
 
