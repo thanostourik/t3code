@@ -572,6 +572,12 @@ const make = Effect.gen(function* () {
           `secret files skipped because local files differ: ${applied.skipped.join(", ")}`,
         );
       }
+      if (applied.deleted.length > 0) {
+        next = addNotice(
+          next,
+          `secret files removed (deleted on the other machine): ${applied.deleted.join(", ")}${applied.trashDir === null ? "" : `; copies kept under ${applied.trashDir}`}`,
+        );
+      }
       return {
         record: next,
         detail: `applied ${applied.written.length} secret file(s)`,
