@@ -271,3 +271,42 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+// ---------------------------------------------------------------------------
+// Resumption brief (roaming M5)
+// ---------------------------------------------------------------------------
+
+export interface ResumptionBriefPromptInput {
+  title: string;
+  branch: string | null;
+  transcriptText: string;
+}
+
+export function buildResumptionBriefPrompt(input: ResumptionBriefPromptInput) {
+  const prompt = [
+    "You write resumption briefs: a short markdown document that lets the same",
+    "coding conversation be continued in a FRESH agent session on another",
+    "machine, with none of this session's context available.",
+    "Return a JSON object with key: markdown.",
+    "",
+    "Rules:",
+    "- Cover: the goal, what has been done so far, key decisions and their",
+    "  reasons, current state of the code, and the concrete next steps.",
+    "- Mention exact file paths, commands, and names the next session will need.",
+    "- Do NOT include secrets, tokens, or credentials even if they appear in",
+    "  the conversation.",
+    "- Be concise: this is a briefing, not a transcript. Aim well under 300 lines.",
+    "",
+    `Thread title: ${input.title}`,
+    input.branch !== null ? `Branch: ${input.branch}` : "Branch: (none)",
+    "",
+    "Conversation:",
+    limitSection(input.transcriptText, 50_000),
+  ].join("\n");
+
+  const outputSchema = Schema.Struct({
+    markdown: Schema.String,
+  });
+
+  return { prompt, outputSchema };
+}

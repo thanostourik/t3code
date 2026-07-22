@@ -50,6 +50,22 @@ export function applyShellStreamEvent(
   if (event.kind === "roaming-wip-status-replaced") {
     return { ...snapshot, roamingWipStatus: event.wipStatuses };
   }
+  if (event.kind === "roaming-thread-upserted") {
+    // A tombstoned transcript (author deleted/archived the thread) removes
+    // the row; there is no separate removal event.
+    const roamingThreads =
+      event.roamingThread.deleted === true
+        ? Arr.filter(
+            snapshot.roamingThreads,
+            (thread) => thread.threadId !== event.roamingThread.threadId,
+          )
+        : snapshot.roamingThreads.some((thread) => thread.threadId === event.roamingThread.threadId)
+          ? Arr.map(snapshot.roamingThreads, (thread) =>
+              thread.threadId === event.roamingThread.threadId ? event.roamingThread : thread,
+            )
+          : Arr.append(snapshot.roamingThreads, event.roamingThread);
+    return { ...snapshot, roamingThreads };
+  }
 
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 

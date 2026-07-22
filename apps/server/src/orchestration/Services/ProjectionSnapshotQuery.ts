@@ -16,6 +16,7 @@ import type {
   OrchestrationSearchThreadsResult,
   OrchestrationShellSnapshot,
   RoamingProjectShell,
+  RoamingThreadShell,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadShell,
@@ -95,6 +96,25 @@ export interface ProjectionSnapshotQueryShape {
     ReadonlyArray<RoamingProjectShell>,
     ProjectionRepositoryError
   >;
+
+  /**
+   * Mirrored conversation transcripts as shell rows (M5) — from the local
+   * blob copies. Excludes tombstoned transcripts and any thread that exists
+   * locally (the local thread shell is authoritative there).
+   */
+  readonly listRoamingThreadShells: () => Effect.Effect<
+    ReadonlyArray<RoamingThreadShell>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * One mirrored-thread shell row for live upserts, INCLUDING tombstoned
+   * transcripts (`deleted: true` tells reducers to drop the row) — but still
+   * none for locally-existing threads.
+   */
+  readonly getRoamingThreadShellById: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<RoamingThreadShell>, ProjectionRepositoryError>;
 
   /**
    * Read archived thread shell summaries for the archive page.
