@@ -178,7 +178,6 @@ const make = Effect.gen(function* () {
         workspaceProjectId: input.workspaceProjectId,
         title: input.title,
         repository,
-        vaultOverrides: { include: [], exclude: [] },
         perMachineRoots: { [environmentId]: input.workspaceRoot },
       }).pipe(Effect.mapError(internalError("registry payload encode failed")));
       yield* blobStore

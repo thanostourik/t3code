@@ -6,9 +6,10 @@
  * the reconciliation rule; transport lives elsewhere (PeerMirror).
  *
  * Reconciliation per (kind, key): higher version wins; equal versions with
- * different content hashes are concurrent writes and are recorded as a
- * conflict, never merged. Payload strings are byte-authoritative — they are
- * stored and hashed verbatim, never re-serialized.
+ * different content hashes are concurrent writes — auto-resolved
+ * newest-updatedAt-wins (D1, 2026-07-22), the loser preserved in the
+ * conflict record and surfaced as a notice. Payload strings are
+ * byte-authoritative — stored and hashed verbatim, never re-serialized.
  */
 import * as NodeCrypto from "node:crypto";
 
@@ -223,19 +224,41 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  const recordConflict = (local: typeof BlobRowSchema.Type, remote: RoamingBlobRecord) =>
+  // After auto-resolution (D1) the store always holds the winner, so the
+  // record reads: local_content_hash = winner's hash, remote_record = the
+  // full losing concurrent write (preserved for inspection). Idempotent: an
+  // identical re-detection (same version, same loser) does not churn
+  // detected_at — mirror passes repeat until the peer converges.
+  const recordConflict = (
+    winner: {
+      readonly kind: string;
+      readonly key: string;
+      readonly workspaceProjectId: string;
+      readonly version: number;
+      readonly contentHash: string;
+    },
+    loser: RoamingBlobRecord,
+  ) =>
     Effect.gen(function* () {
-      const remoteJson = yield* encodeRemoteRecordJson(remote).pipe(
+      const loserJson = yield* encodeRemoteRecordJson(loser).pipe(
         Effect.mapError(decodeError("roaming.blob.record-conflict")),
       );
+      const already = yield* sql<{ readonly version: number; readonly remoteRecord: string }>`
+        SELECT version, remote_record AS "remoteRecord"
+        FROM roaming_blob_conflicts
+        WHERE kind = ${winner.kind} AND key = ${winner.key}
+      `.pipe(Effect.mapError(sqlError("roaming.blob.record-conflict")));
+      if (already[0]?.version === winner.version && already[0].remoteRecord === loserJson) {
+        return;
+      }
       const detectedAt = yield* nowIso;
       yield* sql`
         INSERT INTO roaming_blob_conflicts (
           kind, key, workspace_project_id, version,
           local_content_hash, remote_record, detected_at
         ) VALUES (
-          ${local.kind}, ${local.key}, ${local.workspaceProjectId}, ${local.version},
-          ${local.contentHash}, ${remoteJson}, ${detectedAt}
+          ${winner.kind}, ${winner.key}, ${winner.workspaceProjectId}, ${winner.version},
+          ${winner.contentHash}, ${loserJson}, ${detectedAt}
         )
         ON CONFLICT (kind, key) DO UPDATE SET
           workspace_project_id = excluded.workspace_project_id,
@@ -270,11 +293,28 @@ const make = Effect.gen(function* () {
           if (record.contentHash === existing.contentHash) {
             return "applied" as const;
           }
+          // Concurrent writes (equal version, different hash): auto-resolve
+          // newest-updatedAt-wins (D1, 2026-07-22), ties broken on author id
+          // so both machines pick the same winner. The loser is preserved in
+          // the conflict record and surfaced as a notice on the project row.
+          const remoteWins =
+            record.updatedAt > existing.updatedAt ||
+            (record.updatedAt === existing.updatedAt &&
+              record.authorEnvironmentId > existing.authorEnvironmentId);
+          if (remoteWins) {
+            const localRecord = yield* decodeRecord(existing).pipe(
+              Effect.mapError(decodeError("roaming.blob.apply-remote")),
+            );
+            yield* recordConflict(record, localRecord);
+            yield* upsertRow(record, "roaming.blob.apply-remote");
+            yield* publishChange(record);
+            return "conflict" as const;
+          }
+          // Local wins: no write and — critically — NO publish. Republishing
+          // the unchanged local record here re-triggered the mirror on every
+          // pass (the equal-version hot loop, G2). The peer adopts our copy
+          // by the same rule and the manifests converge on their own.
           yield* recordConflict(existing, record);
-          const localRecord = yield* decodeRecord(existing).pipe(
-            Effect.mapError(decodeError("roaming.blob.apply-remote")),
-          );
-          yield* publishChange(localRecord);
           return "conflict" as const;
         }
         yield* upsertRow(record, "roaming.blob.apply-remote");
