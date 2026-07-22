@@ -11,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -290,6 +291,7 @@ testLayer("VaultSync", (it) => {
       const bundleOf = (files: ReadonlyArray<readonly [string, string]>) => ({
         schemaVersion: 1,
         capturedAt: "2026-07-07T00:00:00.000Z",
+        tombstones: [],
         files: files.map(([path, content]) => ({
           path,
           sha256: NodeCrypto.createHash("sha256").update(content).digest("hex"),
@@ -372,6 +374,7 @@ testLayer("VaultSync", (it) => {
       const entry = (path: string) => ({
         schemaVersion: 1 as const,
         capturedAt: "2026-07-05T00:00:00.000Z",
+        tombstones: [],
         files: [
           {
             path,
@@ -417,6 +420,152 @@ testLayer("VaultSync", (it) => {
     }),
   );
 
+  it.effect("capture tombstones a deleted file; delivery removes the untouched copy (G4)", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-tombstone");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-ts-a-" });
+      const deliveryRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-ts-b-" });
+      yield* initGit(workspaceRoot);
+      yield* writeRegistry({ workspaceProjectId, workspaceRoot });
+      yield* fs.writeFileString(pathService.join(workspaceRoot, ".env"), "SECRET=doomed\n");
+
+      const first = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(first.status, "written");
+      const firstBundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(
+        firstBundle.files.map((file) => file.path),
+        [".env"],
+      );
+      assert.deepEqual(firstBundle.tombstones, []);
+
+      // Deliver v1 to the second machine's checkout, then delete at source.
+      const delivered = yield* deliverVaultBundle({
+        workspaceProjectId,
+        workspaceRoot: deliveryRoot,
+        bundle: firstBundle,
+      });
+      assert.deepEqual(delivered.written, [".env"]);
+
+      yield* fs.remove(pathService.join(workspaceRoot, ".env"));
+      const second = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(second.status, "written");
+      const secondBundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(secondBundle.files, []);
+      assert.deepEqual(
+        secondBundle.tombstones.map((tombstone) => tombstone.path),
+        [".env"],
+      );
+
+      // The untouched delivered copy is removed — into the holding dir, not
+      // unlinked — and the applied record forgets the path.
+      const applied = yield* deliverVaultBundle({
+        workspaceProjectId,
+        workspaceRoot: deliveryRoot,
+        bundle: secondBundle,
+      });
+      assert.deepEqual(applied.deleted, [".env"]);
+      assert.isFalse(yield* fs.exists(pathService.join(deliveryRoot, ".env")));
+      assert.ok(applied.trashDir);
+      const trashed = yield* fs.readFileString(pathService.join(applied.trashDir!, ".env"));
+      assert.equal(trashed, "SECRET=doomed\n");
+      assert.isTrue(applied.trashDir!.startsWith(pathService.join(config.stateDir, "vault-trash")));
+
+      // Idempotent: re-delivering the same tombstone is a no-op.
+      const again = yield* deliverVaultBundle({
+        workspaceProjectId,
+        workspaceRoot: deliveryRoot,
+        bundle: secondBundle,
+      });
+      assert.deepEqual(again.deleted, []);
+      assert.deepEqual(again.skipped, []);
+    }),
+  );
+
+  it.effect("a locally edited copy survives a tombstone (G4)", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-ts-edited");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const deliveryRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-ts-edit-" });
+      const content = "SECRET=v1\n";
+      const bundle = {
+        schemaVersion: 1,
+        capturedAt: "2026-07-07T00:00:00.000Z",
+        tombstones: [],
+        files: [
+          {
+            path: ".env",
+            sha256: NodeCrypto.createHash("sha256").update(content).digest("hex"),
+            contentBase64: Buffer.from(content).toString("base64"),
+          },
+        ],
+      };
+      yield* deliverVaultBundle({ workspaceProjectId, workspaceRoot: deliveryRoot, bundle });
+      yield* fs.writeFileString(pathService.join(deliveryRoot, ".env"), "SECRET=edited\n");
+
+      const result = yield* deliverVaultBundle({
+        workspaceProjectId,
+        workspaceRoot: deliveryRoot,
+        bundle: {
+          ...bundle,
+          files: [],
+          tombstones: [{ path: ".env", deletedAt: "2026-07-08T00:00:00.000Z" }],
+        },
+      });
+      assert.deepEqual(result.deleted, []);
+      assert.deepEqual(result.skipped, [".env"]);
+      assert.equal(
+        yield* fs.readFileString(pathService.join(deliveryRoot, ".env")),
+        "SECRET=edited\n",
+      );
+    }),
+  );
+
+  it.effect("a tombstoned file stays dead until re-created, then lives again (G4)", () =>
+    Effect.gen(function* () {
+      const workspaceProjectId = WorkspaceProjectId.make("wp-vault-ts-revive");
+      const fs = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vault-ts-rev-" });
+      yield* initGit(workspaceRoot);
+      yield* writeRegistry({ workspaceProjectId, workspaceRoot });
+      const envPath = pathService.join(workspaceRoot, ".env");
+      yield* fs.writeFileString(envPath, "SECRET=one\n");
+      yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      yield* fs.remove(envPath);
+      yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      const tombstoned = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(
+        tombstoned.tombstones.map((tombstone) => tombstone.path),
+        [".env"],
+      );
+      const deletedAtMs = Date.parse(tombstoned.tombstones[0]!.deletedAt);
+
+      // A stale copy (mtime at/before deletedAt — e.g. this machine simply
+      // has not applied the deletion yet) must NOT resurrect the file.
+      yield* fs.writeFileString(envPath, "SECRET=stale\n");
+      const staleStamp = DateTime.toDate(DateTime.makeUnsafe(deletedAtMs - 1000));
+      yield* fs.utimes(envPath, staleStamp, staleStamp);
+      const stale = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(stale.status, "unchanged");
+
+      // A genuine re-creation (newer mtime) revives it and drops the tombstone.
+      const revivedStamp = DateTime.toDate(DateTime.makeUnsafe(deletedAtMs + 60_000));
+      yield* fs.utimes(envPath, revivedStamp, revivedStamp);
+      const revived = yield* captureVaultForProject({ workspaceProjectId, workspaceRoot });
+      assert.equal(revived.status, "written");
+      const revivedBundle = yield* readVaultBundle(workspaceProjectId);
+      assert.deepEqual(
+        revivedBundle.files.map((file) => file.path),
+        [".env"],
+      );
+      assert.deepEqual(revivedBundle.tombstones, []);
+    }),
+  );
+
   it.effect("does not churn the vault blob when only capturedAt would change", () =>
     Effect.gen(function* () {
       const workspaceProjectId = WorkspaceProjectId.make("wp-vault-no-churn");
@@ -448,6 +597,7 @@ testLayer("VaultSync", (it) => {
       const bundle: RoamingVaultBundle = {
         schemaVersion: 1,
         capturedAt: "2026-07-05T00:00:00.000Z",
+        tombstones: [],
         files: [
           {
             path: "nested/.env",
@@ -478,6 +628,7 @@ testLayer("VaultSync", (it) => {
         bundle: {
           schemaVersion: 1,
           capturedAt: "2026-07-05T00:00:00.000Z",
+          tombstones: [],
           files: [
             {
               path: "../outside",
