@@ -46,10 +46,12 @@ M0–M3.8 done (2026-07-04 → 2026-07-11; results in the history file), plus
 the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
 (reactor split, decision-table classifier, shim removal — PRs #57–#60).
 The branch-aware ship gate is closed. M4 (takeover + divergence) done
-2026-07-18 (PRs #63–#69; results in the history file). M5–M7 remain
-queued in execution order (renumbered 2026-07-17): M5 briefs +
-transcripts, M6 bootstrap recipes, M7 cloud store. M5 is next; no
-milestone is active.
+2026-07-18 (PRs #63–#69; results in the history file), followed by the
+2026-07-19→22 remediation series (PRs #71–#81: derived roaming gate,
+newest-wins blob conflicts, vault tombstones, stateless materialize,
+serialized worktree mutations, harness-lib dedup). M6–M7 remain queued
+in execution order: M6 bootstrap recipes, M7 cloud store. **M5 briefs +
+transcripts is active** (analysis pass 2026-07-22).
 
 ## Thesis
 
@@ -128,10 +130,13 @@ history file.
   snapshotting, and mirror traffic lives in `apps/server/src/roaming/`. UIs
   only render shell-state entities and dispatch commands.
 - **D3 — One blob record shape for every kind** (registry, vault, wip,
-  recipe, lease, transcript, brief): `{ schemaVersion, kind, key,
+  lease, and per-milestone additions): `{ schemaVersion, kind, key,
   workspaceProjectId, version, contentHash, authorEnvironmentId, updatedAt,
-  payload }`. Per key, higher version wins; same version, different hash =
-  surfaced conflict, never auto-merge.
+  payload }`. Per key, higher version wins; same version, different hash
+  auto-resolves newest-updatedAt-wins (author-id tie-break so both machines
+  pick the same winner), loser preserved in the conflict record and
+  surfaced as a dismissible notice — never content-merged (2026-07-22
+  remediation; the manual pick-a-side API had zero callers and is gone).
 - **D4 — Peer trust rides existing pairing:** the one pairing handshake
   additionally mints a long-lived scoped machine-to-machine credential.
   Machine identity = the persisted server `environmentId`.
@@ -155,8 +160,8 @@ directions). `PeerMirror` reconciles on startup, on interval (60s), on local
 blob writes, and via a `mirror/wait` long-poll so the callee side (which
 holds no credential for the initiator — one-directional connectivity by
 design) delivers in seconds, not on the interval. The registry entry is
-versioned LWW with surfaced conflicts — it changes rarely; resist making it
-a CRDT.
+versioned LWW (conflicts auto-resolve per D3) — it changes rarely; resist
+making it a CRDT.
 
 ### Vault
 
@@ -167,17 +172,21 @@ P2P only — vault content never reaches the origin host. What travels is
 defined by the two t3sync manifest files (gitignore semantics, project lines
 win). Delivery applies on arrival to linked checkouts: missing files
 written, files unmodified since our last apply updated, locally-modified
-files never overwritten (notice); peer-deleted files are not deleted locally
-(v1 accepted gap). Size-capped; oversize skipped with a surfaced warning.
-Concurrent edits on both machines surface as a conflict; user picks a side;
-never merge file contents.
+files never overwritten (notice); peer deletions propagate via per-file
+tombstones — untouched local copies move to a recoverable holding dir,
+locally-edited copies survive, re-creation revives the file (2026-07-22,
+G4). Size-capped; oversize skipped with a surfaced warning. Concurrent
+edits on both machines auto-resolve newest-wins at the bundle level (per
+D3), loser preserved; never merge file contents.
 
 ### Materialize
 
 One action takes a project from "on the other machine" to a registered local
 checkout: resolve path → clone → restore WIP → apply vault → register, as a
-resumable idempotent step machine with progress streamed to the UI. Fetches
-registry and vault blobs on demand from a reachable peer. With M3.8,
+stateless idempotent sequence (no persisted step machine — 2026-07-22, O4:
+clone-if-missing, already-matched restore, register finds the linked
+project; in-boot records stream progress to the UI). Fetches registry and
+vault blobs on demand from a reachable peer. With M3.8,
 restore-WIP is branch-aware: if the newest snapshot's branch differs from
 the clone's default branch, materialize creates and checks out that branch
 at the snapshot's HEAD before restoring the dirty diff.
@@ -279,6 +288,43 @@ path exists. Park = final snapshot + agent-written resumption brief; resume
 = new local thread seeded with the brief. Deliberately no provider-session
 transplants.
 
+Analysis-pass decisions (2026-07-22; sizing evidence in the history file):
+
+- **A transcript is a reduced presentation payload, not the full thread
+  projection** — the full `OrchestrationThread` medians ~0.7 MB and peaks
+  >10 MB because activity payloads carry raw tool output. The transcript
+  blob carries thread meta + messages + proposed plans + activity entries
+  with per-activity payload caps, whole-payload size-capped with an explicit
+  truncation policy. Built from the committed SQLite projections (never by
+  re-reducing the event log), captured at turn boundaries + thread-meta
+  changes, debounced — never per streaming delta.
+- **Keying and ownership:** kind=transcript/brief keyed by `<threadId>`
+  (UUID — probabilistic uniqueness accepted); only the author machine
+  writes a thread's transcript. Thread deletion/archival mirrors as a
+  tombstone payload (the blob store has no delete).
+- **Consent:** "Conversations" pairing row → `roamingTranscriptSync`
+  (default off, pre-checked in the dialog), same ONE-decision /
+  first-pairing-only propagation as the other rows. Transcripts travel
+  P2P only — never the origin host.
+- **Read-only rendering is a separate entity**, never merged into local
+  thread atoms: a `roamingThreads` shell surface + detail route, rendered
+  with the existing timeline components with composer and all mutation /
+  workspace affordances removed. Mirrored threads appear inside their
+  project's ONE thread list, tagged with the source machine. Accepted v1
+  gaps: attachment bytes don't roam (names render, content marked
+  unavailable); file/diff links are inert.
+- **The brief is generated by the background text-generation facility**
+  (same seam as commit-message/title generation — a job, not a thread
+  turn, so parking never appends a summarization turn to the thread).
+  Park = force a final WIP capture (only when WIP sync is consented —
+  skip-not-fail, surfaced in the result) + generate + write the
+  kind=brief blob. The brief is editable on either machine via a small
+  authenticated route; edits are new blob versions, newest-wins per D3.
+- **Resume needs no new command contract:** a new local thread in the
+  local checkout of the same project, created by the existing
+  first-turn bootstrap with the brief as the visible first user message.
+  No local checkout → resume is disabled-with-reason (materialize first).
+
 ### Bootstrap recipes (M6)
 
 The clone was never the expensive part — setup is. First materialization
@@ -331,8 +377,11 @@ into it. All work lands on `feature/roaming` via small topic-branch PRs
 onto `main` at milestone start and after large upstream syncs. Treat any
 edit to an existing upstream file as a cost to minimize and isolate.
 
-**Feature flag:** everything behind the `roaming` server setting; reactors
-start unconditionally and no-op while it is off.
+**Feature flag:** the `roaming` gate is derived — on iff at least one peer
+exists (auto-on at first pairing, auto-off when the last peer is removed;
+the stored setting was deleted 2026-07-22, D3). Reactors start
+unconditionally and no-op while it is off. "Behind the roaming flag" in
+kickoff prompts means behind this derived gate.
 
 **Per-milestone loop:**
 0. Re-read the Canonical workflow. Restate the milestone as a delta against
