@@ -15,6 +15,10 @@ live in `21-roaming-history.md`.
 - The harness serves the PREBUILT `apps/web/dist` bundle — rebuild
   (`cd apps/web && pnpm run build`) after web changes or browser walks test
   stale UI. Headless web login: the `/pair` page + a one-time admin code.
+- `scripts/roaming/harness-lib.mjs` (2026-07-22, O6) owns the shared
+  accept-script plumbing: instance layout, api/cli/git helpers (raw +
+  trimmed git variants), admin login recipe, waitFor, settings/peer
+  readers, D3 freshness preflight. Script semantics stay in the scripts.
 - Acceptance scripts: `accept-m1.mjs`, `accept-m2.mjs`, `accept-m2.5.mjs`,
   `accept-m3.mjs`, `accept-m35.mjs`, `accept-m36.mjs`, `accept-m37.mjs`,
   `accept-m37-stress.mjs`, `accept-m38.mjs`, `accept-m4.mjs`.
@@ -45,10 +49,16 @@ live in `21-roaming-history.md`.
 
 ## Flags + settings
 
-- `roaming` — ServerSettings boolean, default false. Reactors always start
-  and internally no-op while off. Flag-off: shell snapshots (ws AND HTTP
+- `roaming` — DERIVED gate, not a stored setting (2026-07-22, D3): on iff
+  at least one peer row exists (`RoamingPeers.roamingEnabled`, in-memory,
+  refreshed on every peer mutation). Auto-on at first pairing, auto-off
+  when the last peer is removed; reactors additionally wake on peer
+  changes (no settings write happens at pairing). Reactors always start
+  and internally no-op while off. Gate-off: shell snapshots (ws AND HTTP
   `GET /api/orchestration/shell`) strip all roaming fields; roaming routes
-  404 EXCEPT the two pairing routes; local blob data is retained.
+  404 EXCEPT the two pairing routes; local blob data is retained. The web
+  UI derives roamingEnabled from the fetched peer list; acceptance
+  scripts read `roaming_peers` from state.sqlite.
 - `roamingWipSync` — default false (WIP reaches the origin host; consent
   required). The pairing dialog's pre-checked "Work in progress" row is the
   consent, ONE decision applied to both machines (same rule as Secret
@@ -111,14 +121,19 @@ live in `21-roaming-history.md`.
   `<wsid>/<envid>` (lease per-machine so two active machines never produce
   an equal-version conflict); transcript/brief → `<threadId>`.
 - Reconciliation: per key, higher version wins; same version + different
-  hash = surfaced conflict, never auto-merge. Conflict get/resolve routes
-  require `access:write` (they carry secret payloads); resolution picks a
-  side, written as a new higher version.
+  hash auto-resolves newest-updatedAt-wins (author-id tie-break — both
+  machines pick the same winner), never content-merged; the loser is
+  preserved in the conflict record and surfaced as a dismissible notice
+  (dismissal keyed by detection). The manual conflict get/resolve API was
+  deleted 2026-07-22 (zero UI callers). A local win over an equal-version
+  remote does NOT republish the local record (mirror hot-loop fix, G2).
 - Mirror RPCs = raw authenticated HTTP routes (schemas in
   `packages/contracts/src/roaming.ts`): `syncManifest`, `fetchBlobs`,
   `pushBlobs`, plus `POST /api/roaming/mirror/wait` (long-poll, ≤25s
   against an in-memory per-boot change revision; 40s client cap; 15s
-  failure backoff). All mirror routes: roaming flag off → 404,
+  failure backoff; 30s timeout on manifest/fetch/push requests — a
+  black-holed peer degrades to a failed pass, G7). All mirror routes:
+  roaming gate off → 404,
   `roaming:mirror` scope required, paused peer → 403. `roaming:mirror` is
   granted nowhere by default and NOT requestable via `/oauth/token`.
   Enrollment/administrative routes require `access:write`.
@@ -195,9 +210,19 @@ live in `21-roaming-history.md`.
 - Delivery on arrival + startup catch-up, per file: missing → write; equal
   to incoming → align; equal to what WE last applied (per-file sha256
   record under `<stateDir>/vault-applied/<wsid>.json`) → update; anything
-  else = local edit, never overwritten (notice). Peer-deleted files are NOT
-  deleted locally (v1 accepted gap). Receiver gate = `roaming` only (the
-  capturing machine's consent decided the bundle's contents).
+  else = local edit, never overwritten (notice). Receiver gate = `roaming`
+  only (the capturing machine's consent decided the bundle's contents).
+- Tombstones (2026-07-22, G4): bundles carry `{ path, deletedAt }` per
+  file the previous bundle had that is now absent on disk (absence from
+  the candidate list alone is not a deletion); live tombstones carry
+  forward; a tombstoned file re-ships only when its mtime is newer than
+  `deletedAt` (re-created — it lives again). Delivery removes an
+  untouched local copy into `<stateDir>/vault-trash/<wsid>/<ts>/`
+  (recoverable; deliberately outside the workspace so t3sync patterns
+  can't re-match it); a locally edited copy always survives (keyed by the
+  applied-record hash, never mtime). Deletions are never silent: warning
+  log + sticky per-project deletion notice merged into the sync status.
+  Pre-tombstone bundles decode with the old never-delete semantics.
 - Capture triggers: fs watch + 30s interval backbone (the watcher is an
   optimization, never a guarantee).
 
@@ -366,6 +391,12 @@ live in `21-roaming-history.md`.
   causality re-ship rule under Capture.
 - TOCTOU guard: destructive decisions re-verify against a fresh worktree
   tree in the last instant before writing.
+- Worktree mutations serialize (2026-07-22, G3): takeover and
+  resolveDivergence run under a per-project lock shared with the keyed
+  coalescing worker's passes; resolveDivergence's take-the-peer path
+  calls the unlocked takeover core (already holds the lock). The
+  shutdown finalizer bypasses worker and lock (pass fibers are
+  interrupted there).
 
 ### Status surfacing
 
@@ -423,14 +454,23 @@ live in `21-roaming-history.md`.
 
 ## Materialize
 
-- Synchronous `POST /api/roaming/materialize` + resumable idempotent step
-  machine in `roaming_materializations`: resolve-path → clone →
-  restore-wip → apply-vault → register-project → bootstrap (M6). Failed
-  runs return the failed record over HTTP 200; resume continues from the
-  failed step. Progress = step-machine PubSub merged at the shell subscribe
-  point.
-- A completed record short-circuits ONLY while its targetPath still holds a
-  git checkout AND the registered project is live; otherwise a fresh run.
+- Synchronous `POST /api/roaming/materialize`, stateless and idempotent
+  (2026-07-22, O4/D2 — the persisted step machine and
+  `roaming_materializations` table are gone, migration 037): resolve-path
+  → clone → restore-wip → apply-vault → register-project → bootstrap
+  (M6). Records live in memory for the boot (progress streams unchanged
+  over the shell — live overlay at the ws/HTTP entry points; the
+  projection query returns []); a failed run continues in-boot; across
+  restarts a fresh run is idempotent (clone-if-missing, recording vault
+  delivery, already-matched WIP restore, register finds the linked
+  project). The auto-enroll D1 fork guard reads a workspace marker file
+  the clone step writes BEFORE any project.create. An interrupted-clone
+  skeleton (registry remote configured, no resolvable HEAD, clean status)
+  is wiped and re-cloned. Runs serialize per workspaceProjectId (G9); a
+  concurrent request waits and returns the running result.
+- A completed in-memory record short-circuits ONLY while its targetPath
+  still holds a git checkout AND the registered project is live;
+  otherwise a fresh run.
 - restore-wip runs BEFORE apply-vault (cleanliness check + `git clean -fd`
   operate on the pristine clone; the file sets are disjoint by the vault
   subtraction). `restoreWip` flag defaults ON (pre-checked checkbox).
