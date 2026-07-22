@@ -117,6 +117,8 @@ const encodeRemoteRecordJson = Schema.encodeEffect(RemoteRecordFromJson);
 const contentHashOf = (payload: string): string =>
   NodeCrypto.createHash("sha256").update(payload, "utf8").digest("hex");
 
+export const isKnownBlobKind = Schema.is(RoamingBlobKind);
+
 const sqlError = (operation: string) => (cause: unknown) =>
   new PersistenceSqlError({ operation, cause });
 
@@ -274,6 +276,18 @@ const make = Effect.gen(function* () {
   )((record) =>
     writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
+        // Wire kinds are permissive (a newer build may ship kinds this one
+        // doesn't know — see RoamingBlobWireKind); storing one would poison
+        // local reads, so reject it as stale. The peer re-offers it each
+        // pass until this machine upgrades — bounded, and never wedges the
+        // rest of the exchange.
+        if (!isKnownBlobKind(record.kind)) {
+          yield* Effect.logWarning("roaming: rejecting blob of unknown kind", {
+            kind: record.kind,
+            key: record.key,
+          });
+          return "stale" as const;
+        }
         // Integrity gate: a record whose hash disagrees with its payload
         // would poison reconciliation against every other peer.
         if (contentHashOf(record.payload) !== record.contentHash) {
