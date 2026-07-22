@@ -2,11 +2,15 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
+  EventId,
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   PositiveInt,
   ProjectId,
+  ThreadId,
   TrimmedNonEmptyString,
+  TurnId,
   WorkspaceProjectId,
 } from "./baseSchemas.ts";
 import { RepositoryIdentity } from "./environment.ts";
@@ -17,12 +21,20 @@ import { RepositoryIdentity } from "./environment.ts";
 // WIP bundles, transcripts, briefs, leases — is one record shape addressed
 // by (kind, key). Blobs live in each machine's local `roaming_blobs` table
 // and reconcile through the mirror: per key, higher version wins; same
-// version with a different contentHash means concurrent writes and is
-// surfaced as a conflict, never auto-merged.
+// version with a different contentHash means concurrent writes and
+// auto-resolves newest-updatedAt-wins (see RoamingBlobConflict), never
+// content-merged.
 
-// Speculative kinds (recipe/transcript/brief) were removed 2026-07-22 (O2);
-// they return with their milestones' contracts PRs.
-export const RoamingBlobKind = Schema.Literals(["registry", "vault", "wip", "lease"]);
+// The speculative `recipe` kind was removed 2026-07-22 (O2); it returns
+// with M6's contracts PR. `transcript`/`brief` landed with M5.
+export const RoamingBlobKind = Schema.Literals([
+  "registry",
+  "vault",
+  "wip",
+  "lease",
+  "transcript",
+  "brief",
+]);
 export type RoamingBlobKind = typeof RoamingBlobKind.Type;
 
 /**
@@ -236,6 +248,193 @@ export const RoamingLeasePayload = Schema.Struct({
   ...RoamingProjectActivity.fields,
 });
 export type RoamingLeasePayload = typeof RoamingLeasePayload.Type;
+
+// ── Transcripts + briefs (M5) ───────────────────────────────────────
+//
+// A transcript is a *reduced presentation payload* built from the committed
+// SQLite projections — never the raw event log, and never the full
+// OrchestrationThread projection (whose activity payloads carry raw tool
+// output and median ~0.7 MB per thread). Mirrored transcripts render
+// read-only on the other machine and are never imported into the local
+// orchestration event log: no import path exists, so no cross-machine event
+// conflict model needs to. Only the authoring machine writes a thread's
+// transcript/brief blobs; deletion mirrors as a tombstone payload
+// (`deleted: true`) because the blob store has no delete.
+//
+// These schemas are deliberately self-contained (roaming.ts cannot import
+// orchestration.ts): a reduced message/activity/plan shape is the contract,
+// not a re-export of the live projection types.
+
+/**
+ * Whole-payload cap for a serialized transcript blob. Oversize transcripts
+ * drop oldest activities first, then oldest messages, and set `truncated` —
+ * the newest turns are the ones a user reads on the other machine.
+ */
+export const ROAMING_TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Per-activity payload cap inside a transcript. Activity payloads are
+ * `unknown` upstream and routinely carry full tool output (1 MB+ observed);
+ * anything over the cap ships summary-only with `payloadTruncated`.
+ */
+export const ROAMING_TRANSCRIPT_MAX_ACTIVITY_PAYLOAD_BYTES = 16 * 1024;
+
+/** Cap on a resumption brief (markdown chars) — a brief is a briefing, not a dump. */
+export const ROAMING_BRIEF_MAX_CHARS = 20_000;
+
+/** Attachment bytes do not roam (v1): names render, content is unavailable. */
+export const RoamingTranscriptAttachment = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  mimeType: TrimmedNonEmptyString,
+  sizeBytes: NonNegativeInt,
+});
+export type RoamingTranscriptAttachment = typeof RoamingTranscriptAttachment.Type;
+
+export const RoamingTranscriptMessage = Schema.Struct({
+  id: MessageId,
+  role: Schema.Literals(["user", "assistant", "system"]),
+  text: Schema.String,
+  attachments: Schema.optional(Schema.Array(RoamingTranscriptAttachment)),
+  turnId: Schema.NullOr(TurnId),
+  createdAt: IsoDateTime,
+});
+export type RoamingTranscriptMessage = typeof RoamingTranscriptMessage.Type;
+
+export const RoamingTranscriptActivity = Schema.Struct({
+  id: EventId,
+  tone: Schema.Literals(["info", "tool", "approval", "error"]),
+  kind: TrimmedNonEmptyString,
+  summary: TrimmedNonEmptyString,
+  /** JSON-encoded activity payload; absent when it exceeded the per-activity cap. */
+  payloadJson: Schema.optional(Schema.String),
+  payloadTruncated: Schema.optional(Schema.Boolean),
+  turnId: Schema.NullOr(TurnId),
+  createdAt: IsoDateTime,
+});
+export type RoamingTranscriptActivity = typeof RoamingTranscriptActivity.Type;
+
+export const RoamingTranscriptPlan = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  turnId: Schema.NullOr(TurnId),
+  planMarkdown: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+export type RoamingTranscriptPlan = typeof RoamingTranscriptPlan.Type;
+
+/** Payload of blob kind=transcript (key=threadId), JSON-encoded. */
+export const RoamingTranscriptPayload = Schema.Struct({
+  schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  threadId: ThreadId,
+  workspaceProjectId: WorkspaceProjectId,
+  title: TrimmedNonEmptyString,
+  branch: Schema.NullOr(Schema.String),
+  capturedAt: IsoDateTime,
+  /** Thread creation/update timestamps on the authoring machine. */
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  /** Terminal state of the newest turn at capture time, when one exists. */
+  lastTurnState: Schema.optional(Schema.Literals(["running", "interrupted", "completed", "error"])),
+  /** Set by park: this thread was deliberately handed off (a brief exists or is coming). */
+  parked: Schema.optional(Schema.Boolean),
+  /**
+   * Tombstone: the authoring machine deleted (or archived) the thread. All
+   * content arrays ship empty; receivers drop the row from their lists.
+   */
+  deleted: Schema.optional(Schema.Boolean),
+  /** Set when the whole-payload cap forced dropping oldest entries. */
+  truncated: Schema.optional(Schema.Boolean),
+  messages: Schema.Array(RoamingTranscriptMessage),
+  proposedPlans: Schema.Array(RoamingTranscriptPlan).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  activities: Schema.Array(RoamingTranscriptActivity).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+});
+export type RoamingTranscriptPayload = typeof RoamingTranscriptPayload.Type;
+
+/**
+ * Payload of blob kind=brief (key=threadId), JSON-encoded. Generated by the
+ * background text-generation facility at park (never as a thread turn), then
+ * user-editable: an edit writes a new blob version with `editedAt` set —
+ * ordinary newest-wins reconciliation, either machine may edit.
+ */
+export const RoamingBriefPayload = Schema.Struct({
+  schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  threadId: ThreadId,
+  workspaceProjectId: WorkspaceProjectId,
+  markdown: Schema.String,
+  generatedAt: IsoDateTime,
+  editedAt: Schema.optional(IsoDateTime),
+});
+export type RoamingBriefPayload = typeof RoamingBriefPayload.Type;
+
+/**
+ * A mirrored thread as shown in its project's thread list — summary data
+ * from the local transcript blob copy; rendering never requires a live
+ * peer. Threads authored by THIS machine are not surfaced (the local
+ * thread shell is authoritative); `deleted` upserts tell receivers to drop
+ * the row.
+ */
+export const RoamingThreadShell = Schema.Struct({
+  threadId: ThreadId,
+  workspaceProjectId: WorkspaceProjectId,
+  title: TrimmedNonEmptyString,
+  authorEnvironmentId: EnvironmentId,
+  capturedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  messageCount: NonNegativeInt,
+  lastTurnState: Schema.optional(Schema.Literals(["running", "interrupted", "completed", "error"])),
+  parked: Schema.optional(Schema.Boolean),
+  hasBrief: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  deleted: Schema.optional(Schema.Boolean),
+});
+export type RoamingThreadShell = typeof RoamingThreadShell.Type;
+
+/** Local (user-session) RPC: full mirrored transcript + brief for one thread. */
+export const RoamingThreadTranscriptRequest = Schema.Struct({
+  threadId: ThreadId,
+});
+export type RoamingThreadTranscriptRequest = typeof RoamingThreadTranscriptRequest.Type;
+
+export const RoamingThreadTranscriptResponse = Schema.Struct({
+  /** Null when no transcript blob exists locally for the thread. */
+  transcript: Schema.NullOr(RoamingTranscriptPayload),
+  brief: Schema.NullOr(RoamingBriefPayload),
+  /** Author of the transcript record, for the "from <machine>" label. */
+  authorEnvironmentId: Schema.NullOr(EnvironmentId),
+});
+export type RoamingThreadTranscriptResponse = typeof RoamingThreadTranscriptResponse.Type;
+
+/**
+ * Local (user-session) RPC: park a LOCAL thread — force a final transcript
+ * capture (marked `parked`), generate the resumption brief, request a final
+ * WIP capture when WIP consent is on (skip-not-fail, surfaced in
+ * `notices`). Returns the written brief for immediate editing.
+ */
+export const RoamingThreadParkRequest = Schema.Struct({
+  threadId: ThreadId,
+});
+export type RoamingThreadParkRequest = typeof RoamingThreadParkRequest.Type;
+
+export const RoamingThreadParkResponse = Schema.Struct({
+  brief: RoamingBriefPayload,
+  /** Honest caveats that are not failures ("WIP snapshot skipped: sync is off"). */
+  notices: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type RoamingThreadParkResponse = typeof RoamingThreadParkResponse.Type;
+
+/** Local (user-session) RPC: save an edited brief (new blob version, newest-wins). */
+export const RoamingBriefSaveRequest = Schema.Struct({
+  threadId: ThreadId,
+  markdown: Schema.String.check(Schema.isMaxLength(ROAMING_BRIEF_MAX_CHARS)),
+});
+export type RoamingBriefSaveRequest = typeof RoamingBriefSaveRequest.Type;
+
+export const RoamingBriefSaveResponse = Schema.Struct({
+  brief: RoamingBriefPayload,
+});
+export type RoamingBriefSaveResponse = typeof RoamingBriefSaveResponse.Type;
 
 // ── Registry entry payload (kind=registry, key=workspaceProjectId) ──
 
@@ -600,6 +799,8 @@ export const RoamingPairSyncOptions = Schema.Struct({
   secretsSync: Schema.optional(Schema.Boolean),
   /** Maps to the `roamingWipSync` setting (WIP snapshot consent). */
   wipSync: Schema.optional(Schema.Boolean),
+  /** Maps to the `roamingTranscriptSync` setting (conversation mirroring consent, M5). */
+  transcriptSync: Schema.optional(Schema.Boolean),
 });
 export type RoamingPairSyncOptions = typeof RoamingPairSyncOptions.Type;
 
@@ -763,3 +964,6 @@ export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_WIP_TAKEOVER_PATH = "/api/roaming/wip/takeover";
 export const ROAMING_WIP_DIVERGENCE_PATH = "/api/roaming/wip/divergence";
 export const ROAMING_WIP_DIVERGENCE_RESOLVE_PATH = "/api/roaming/wip/divergence/resolve";
+export const ROAMING_THREAD_TRANSCRIPT_PATH = "/api/roaming/threads/transcript";
+export const ROAMING_THREAD_PARK_PATH = "/api/roaming/threads/park";
+export const ROAMING_BRIEF_SAVE_PATH = "/api/roaming/briefs/save";
