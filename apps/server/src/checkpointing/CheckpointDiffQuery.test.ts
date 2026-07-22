@@ -83,6 +83,8 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             listRoamingProjectShells: () =>
               Effect.die("CheckpointDiffQuery should not request roaming project shells"),
+            listRoamingThreadShells: () => Effect.succeed([]),
+            getRoamingThreadShellById: () => Effect.succeed(Option.none()),
             getArchivedShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request archived shell snapshots"),
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
@@ -193,6 +195,8 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             listRoamingProjectShells: () =>
               Effect.die("CheckpointDiffQuery should not request roaming project shells"),
+            listRoamingThreadShells: () => Effect.succeed([]),
+            getRoamingThreadShellById: () => Effect.succeed(Option.none()),
             getArchivedShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request archived shell snapshots"),
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
@@ -278,6 +282,8 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             listRoamingProjectShells: () =>
               Effect.die("CheckpointDiffQuery should not request roaming project shells"),
+            listRoamingThreadShells: () => Effect.succeed([]),
+            getRoamingThreadShellById: () => Effect.succeed(Option.none()),
             getArchivedShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request archived shell snapshots"),
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
@@ -348,6 +354,8 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             listRoamingProjectShells: () =>
               Effect.die("CheckpointDiffQuery should not request roaming project shells"),
+            listRoamingThreadShells: () => Effect.succeed([]),
+            getRoamingThreadShellById: () => Effect.succeed(Option.none()),
             getArchivedShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request archived shell snapshots"),
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
@@ -403,6 +411,8 @@ describe("CheckpointDiffQuery.layer", () => {
               Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
             listRoamingProjectShells: () =>
               Effect.die("CheckpointDiffQuery should not request roaming project shells"),
+            listRoamingThreadShells: () => Effect.succeed([]),
+            getRoamingThreadShellById: () => Effect.succeed(Option.none()),
             getArchivedShellSnapshot: () =>
               Effect.die("CheckpointDiffQuery should not request archived shell snapshots"),
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
