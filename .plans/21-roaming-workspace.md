@@ -48,7 +48,7 @@ the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
 The branch-aware ship gate is closed. M4 (takeover + divergence) done
 2026-07-18 (PRs #63–#69), followed by the 2026-07-19→22 remediation
 series (PRs #71–#81). M5 (briefs + transcripts) done 2026-07-22
-(PRs #82–#87; results in the history file). M6–M7 remain queued in
+(PRs #82–#86; results in the history file). M6–M7 remain queued in
 execution order: M6 bootstrap recipes, M7 cloud store. M6 is next; no
 milestone is active.
 
