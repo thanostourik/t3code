@@ -2038,3 +2038,48 @@ numbers with a reordered table: numbers must always match execution order
 (kickoff prompts address milestones by number — the 2026-07-06 renumber
 set the precedent), and archaeology is served by the numbering-era map now
 at the top of this file rather than by freezing the numbering.
+
+## 2026-07-19→22 — post-M4 remediation series (PRs #71–#81, recorded)
+
+Ran from its own (since-deleted) remediation plan; recorded here because it
+changed standing design text. Landed: keep-local pill settle (#71), consent
+patch key / turn-guard soft-delete filter / mirror timeouts / NUL escape
+(#73), derived roaming gate — stored flag deleted, consent seeds on first
+pairing only (#74), eager shell live-source attach (#75), newest-wins blob
+conflict auto-resolution + conflict API removal + speculative kind removal
+(#76), per-project worktree/materialize serialization (#77), vault
+tombstones (#78), wip/shell seam dedup (#79), stateless idempotent
+materialize + table drop (#80), harness-lib extraction + full-ladder rerun
+(#81). Plan/reference corrections applied 2026-07-22 with the M5 analysis
+pass.
+
+## 2026-07-22 — M5 analysis pass (briefs + transcripts)
+
+Read-only investigation (gpt-5.6-sol) + remediation-series reconciliation.
+Key evidence and decisions (design deltas live in the plan):
+
+- **Transcript sizing (developer DB, 480 threads, 210k events):** full
+  `OrchestrationThread` projection ≈ raw event log in size — messages +
+  activities median 0.20 MB, mean 0.72 MB, P95 3.55 MB, max 10.8 MB;
+  largest single activity 1.21 MB (raw tool output survives into the
+  projection as `Schema.Unknown` payloads). Forced the reduced
+  presentation-payload decision + per-activity and whole-blob caps.
+- Speculative transcript/brief blob kinds had been removed by #76 (O2);
+  M5's contracts PR re-introduces them for real. Blob store has no delete
+  → thread deletion mirrors as a tombstone payload.
+- `ThreadId` is a branded string, UUID by construction on creation paths —
+  probabilistic global uniqueness accepted for `<threadId>` keys; author
+  machine is the only transcript writer.
+- No read-only thread mode exists anywhere (archived threads have no
+  viewer); `MessagesTimeline` is the reusable layer, `ChatView` is not —
+  mirrored threads get their own entity + surface, never local thread
+  atoms.
+- Brief generation rides the `TextGeneration` seam (commit-message/title
+  jobs — background generation, not a thread turn, so parking never
+  appends a turn). All five provider adapters implement the interface.
+- Resume rides `ThreadTurnStartCommand` + `bootstrap.createThread` (the
+  normal draft-submission path) with the brief as the visible first user
+  message — no new command contract, no hidden context seed.
+- Accepted v1 gaps: attachment bytes don't roam (names render, content
+  unavailable); file/diff affordances inert in read-only view; park's
+  final WIP capture is skip-not-fail when WIP consent is off.
