@@ -11,18 +11,20 @@ import { CommandId, ProjectId, RoamingRegistryPayload } from "@t3tools/contracts
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers } from "./RoamingPeers.ts";
+import { ROAMING_WORKSPACE_MARKER } from "./Materializer.ts";
 import { RoamingService } from "./RoamingService.ts";
 
 const decodeRegistryPayloadJson = Schema.decodeUnknownEffect(
@@ -41,12 +43,13 @@ export class RoamingAutoEnroll extends Context.Service<
 
 const make = Effect.gen(function* () {
   const peers = yield* RoamingPeers;
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
   const projectRepository = yield* ProjectionProjectRepository;
   const roamingService = yield* RoamingService;
   const engine = yield* OrchestrationEngineService;
   const blobStore = yield* RoamingBlobStore;
   const crypto = yield* Crypto.Crypto;
-  const sql = yield* SqlClient.SqlClient;
   const trigger = yield* Queue.sliding<void>(1);
 
   const roamingEnabled = peers.roamingEnabled;
@@ -115,24 +118,17 @@ const make = Effect.gen(function* () {
         );
     });
 
-  // Roots the materializer is (or was) working in. A materialized project is
-  // linked to its EXISTING workspaceProjectId by the register step; if this
-  // reactor observed it in the window between project.create and that link,
-  // enrollProject would mint a second id for the same repo — the D1 fork.
-  // The target path is persisted before the project exists, so it closes the
-  // window; any status counts, since a failed materialization is resumable.
-  const materializationRoots = sql<{ readonly targetPath: string | null }>`
-    SELECT target_path AS "targetPath" FROM roaming_materializations
-  `.pipe(
-    Effect.map(
-      (rows) => new Set(rows.flatMap((row) => (row.targetPath === null ? [] : [row.targetPath]))),
-    ),
-    Effect.catch((cause) =>
-      Effect.logWarning("roaming: auto-enroll materialization lookup failed", { cause }).pipe(
-        Effect.as(null),
-      ),
-    ),
-  );
+  // A materialized project is linked to its EXISTING workspaceProjectId by
+  // the register step; if this reactor observed it in the window between
+  // project.create and that link, enrollProject would mint a second id for
+  // the same repo — the D1 fork. The clone step writes the workspace marker
+  // into the checkout BEFORE any project.create (crash-safe, D2 — the old
+  // roaming_materializations row is gone), so a root carrying the marker is
+  // never auto-enrolled.
+  const isMaterializedRoot = (workspaceRoot: string) =>
+    fs
+      .exists(pathService.join(workspaceRoot, ".git", ROAMING_WORKSPACE_MARKER))
+      .pipe(Effect.orElseSucceed(() => true)); // unreadable → fail closed
 
   const runPass = Effect.gen(function* () {
     if (!(yield* roamingEnabled)) {
@@ -154,11 +150,6 @@ const make = Effect.gen(function* () {
 
     // Fail closed: without the materialization roots we cannot rule out the
     // fork race, so skip the pass; the next trigger retries.
-    const roots = yield* materializationRoots;
-    if (roots === null) {
-      return;
-    }
-
     const projects = yield* projectRepository
       .listAll()
       .pipe(
@@ -172,7 +163,7 @@ const make = Effect.gen(function* () {
       if (project.deletedAt !== null || project.workspaceProjectId !== null) {
         continue;
       }
-      if (roots.has(project.workspaceRoot)) {
+      if (yield* isMaterializedRoot(project.workspaceRoot)) {
         continue;
       }
       yield* roamingService.enrollProject(project.projectId).pipe(
