@@ -68,21 +68,6 @@ import {
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
-const decodeRoamingMaterializationRecord = Schema.decodeUnknownEffect(RoamingMaterializationRecord);
-const RoamingMaterializeStepsJson = Schema.fromJsonString(
-  Schema.Array(
-    Schema.Struct({
-      step: RoamingMaterializeStepName,
-      status: RoamingMaterializeStepStatus,
-      detail: Schema.optional(Schema.String),
-    }),
-  ),
-);
-const RoamingMaterializeNoticesJson = Schema.fromJsonString(Schema.Array(Schema.String));
-const decodeRoamingMaterializeStepsJson = Schema.decodeUnknownEffect(RoamingMaterializeStepsJson);
-const decodeRoamingMaterializeNoticesJson = Schema.decodeUnknownEffect(
-  RoamingMaterializeNoticesJson,
-);
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
@@ -1585,74 +1570,6 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       return shells;
     });
 
-  const listRoamingMaterializations = () =>
-    Effect.gen(function* () {
-      const rows = yield* sql<{
-        readonly workspaceProjectId: string;
-        readonly status: string;
-        readonly stepsJson: string;
-        readonly noticesJson: string;
-        readonly targetPath: string | null;
-        readonly localProjectId: string | null;
-        readonly error: string | null;
-        readonly startedAt: string;
-        readonly updatedAt: string;
-      }>`
-          SELECT
-            workspace_project_id AS "workspaceProjectId",
-            status,
-            steps_json AS "stepsJson",
-            notices_json AS "noticesJson",
-            target_path AS "targetPath",
-            local_project_id AS "localProjectId",
-            error,
-            started_at AS "startedAt",
-            updated_at AS "updatedAt"
-          FROM roaming_materializations
-          ORDER BY updated_at DESC, workspace_project_id
-        `.pipe(
-        Effect.mapError(
-          toPersistenceSqlError("ProjectionSnapshotQuery.listRoamingMaterializations:query"),
-        ),
-      );
-
-      const materializations = [];
-      for (const row of rows) {
-        materializations.push(
-          yield* decodeRoamingMaterializationRecord({
-            workspaceProjectId: row.workspaceProjectId,
-            status: row.status,
-            steps: yield* decodeRoamingMaterializeStepsJson(row.stepsJson).pipe(
-              Effect.mapError(
-                toPersistenceDecodeError(
-                  "ProjectionSnapshotQuery.listRoamingMaterializations:decodeSteps",
-                ),
-              ),
-            ),
-            notices: yield* decodeRoamingMaterializeNoticesJson(row.noticesJson).pipe(
-              Effect.mapError(
-                toPersistenceDecodeError(
-                  "ProjectionSnapshotQuery.listRoamingMaterializations:decodeNotices",
-                ),
-              ),
-            ),
-            targetPath: row.targetPath,
-            localProjectId: row.localProjectId,
-            error: row.error,
-            startedAt: row.startedAt,
-            updatedAt: row.updatedAt,
-          }).pipe(
-            Effect.mapError(
-              toPersistenceDecodeError(
-                "ProjectionSnapshotQuery.listRoamingMaterializations:decodeRecord",
-              ),
-            ),
-          ),
-        );
-      }
-      return materializations;
-    });
-
   const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
     sql
       .withTransaction(
@@ -1766,7 +1683,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   : Result.failVoid,
               ),
               roamingProjects: yield* listRoamingProjectShells(),
-              roamingMaterializations: yield* listRoamingMaterializations(),
+              // D2: materialization progress is in-memory only; the ws/HTTP
+              // shell entry points overlay live runs from the Materializer.
+              roamingMaterializations: [],
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
 

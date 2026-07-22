@@ -15,6 +15,7 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import { Materializer } from "../roaming/Materializer.ts";
 import { RoamingPeers } from "../roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "../roaming/WipSnapshotReactor.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
@@ -28,6 +29,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const orchestrationEngine = yield* OrchestrationEngineService;
     const wipSnapshotReactor = yield* WipSnapshotReactor;
     const roamingPeers = yield* RoamingPeers;
+    const materializer = yield* Materializer;
 
     return handlers
       .handle(
@@ -64,7 +66,12 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           // while off" invariant).
           const roamingEnabled = yield* roamingPeers.roamingEnabled;
           return roamingEnabled
-            ? { ...snapshot, roamingWipStatus: yield* wipSnapshotReactor.listStatuses() }
+            ? {
+                ...snapshot,
+                roamingWipStatus: yield* wipSnapshotReactor.listStatuses(),
+                // D2: materialization progress lives in memory only.
+                roamingMaterializations: yield* materializer.listRecords,
+              }
             : {
                 ...snapshot,
                 roamingProjects: [],

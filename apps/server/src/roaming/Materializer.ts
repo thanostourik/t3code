@@ -10,7 +10,6 @@ import {
   type RoamingMaterializeStepStatus,
   RoamingRegistryPayload,
   RoamingVaultBundle,
-  RoamingWipPayload,
   WorkspaceProjectId,
 } from "@t3tools/contracts";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
@@ -86,8 +85,23 @@ export class Materializer extends Context.Service<
       never,
       Scope.Scope
     >;
+    /**
+     * The latest record per project for THIS boot (D2: no persisted step
+     * machine). Live/failed runs drive the shell overlay; "completed" is
+     * durably observable from the registered project row itself.
+     */
+    readonly listRecords: Effect.Effect<ReadonlyArray<RoamingMaterializationRecord>>;
   }
 >()("t3/roaming/Materializer") {}
+
+/**
+ * Written into the checkout right after the clone step (before any
+ * project.create dispatch) and never removed: the crash-safe signal that
+ * this root belongs to an existing workspaceProjectId, so RoamingAutoEnroll
+ * must not mint a second id for it (the D1 fork guard, previously a
+ * roaming_materializations row).
+ */
+export const ROAMING_WORKSPACE_MARKER = "t3-roaming-workspace";
 
 const decodeRegistryPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RoamingRegistryPayload),
@@ -95,18 +109,6 @@ const decodeRegistryPayload = Schema.decodeUnknownEffect(
 const decodeRawJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 const encodeRawJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeVaultBundle = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
-const decodeMaterializationRecord = Schema.decodeUnknownEffect(RoamingMaterializationRecord);
-const RoamingMaterializeStepsJson = Schema.fromJsonString(
-  RoamingMaterializationRecord.fields.steps,
-);
-const RoamingMaterializeNoticesJson = Schema.fromJsonString(
-  RoamingMaterializationRecord.fields.notices,
-);
-const decodeStepsJson = Schema.decodeUnknownEffect(RoamingMaterializeStepsJson);
-const decodeNoticesJson = Schema.decodeUnknownEffect(RoamingMaterializeNoticesJson);
-const encodeStepsJson = Schema.encodeEffect(RoamingMaterializeStepsJson);
-const encodeNoticesJson = Schema.encodeEffect(RoamingMaterializeNoticesJson);
-
 const sqlError = (operation: string) => (cause: unknown) =>
   new MaterializeError({ reason: "internal", detail: operation, cause });
 
@@ -248,81 +250,17 @@ const make = Effect.gen(function* () {
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+  // D2: records live in memory for the boot — publishRecord replaces the
+  // old SQL upsert; readers get the latest per project.
+  const records = yield* Ref.make(new Map<WorkspaceProjectId, RoamingMaterializationRecord>());
+
   const readRecord = (workspaceProjectId: WorkspaceProjectId) =>
-    Effect.gen(function* () {
-      const rows = yield* sql<{
-        readonly workspaceProjectId: string;
-        readonly status: string;
-        readonly stepsJson: string;
-        readonly noticesJson: string;
-        readonly targetPath: string | null;
-        readonly localProjectId: string | null;
-        readonly error: string | null;
-        readonly startedAt: string;
-        readonly updatedAt: string;
-      }>`
-        SELECT
-          workspace_project_id AS "workspaceProjectId",
-          status,
-          steps_json AS "stepsJson",
-          notices_json AS "noticesJson",
-          target_path AS "targetPath",
-          local_project_id AS "localProjectId",
-          error,
-          started_at AS "startedAt",
-          updated_at AS "updatedAt"
-        FROM roaming_materializations
-        WHERE workspace_project_id = ${workspaceProjectId}
-      `.pipe(Effect.mapError(sqlError("roaming.materializer.read")));
-      const row = rows[0];
-      if (row === undefined) {
-        return null;
-      }
-      return yield* decodeMaterializationRecord({
-        workspaceProjectId: row.workspaceProjectId,
-        status: row.status,
-        steps: yield* decodeStepsJson(row.stepsJson).pipe(
-          Effect.mapError(internalError("materialization steps decode failed")),
-        ),
-        notices: yield* decodeNoticesJson(row.noticesJson).pipe(
-          Effect.mapError(internalError("materialization notices decode failed")),
-        ),
-        targetPath: row.targetPath,
-        localProjectId: row.localProjectId,
-        error: row.error,
-        startedAt: row.startedAt,
-        updatedAt: row.updatedAt,
-      }).pipe(Effect.mapError(internalError("materialization row decode failed")));
-    });
+    Ref.get(records).pipe(Effect.map((map) => map.get(workspaceProjectId) ?? null));
 
   const saveRecord = (record: RoamingMaterializationRecord) =>
     Effect.gen(function* () {
       const updated = { ...record, updatedAt: yield* nowIso };
-      const stepsJson = yield* encodeStepsJson(updated.steps).pipe(
-        Effect.mapError(internalError("materialization steps encode failed")),
-      );
-      const noticesJson = yield* encodeNoticesJson(updated.notices).pipe(
-        Effect.mapError(internalError("materialization notices encode failed")),
-      );
-      yield* sql`
-        INSERT INTO roaming_materializations (
-          workspace_project_id, status, steps_json, notices_json, target_path,
-          local_project_id, error, started_at, updated_at
-        ) VALUES (
-          ${updated.workspaceProjectId}, ${updated.status}, ${stepsJson},
-          ${noticesJson}, ${updated.targetPath}, ${updated.localProjectId},
-          ${updated.error}, ${updated.startedAt}, ${updated.updatedAt}
-        )
-        ON CONFLICT (workspace_project_id) DO UPDATE SET
-          status = excluded.status,
-          steps_json = excluded.steps_json,
-          notices_json = excluded.notices_json,
-          target_path = excluded.target_path,
-          local_project_id = excluded.local_project_id,
-          error = excluded.error,
-          started_at = excluded.started_at,
-          updated_at = excluded.updated_at
-      `.pipe(Effect.mapError(sqlError("roaming.materializer.save")));
+      yield* Ref.update(records, (map) => new Map(map).set(updated.workspaceProjectId, updated));
       yield* PubSub.publish(updates, updated);
       return updated;
     });
@@ -462,20 +400,52 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       if (yield* fs.exists(targetPath)) {
         if (yield* pathHasMatchingRemote(targetPath, remoteUrl)) {
-          return "existing clone";
-        }
-        const entries = yield* fs
-          .readDirectory(targetPath, { recursive: false })
-          .pipe(
-            Effect.mapError((cause) =>
-              stepError("invalid-target", "Target path exists and is not a directory", cause),
-            ),
-          );
-        if (entries.length > 0) {
-          return yield* stepError(
-            "invalid-target",
-            "Target path exists and is not an existing clone of the registry remote",
-          );
+          // A SIGKILL mid-clone leaves the remote configured but HEAD
+          // unresolvable. When nothing beyond git metadata exists (clean
+          // status — no user files to lose), restart the clone from scratch
+          // instead of "succeeding" into an empty checkout.
+          const head = yield* git
+            .execute({
+              operation: "roaming.materializer.clone-head-probe",
+              cwd: targetPath,
+              args: ["rev-parse", "-q", "--verify", "HEAD"],
+              allowNonZeroExit: true,
+            })
+            .pipe(Effect.mapError(internalError("clone head probe failed")));
+          if (head.exitCode === 0) {
+            return "existing clone";
+          }
+          const porcelain = yield* git
+            .execute({
+              operation: "roaming.materializer.clone-partial-probe",
+              cwd: targetPath,
+              args: ["status", "--porcelain"],
+              allowNonZeroExit: true,
+            })
+            .pipe(Effect.mapError(internalError("clone partial probe failed")));
+          if (porcelain.exitCode !== 0 || porcelain.stdout.trim().length > 0) {
+            return yield* stepError(
+              "invalid-target",
+              "Target path holds an interrupted clone with local files — resolve it manually",
+            );
+          }
+          yield* fs
+            .remove(targetPath, { recursive: true })
+            .pipe(Effect.mapError(internalError("interrupted clone cleanup failed")));
+        } else {
+          const entries = yield* fs
+            .readDirectory(targetPath, { recursive: false })
+            .pipe(
+              Effect.mapError((cause) =>
+                stepError("invalid-target", "Target path exists and is not a directory", cause),
+              ),
+            );
+          if (entries.length > 0) {
+            return yield* stepError(
+              "invalid-target",
+              "Target path exists and is not an existing clone of the registry remote",
+            );
+          }
         }
       }
       const clone = () => sourceControl.cloneRepository({ remoteUrl, destinationPath: targetPath });
@@ -953,6 +923,19 @@ const make = Effect.gen(function* () {
             running.targetPath,
             registry.repository.locator.remoteUrl,
           );
+          // Crash-safe fork guard (D2): the marker lands BEFORE any
+          // project.create, so an auto-enroll pass can never mint a second
+          // workspaceProjectId for this root — even across a mid-run crash.
+          yield* fs
+            .writeFileString(
+              path.join(running.targetPath, ".git", ROAMING_WORKSPACE_MARKER),
+              `${running.workspaceProjectId}\n`,
+            )
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("roaming materialize: workspace marker write failed", { cause }),
+              ),
+            );
           return yield* saveRecord({
             ...replaceStep(running, step, "completed", detail),
             error: null,
@@ -1109,6 +1092,7 @@ const make = Effect.gen(function* () {
   return {
     materialize,
     subscribeUpdates: PubSub.subscribe(updates),
+    listRecords: Ref.get(records).pipe(Effect.map((map) => [...map.values()])),
   } satisfies Materializer["Service"];
 });
 

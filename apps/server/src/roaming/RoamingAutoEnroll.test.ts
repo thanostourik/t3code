@@ -3,10 +3,11 @@ import { assert, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -14,6 +15,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "../persistence/Layers/ProjectionProjects.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { ROAMING_WORKSPACE_MARKER } from "./Materializer.ts";
 import { RoamingAutoEnroll, layer as RoamingAutoEnrollLayer } from "./RoamingAutoEnroll.ts";
 import { layer as RoamingBlobStoreLayer } from "./RoamingBlobStore.ts";
 import { RoamingPeers, layer as RoamingPeersLayer } from "./RoamingPeers.ts";
@@ -116,26 +118,38 @@ it.effect(
       const enrollCalls = yield* Ref.make<ReadonlyArray<ProjectId>>([]);
       const program = Effect.scoped(
         Effect.gen(function* () {
+          // The clone step writes the workspace marker into the checkout
+          // before dispatching project.create (D2); a project observed at a
+          // marked root is mid-link to an existing workspaceProjectId and
+          // must not be enrolled.
+          const fs = yield* FileSystem.FileSystem;
+          const pathService = yield* Path.Path;
+          const markedRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-auto-enroll-" });
+          yield* fs.makeDirectory(pathService.join(markedRoot, ".git"), { recursive: true });
+          yield* fs.writeFileString(
+            pathService.join(markedRoot, ".git", ROAMING_WORKSPACE_MARKER),
+            "wp-existing\n",
+          );
           yield* seedProjectAndPeer;
-          // The materializer persists the target path before dispatching
-          // project.create; a project observed at that root is mid-link to
-          // an existing workspaceProjectId and must not be enrolled.
-          const sql = yield* SqlClient.SqlClient;
-          yield* sql`
-            INSERT INTO roaming_materializations (
-              workspace_project_id, status, steps_json, notices_json,
-              target_path, local_project_id, error, started_at, updated_at
-            ) VALUES (
-              'wp-existing', 'running', '[]', '[]',
-              '/tmp/auto-enroll', NULL, NULL,
-              '2026-07-05T00:00:00.000Z', '2026-07-05T00:00:00.000Z'
-            )
-          `;
+          const projects = yield* ProjectionProjectRepository;
+          const now = DateTime.formatIso(yield* DateTime.now);
+          yield* projects.upsert({
+            projectId: ProjectId.make("project-materialized"),
+            title: "Materialized",
+            workspaceRoot: markedRoot,
+            workspaceProjectId: null,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+            deletedAt: null,
+          });
           const autoEnroll = yield* RoamingAutoEnroll;
           yield* autoEnroll.start();
           yield* Effect.yieldNow;
           yield* Effect.yieldNow;
-          assert.deepEqual(yield* Ref.get(enrollCalls), []);
+          // The unmarked seed project enrolls; the marked root never does.
+          assert.deepEqual(yield* Ref.get(enrollCalls), [PROJECT_ID]);
         }),
       );
       yield* program.pipe(Effect.provide(makeLayer({ enrollCalls })));
