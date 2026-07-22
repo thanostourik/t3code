@@ -26,7 +26,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ResolvedKeybindingRule,
+  type RoamingMaterializationRecord,
   ThreadId,
+  WorkspaceProjectId,
   WS_METHODS,
   WsRpcGroup,
   EditorId,
@@ -354,6 +356,7 @@ const buildAppUnderTest = (options?: {
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
+    materializer?: Partial<Materializer["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
     serverRuntimeStartup?: Partial<ServerRuntimeStartup.ServerRuntimeStartup["Service"]>;
@@ -797,6 +800,7 @@ const buildAppUnderTest = (options?: {
             const pubsub = yield* PubSub.unbounded<never>();
             return yield* PubSub.subscribe(pubsub);
           }),
+          ...options?.layers?.materializer,
         } satisfies Materializer["Service"]),
       ),
       Layer.provide(Layer.mock(RoamingService)({})),
@@ -6598,6 +6602,63 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(first?.kind, "thread-removed");
       assert.equal(first?.kind === "thread-removed" ? first.threadId : null, goneThreadId);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("subscribeShell delivers a roaming publish that lands during resume catch-up", () =>
+    Effect.gen(function* () {
+      // G5 regression: the roaming live sources used to attach with the live
+      // tail, AFTER the resume replay drained — a materialization update
+      // published in that window was silently dropped. They now subscribe
+      // before any snapshot/catch-up work, like domain events.
+      const updates = yield* PubSub.unbounded<RoamingMaterializationRecord>();
+      const record: RoamingMaterializationRecord = {
+        workspaceProjectId: WorkspaceProjectId.make("wp-resume-window"),
+        status: "running",
+        steps: [],
+        notices: [],
+        targetPath: null,
+        localProjectId: null,
+        error: null,
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            latestSequence: Effect.succeed(0),
+            // The publish fires exactly while the catch-up stream drains.
+            readEvents: () =>
+              Stream.fromEffect(PubSub.publish(updates, record)).pipe(
+                Stream.flatMap(() => Stream.empty),
+              ),
+          },
+          materializer: {
+            subscribeUpdates: PubSub.subscribe(updates),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ afterSequence: 0 }).pipe(
+            Stream.take(2),
+            Stream.runCollect,
+          ),
+        ),
+      ).pipe(Effect.timeout("2 seconds"));
+
+      // Item 0 is the roaming overlay seed that leads every resume.
+      const [, delivered] = Array.from(items);
+      assert.equal(delivered?.kind, "roaming-materialization-updated");
+      assert.equal(
+        delivered?.kind === "roaming-materialization-updated"
+          ? delivered.materialization.workspaceProjectId
+          : null,
+        "wp-resume-window",
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
   it.effect("subscribeShell retries a transient shell projection refetch failure", () =>
