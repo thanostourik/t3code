@@ -7,7 +7,7 @@
  * transport-mode memory, and status bookkeeping. The work happens in
  * WipCapture.ts (snapshot + origin push / bundle fallback + beacon) and
  * WipApply.ts (classify + reproduce-or-block + per-file merge + parking);
- * shared helpers live in WipShared.ts. Gates on `roaming && roamingWipSync`
+ * shared helpers live in WipShared.ts. Gates on `hasPeers && roamingWipSync`
  * per pass (the VaultSync pattern). Push rights cannot be probed without
  * pushing, so the origin/bundle mode per project is a Ref re-probed each
  * process start.
@@ -45,6 +45,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriver } from "../vcs/VcsDriver.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
+import { RoamingPeers } from "./RoamingPeers.ts";
 import { watchTreeEvents } from "./treeWatcher.ts";
 import {
   getWipDivergenceForTarget,
@@ -178,6 +179,7 @@ const make = Effect.gen(function* () {
   const projectRepository = yield* ProjectionProjectRepository;
   const threadRepository = yield* ProjectionThreadRepository;
   const serverSettings = yield* ServerSettingsService;
+  const peers = yield* RoamingPeers;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* serverEnvironment.getEnvironmentId;
   const hostPlatform = yield* HostProcessPlatform;
@@ -214,8 +216,13 @@ const make = Effect.gen(function* () {
       Effect.provideService(ServerConfig.ServerConfig, serverConfig),
     );
 
-  const isEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.roaming && settings.roamingWipSync),
+  const isEnabled = Effect.gen(function* () {
+    if (!(yield* peers.roamingEnabled)) {
+      return false;
+    }
+    const settings = yield* serverSettings.getSettings;
+    return settings.roamingWipSync;
+  }).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("roaming wip: failed to read settings", { cause }).pipe(Effect.as(false)),
     ),
@@ -882,17 +889,29 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
-      // Settings enabling triggers a scan so consent takes effect
-      // immediately; disabling drops the retained statuses.
+      // Enabling (consent flip via settings, or the master gate flip via
+      // peer changes — pairing writes no setting since D3) triggers a scan so
+      // it takes effect immediately; disabling drops the retained statuses.
+      const applyEnabledState = isEnabled.pipe(
+        Effect.flatMap((enabled) =>
+          enabled
+            ? snapshotAll()
+            : Ref.set(statuses, new Map()).pipe(Effect.andThen(closeAllWatchers)),
+        ),
+      );
       yield* Effect.forkScoped(
         serverSettings.streamChanges.pipe(
-          Stream.runForEach((settings) =>
-            settings.roaming && settings.roamingWipSync
-              ? snapshotAll()
-              : Ref.set(statuses, new Map()).pipe(Effect.andThen(closeAllWatchers)),
-          ),
+          Stream.runForEach(() => applyEnabledState),
           Effect.ignoreCause({ log: true }),
         ),
+      );
+      yield* Effect.forkScoped(
+        Effect.gen(function* () {
+          const peerChanges = yield* peers.subscribeChanges;
+          return yield* Effect.forever(
+            PubSub.take(peerChanges).pipe(Effect.andThen(applyEnabledState)),
+          );
+        }).pipe(Effect.ignoreCause({ log: true })),
       );
       // A peer's wip blob (bundle or beacon) arriving over the mirror means
       // fresh work exists NOW — run that project's pass instead of waiting

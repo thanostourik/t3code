@@ -41,6 +41,7 @@ import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
+import { layerTest as RoamingPeersTestLayer } from "./roaming/RoamingPeers.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import {
@@ -364,7 +365,8 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     const config = yield* makeCliTestServerConfig(baseDir);
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
       Layer.provide(orchestrationHttpApiLayer),
-      Layer.provide(ServerSettingsService.layerTest({ roaming: false })),
+      Layer.provide(ServerSettingsService.layerTest()),
+      Layer.provide(RoamingPeersTestLayer()),
       Layer.provide(
         Layer.succeed(WipSnapshotReactor, {
           start: () => Effect.void,
