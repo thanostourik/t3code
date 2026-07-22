@@ -16,41 +16,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
-const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
-const A = {
-  name: "instance-a",
-  url: "http://127.0.0.1:14801",
-  base: join(HARNESS_DIR, "instance-a/basedir"),
-};
-const B = {
-  name: "instance-b",
-  url: "http://127.0.0.1:14802",
-  base: join(HARNESS_DIR, "instance-b/basedir"),
-};
-const REPO_ROOT = new URL("../..", import.meta.url).pathname;
-
-const fail = (step, detail) => {
-  console.error(`FAIL at ${step}: ${detail}`);
-  process.exit(1);
-};
-const pass = (step) => console.log(`PASS ${step}`);
-
-const cli = (args) =>
-  execFileSync("node", [join(REPO_ROOT, "apps/server/src/bin.ts"), ...args], {
-    encoding: "utf8",
-  }).trim();
-
-const api = async (base, path, { method = "GET", token, body } = {}) => {
-  const response = await fetch(`${base}${path}`, {
-    method,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  return response;
-};
+import { A, B, HARNESS_DIR, REPO_ROOT, api, cli, fail, makeGitEnv, pass } from "./harness-lib.mjs";
+const gitEnv = makeGitEnv("m1");
 
 // ── 0. preconditions ─────────────────────────────────────────────────
 for (const inst of [A, B]) {
@@ -69,13 +36,6 @@ rmSync(originDir, { recursive: true, force: true });
 execFileSync("git", ["init", "--bare", originDir]);
 execFileSync("git", ["init", workDir]);
 writeFileSync(join(workDir, "README.md"), "m1 acceptance\n");
-const gitEnv = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "m1",
-  GIT_AUTHOR_EMAIL: "m1@test",
-  GIT_COMMITTER_NAME: "m1",
-  GIT_COMMITTER_EMAIL: "m1@test",
-};
 execFileSync("git", ["-C", workDir, "add", "."], { env: gitEnv });
 execFileSync("git", ["-C", workDir, "commit", "-m", "init"], { env: gitEnv });
 execFileSync("git", ["-C", workDir, "remote", "add", "origin", originDir]);
@@ -101,16 +61,6 @@ if (!dispatchResponse.ok)
   fail("project.create", `${dispatchResponse.status} ${await dispatchResponse.text()}`);
 pass("project created on A");
 
-const enrollResponse = await api(A.url, "/api/roaming/projects/enroll", {
-  method: "POST",
-  token: adminA,
-  body: { projectId },
-});
-if (!enrollResponse.ok) fail("enroll", `${enrollResponse.status} ${await enrollResponse.text()}`);
-const { workspaceProjectId } = await enrollResponse.json();
-if (!workspaceProjectId) fail("enroll", "no workspaceProjectId in response");
-pass(`project enrolled on A as ${workspaceProjectId}`);
-
 // ── 3. peer enrollment A → B (admin pairing credential from B) ────────
 const pairingJson = JSON.parse(
   cli(["auth", "pairing", "create", "--admin", "--base-dir", B.base, "--json"]),
@@ -128,6 +78,18 @@ if (!addPeerResponse.ok)
   fail("addPeer", `${addPeerResponse.status} ${await addPeerResponse.text()}`);
 const { peer } = await addPeerResponse.json();
 pass(`peer enrolled: A now mirrors to ${peer.environmentId}`);
+
+// ── 3b. enroll the project (D3: the roaming routes answer only once a
+// peer exists, so enrollment follows pairing) ─────────────────────────
+const enrollResponse = await api(A.url, "/api/roaming/projects/enroll", {
+  method: "POST",
+  token: adminA,
+  body: { projectId },
+});
+if (!enrollResponse.ok) fail("enroll", `${enrollResponse.status} ${await enrollResponse.text()}`);
+const { workspaceProjectId } = await enrollResponse.json();
+if (!workspaceProjectId) fail("enroll", "no workspaceProjectId in response");
+pass(`project enrolled on A as ${workspaceProjectId}`);
 
 // ── 4. B holds the registry entry after a mirror pass ─────────────────
 const credentialPath = join(

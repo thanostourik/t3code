@@ -11,43 +11,29 @@
 //
 // The watcher stress fixture is accept-m37-stress.mjs (part 2).
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
-// D3: roaming has no stored flag — the gate derives from peer records in
-// state.sqlite, so freshness/on-ness checks read the peers table.
-const hasRoamingPeers = (base) => {
-  try {
-    const db = new DatabaseSync(join(base, "userdata", "state.sqlite"), { readOnly: true });
-    try {
-      return db.prepare("SELECT COUNT(*) AS n FROM roaming_peers").get().n > 0;
-    } finally {
-      db.close();
-    }
-  } catch {
-    return false;
-  }
-};
+import {
+  A,
+  B,
+  HARNESS_DIR,
+  REPO_ROOT,
+  api,
+  cli,
+  fail,
+  pass,
+  sleep,
+  waitFor,
+  makeGit,
+  readSettings,
+  hasRoamingPeers,
+} from "./harness-lib.mjs";
+const git = makeGit("m37");
 
-const HARNESS_DIR = process.env.T3_ROAMING_HARNESS_DIR ?? "/tmp/t3-roaming-harness";
 const DELIVERIES = 10;
 const MAX_DELIVERY_MS = 10_000;
-const A = {
-  name: "instance-a",
-  url: "http://127.0.0.1:14801",
-  base: join(HARNESS_DIR, "instance-a/basedir"),
-  log: join(HARNESS_DIR, "instance-a/server.log"),
-};
-const B = {
-  name: "instance-b",
-  url: "http://127.0.0.1:14802",
-  base: join(HARNESS_DIR, "instance-b/basedir"),
-  log: join(HARNESS_DIR, "instance-b/server.log"),
-};
-const REPO_ROOT = new URL("../..", import.meta.url).pathname;
 const ADMIN_SCOPES = [
   "orchestration:read",
   "orchestration:operate",
@@ -58,53 +44,6 @@ const ADMIN_SCOPES = [
   "access:write",
   "relay:write",
 ];
-
-const fail = (step, detail) => {
-  console.error(`FAIL at ${step}: ${detail}`);
-  process.exit(1);
-};
-const pass = (step) => console.log(`PASS ${step}`);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const cli = (args) =>
-  execFileSync("node", [join(REPO_ROOT, "apps/server/src/bin.ts"), ...args], {
-    encoding: "utf8",
-  }).trim();
-
-const api = async (base, path, { method = "GET", token, body } = {}) => {
-  return fetch(`${base}${path}`, {
-    method,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-};
-
-const waitFor = async (step, timeoutMs, probe, intervalMs = 2000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await probe();
-    if (value) return value;
-    await sleep(intervalMs);
-  }
-  fail(step, `condition not met within ${timeoutMs / 1000}s`);
-};
-
-const readSettings = (inst) => {
-  const path = join(inst.base, "userdata", "settings.json");
-  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-};
-
-const gitEnv = {
-  ...process.env,
-  GIT_AUTHOR_NAME: "m37",
-  GIT_AUTHOR_EMAIL: "m37@test",
-  GIT_COMMITTER_NAME: "m37",
-  GIT_COMMITTER_EMAIL: "m37@test",
-};
-const git = (args) => execFileSync("git", args, { env: gitEnv, encoding: "utf8" });
 
 // ── 0. preflight ───────────────────────────────────────────────────────
 for (const inst of [A, B]) {
