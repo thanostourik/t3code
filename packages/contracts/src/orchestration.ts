@@ -470,11 +470,6 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     roamingProject: RoamingProjectShell,
   }),
   Schema.Struct({
-    kind: Schema.Literal("roaming-project-removed"),
-    sequence: NonNegativeInt,
-    workspaceProjectId: WorkspaceProjectId,
-  }),
-  Schema.Struct({
     kind: Schema.Literal("roaming-materialization-updated"),
     sequence: NonNegativeInt,
     materialization: RoamingMaterializationRecord,

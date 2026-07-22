@@ -73,7 +73,7 @@ const stubRoamingProject = {
 } as const;
 
 describe("applyShellStreamEvent", () => {
-  it("applies roaming upserts and removals by key without touching snapshotSequence", () => {
+  it("applies roaming upserts by key without touching snapshotSequence", () => {
     const withHighSequence: OrchestrationShellSnapshot = {
       ...baseSnapshot,
       snapshotSequence: 10,
@@ -95,14 +95,7 @@ describe("applyShellStreamEvent", () => {
     });
     expect(replaced.roamingProjects).toHaveLength(1);
     expect(replaced.roamingProjects[0]?.title).toBe("Renamed");
-
-    const removed = applyShellStreamEvent(replaced, {
-      kind: "roaming-project-removed",
-      sequence: 0,
-      workspaceProjectId: stubRoamingProject.workspaceProjectId,
-    });
-    expect(removed.roamingProjects).toEqual([]);
-    expect(removed.snapshotSequence).toBe(10);
+    expect(replaced.snapshotSequence).toBe(10);
   });
 
   it("applies materialization updates by workspaceProjectId despite sequence 0", () => {

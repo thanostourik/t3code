@@ -30,15 +30,6 @@ export function applyShellStreamEvent(
         : Arr.append(snapshot.roamingProjects, event.roamingProject),
     };
   }
-  if (event.kind === "roaming-project-removed") {
-    return {
-      ...snapshot,
-      roamingProjects: Arr.filter(
-        snapshot.roamingProjects,
-        (entry) => entry.workspaceProjectId !== event.workspaceProjectId,
-      ),
-    };
-  }
   if (event.kind === "roaming-materialization-updated") {
     const exists = snapshot.roamingMaterializations.some(
       (entry) => entry.workspaceProjectId === event.materialization.workspaceProjectId,
