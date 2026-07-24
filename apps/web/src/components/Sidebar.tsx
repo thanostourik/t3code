@@ -87,7 +87,6 @@ import {
   useEnvironmentRoamingWipStatus,
   useRoamingMaterializations,
   useRoamingProjects,
-  useServerConfigs,
   useThreadShells,
   useThreadShellsForProjectRefs,
 } from "../state/entities";

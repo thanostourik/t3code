@@ -534,7 +534,7 @@ live in `21-roaming-history.md`.
 
 - Synchronous `POST /api/roaming/materialize`, stateless and idempotent
   (2026-07-22, O4/D2 — the persisted step machine and
-  `roaming_materializations` table are gone, migration 037): resolve-path
+  `roaming_materializations` table are gone, migration 039): resolve-path
   → clone → restore-wip → apply-vault → register-project → bootstrap
   (M6). Records live in memory for the boot (progress streams unchanged
   over the shell — live overlay at the ws/HTTP entry points; the
