@@ -1098,6 +1098,7 @@ const buildAppUnderTest = (options?: {
           }),
         } satisfies WipSnapshotReactor["Service"]),
       ),
+    ).pipe(
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(
