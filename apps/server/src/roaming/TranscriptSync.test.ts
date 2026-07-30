@@ -3,6 +3,7 @@ import {
   ROAMING_TRANSCRIPT_MAX_BYTES,
   EventId,
   MessageId,
+  ProviderInstanceId,
   ThreadId,
   TurnId,
   WorkspaceProjectId,
@@ -99,6 +100,33 @@ describe("buildTranscriptPayload", () => {
     assert.equal(payload.activities[0]?.payloadJson, '{"path":"auth.ts"}');
     assert.equal(payload.parked, undefined);
     assert.equal(payload.truncated, undefined);
+  });
+
+  it("carries the source model selection reduced (M5.5 resume default)", () => {
+    const payload = buildTranscriptPayload({
+      thread: makeThread({
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+      } as Partial<OrchestrationThread>),
+      workspaceProjectId: WORKSPACE_PROJECT_ID,
+      capturedAt: "2026-07-22T11:00:00.000Z",
+    });
+    assert.deepEqual(payload.modelSelection, {
+      instanceId: "codex",
+      model: "gpt",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+    // Empty options stay off the wire.
+    const bare = buildTranscriptPayload({
+      thread: makeThread(),
+      workspaceProjectId: WORKSPACE_PROJECT_ID,
+      capturedAt: "2026-07-22T11:00:00.000Z",
+    });
+    assert.deepEqual(bare.modelSelection, { instanceId: "codex", model: "gpt" });
+    assert.equal(bare.modelSelection && "options" in bare.modelSelection, false);
   });
 
   it("marks parked captures", () => {
