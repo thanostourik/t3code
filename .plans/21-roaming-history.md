@@ -2138,3 +2138,41 @@ harness's prebuilt web dist on B): pairing-token login, mirrored row under
 the project tagged with the source machine, /mirrored read-only view with
 "From another machine"/"Handed off" chips, brief panel with Edit, and the
 Continue here action — screenshotted, matches the design.
+
+## 2026-07-30 — M5 field session: surfacing rejected, M5.5 corrective queued
+
+First real two-machine use of M5 (desktop authoring, laptop reading).
+Verdict from the user: the mechanics work ("everything works as intended,
+almost") but the surfaced UX is emphatically rejected. Verbatim findings,
+each now a binding 2026-07-30 correction in the plan:
+
+- **Duplicate rows:** every desktop thread showed twice on the laptop —
+  the live thin-client row AND the mirrored row ("imagine having 100
+  threads, so that makes it 200"). Root cause is a genuine design miss
+  against canonical step 3: when the peer is online its threads are
+  already in the list via the thin client, so the mirror must stay
+  invisible behind them and surface only when the peer is unreachable
+  (the offline-project-row model, which M5 failed to apply to threads).
+- **Mandatory-feeling hand-off:** resume appeared to require preparing
+  each thread on the desktop first. Corrected: the brief is generated on
+  the resuming machine from its local transcript copy; hand-off becomes
+  an optional nicety.
+- **Silent model pick on resume:** with no project default, resume fell
+  back to providers[0]'s default model — a gpt-5.6-luna conversation
+  resumed on fable-5, the most expensive available. Corrected: resume is
+  a normal draft; the user picks the model; the source thread's model
+  (newly carried in the transcript payload) is the default; never
+  auto-start a turn.
+- **Row survives Continue-here:** the mirrored row stayed next to the
+  new local thread. Falls out of the duplicate-row fix (supersede, don't
+  juxtapose).
+- **Bug — author sees its own corpse:** after deleting the source thread
+  on the desktop, the row vanished on the laptop but a "mirrored" row for
+  it appeared on the DESKTOP — the author-side exclusion joins on the
+  local projection row, which can disappear before the tombstone lands.
+- **Bug — header layout:** the mirrored view's Continue-here button
+  rendered under the window controls (missing title-bar inset classes).
+- **Cosmetic:** "Synced" (desktop) vs "Sync on" (laptop) copy mismatch.
+
+M5.5 scope and exit criteria are the milestone row; implementation not
+started in this session (recorded first, per the plan-first contract).
