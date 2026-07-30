@@ -1,11 +1,16 @@
 // M5 briefs + transcripts acceptance on the fresh M0 two-instance harness.
 // Exit criteria: threads from A readable on B (mirrored transcript, shell
 // row, never in A's own mirrored list); park produces an editable brief that
-// mirrors; resume seeds a new local thread on B from the brief; deletion
-// mirrors as a tombstone; and B's restart/reconcile never tombstones A's
-// live transcripts (author-only writes — the M5 review critical).
-// Transcripts ride the P2P mirror only, so there are no transport variants.
-// The canonical pairing walk remains accept-m2.5.mjs and is rerun separately.
+// mirrors; deletion mirrors as a tombstone; and B's restart/reconcile never
+// tombstones A's live transcripts (author-only writes — the M5 review
+// critical). Transcripts ride the P2P mirror only, so there are no
+// transport variants. The canonical pairing walk remains accept-m2.5.mjs
+// and is rerun separately.
+//
+// M5.5 note: the product resume flow is now a pre-filled DRAFT (see
+// accept-m55.mjs); this script's resume leg survives as the server-visible
+// half only — a new local thread created with the brief text — which still
+// pins "resume threads are ordinary local threads, never mirrored back".
 
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
