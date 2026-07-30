@@ -48,11 +48,12 @@ the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
 The branch-aware ship gate is closed. M4 (takeover + divergence) done
 2026-07-18 (PRs #63–#69), followed by the 2026-07-19→22 remediation
 series (PRs #71–#81). M5 (briefs + transcripts) done 2026-07-22
-(PRs #82–#86; results in the history file). The 2026-07-30 field session
-rejected M5's surfaced UX (duplicate rows, mandatory hand-off, silent
-model pick) — corrections are binding decisions below and run as
-**M5.5 (corrective)** before M6. Queue: M5.5, M6 bootstrap recipes,
-M7 cloud store. M5.5 is next; no milestone is active.
+(PRs #82–#86). The 2026-07-30 field session rejected M5's surfaced UX;
+the corrections are binding decisions below and landed as **M5.5** on
+2026-07-31 (PRs #89–#94; results in the history file). One field check
+remains open from M5.5 acceptance: a visible-window kill-the-desktop walk
+(the harness browser is headless — see history). Queue: M6 bootstrap
+recipes, M7 cloud store. No milestone is active.
 
 ## Thesis
 
@@ -299,76 +300,48 @@ work. Blocked-but-unserviceable states render as plain waiting states, and
 every blocked state remains a non-dead-end. Mechanics (schemas, refs,
 routes, invariants) in the reference.
 
-### Briefs + transcripts (M5)
+### Briefs + transcripts (M5, surfacing corrected in M5.5)
 
 Mirror *projected transcripts*, not raw orchestration events: a reduced
 presentation payload (thread meta + messages + plans + size-capped
-activity entries — the full thread projection medians ~0.7 MB and peaks
->10 MB) built from the committed projections at turn boundaries, keyed by
-threadId, written only by the authoring machine; deletion/archival
-mirrors as a tombstone payload. Mirrored threads appear inside their
-project's ONE thread list tagged with the source machine and render
-read-only, never imported into the local event log — no cross-machine
-event conflict model exists because no import path exists. Consent is the
+activity entries + the source modelSelection — the full thread projection
+medians ~0.7 MB and peaks >10 MB) built from the committed projections at
+turn boundaries, keyed by threadId, written only by the authoring
+machine; deletion/archival mirrors as a tombstone payload. Consent is the
 "Conversations" pairing row (`roamingTranscriptSync`, one decision for
 both machines); transcripts travel P2P only, never the origin host.
 
-Park = final `parked` transcript capture + consent-gated final WIP
-snapshot (skip-not-fail) + agent-written resumption brief via the
-background text-generation seam (never a thread turn; deterministic
-fallback with a notice when no provider answers). The brief is editable
-on either machine (new blob versions, newest-wins); `parked` sticks until
-the author sends a new message. Resume = a NEW local thread in the local
-checkout, seeded by the existing first-turn bootstrap with the brief as
-the visible first user message; no local checkout → disabled-with-reason
-(materialize first). Accepted v1 gaps: attachment bytes don't roam;
-file/diff affordances inert in the read-only view. Deliberately no
+**One row per thread, ever (M5.5).** A mirrored transcript is invisible
+redundancy behind the live thin-client rows — the offline-project-row
+model applied to threads. The thread appears once in the project's ONE
+thread list: live while its author environment is reachable, as a greyed
+read-only fallback row (from the local copy) when it is not. The gate is
+client-side — reachability is a property of the client's connection —
+from one shared derived set per commit; a remote counts reachable only
+while its shell is `live` (a dead peer's retry loop flaps `synchronizing`
+forever, so any looser rule oscillates). The server shell lists every
+peer-authored, non-tombstoned, non-superseded transcript: authorship is
+excluded structurally in SQL (a mirrored row must come from a paired
+peer — this machine is never its own peer, so the author can never see
+its own thread as mirrored under any delete/tombstone ordering), and a
+source thread continued locally is superseded by the resumed thread via a
+machine-local, never-mirrored link while that thread exists.
+
+**Resume is a normal draft (M5.5).** Continue-here opens the ordinary
+new-thread draft composer pre-filled with the brief; the user picks the
+model (the source thread's selection is the default only when that
+provider instance is enabled here and the model exists locally) and
+nothing is auto-started. The brief is generated ON the resuming machine
+from its local transcript copy (background text-generation seam,
+deterministic-digest fallback with a notice); an existing hand-off brief
+wins as the pre-reviewed nicety. Resume therefore needs zero preparation
+on the source machine — hand-off (park = final `parked` capture +
+consent-gated WIP snapshot + pre-generated editable brief) survives as
+exactly that nicety. An existing unsent draft for the project is never
+discarded: its session is reused and the brief lands above the unsent
+text. Accepted v1 gaps: attachment bytes don't roam; file/diff
+affordances inert in the read-only view. Deliberately no
 provider-session transplants. Mechanics in the reference.
-
-**Superseded in part (2026-07-30, M5.5 pending):** the shipped surfacing —
-separate mirrored rows, a dedicated read-only route reachable while the
-peer is live, hand-off as the implied entry to resume, and a
-provider-default model fallback on resume — is rejected by the binding
-M5.5 corrections above. Target model: mirrored transcripts stay invisible
-behind the live thin-client rows and surface only for an unreachable
-peer; resume opens a pre-filled draft (brief generated locally, model
-chosen by the user, source model as default — the transcript payload
-gains the source modelSelection); hand-off optional. This paragraph is
-deleted when M5.5 lands.
-
-**M5.5 analysis pass (2026-07-31) — mechanism decisions, recorded before
-code:**
-
-- The one-row gate lives in the WEB CLIENT, not the server shell: whether
-  the author machine's live thin-client rows are present is a property of
-  the client's connection to that environment (the same environment-status
-  signal that greys offline project rows), which the server cannot
-  observe. The server shell keeps listing every non-author,
-  non-tombstoned transcript; the client hides mirrored rows while their
-  `authorEnvironmentId` is reachable.
-- Correction (e) is fixed structurally in SQL: the shell query excludes
-  transcripts authored by this machine's own environmentId — race-proof
-  under any event ordering. The existing local-projection-row exclusion
-  stays as a second belt.
-- Correction (d) needs a durable source→resumed link that does not exist
-  today: a new local-only (never mirrored) table maps source threadId →
-  resumed local threadId, written when the resume draft's first turn
-  creates the local thread; the shell query excludes superseded sources
-  while the resumed thread exists.
-- Resume-as-draft reuses the existing draft composer
-  (`/draft/$draftId` + composer draft store) — no new composer surface.
-  The brief is produced on the resuming machine by the existing
-  background text-generation seam (its transcript-text input is
-  source-agnostic; deterministic fallback unchanged) from the local
-  transcript copy; an existing hand-off brief wins as the pre-reviewed
-  nicety.
-- The transcript payload's new `modelSelection` is optional with the
-  schema version unchanged — pre-M5.5 payloads still decode; resume
-  defaults to it only when that provider/model is available locally,
-  otherwise the composer's normal default stands.
-- Correction (f): the healthy-enabled sync state renders ONE label on
-  both machines; machine-local freshness detail (last sent/received age)
-  moves to the tooltip.
 
 ### Bootstrap recipes (M6)
 
@@ -411,7 +384,7 @@ detail live in the history and reference files.
 | M3.8 — Branch-aware sync model (SHIP GATE) | Full working-state snapshots, ancestry classifier, safe HEAD transitions, parking/takeover, branch-aware materialize. | ✅ 2026-07-11. |
 | M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | ✅ 2026-07-18. |
 | M5 — Briefs + transcripts | "Conversations" pairing row + mirrored read-only threads + park/brief/resume. | ✅ 2026-07-22. |
-| M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | Both machines online: every thread appears exactly once per machine. Peer offline: its threads stay in the list, greyed, readable. Continue here opens a pre-filled composer, source model defaulted, nothing auto-started. Delete on the author removes the thread everywhere including the author's own view. Canonical re-run. |
+| M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | ✅ 2026-07-31 (PRs #89–#94; one visible-window field check pending — see history). |
 | M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 

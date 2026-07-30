@@ -2176,3 +2176,65 @@ each now a binding 2026-07-30 correction in the plan:
 
 M5.5 scope and exit criteria are the milestone row; implementation not
 started in this session (recorded first, per the plan-first contract).
+
+## 2026-07-31 — M5.5 surfacing corrective landed (PRs #89–#94)
+
+Executed as: analysis-pass docs (#89) → contracts (#90) → server (#91) →
+web (#92) → independent-review fixes (#93) → one-row hardening found in
+the browser walk (#94). All 2026-07-30 binding corrections shipped:
+
+- **(a) one row per thread** — client-side gate on a single derived
+  reachability atom (`live`-only rule), prop-drilled so both row kinds
+  share a vintage; fallback rows greyed, only for unreachable authors.
+- **(b) resume-as-draft** — Continue-here opens the ordinary draft
+  composer pre-filled; brief generated on the resuming machine
+  (stateless `briefs/generate`); source model is the picker default only
+  when selectable locally; nothing auto-starts.
+- **(c) hand-off optional** — resume verified end-to-end with the source
+  machine DEAD the whole time and no park ever run.
+- **(d) supersession** — machine-local `roaming_thread_resumptions`
+  (migration 041), link recorded at draft creation with the draft's
+  future threadId; row returns if the resumed thread is deleted.
+- **(e) author delete race** — peers-membership SQL exclusion (this
+  machine is never its own peer); tight-loop acceptance probe of the
+  tombstone window.
+- **(f) status copy** — one "Synced" label for all non-error,
+  non-blocked states on both machines; detail moved to tooltips.
+- Header-inset bug fixed (mirrored view gets the chat header's title-bar
+  treatment).
+
+Independent review (codex over the combined diff) found two real bugs,
+both fixed in #93: Continue-here could silently DELETE the project's
+stored unsent draft (the store drops the previous draft when a new
+draftId takes the logical-project mapping — fixed by reusing the stored
+session and putting the brief above unsent text), and model seeding
+ignored local availability (fixed: enabled instance + known model slug
+required).
+
+Acceptance: accept-m55 ALL PASS (twice — first build and final build),
+accept-m2.5 canonical ALL PASS (twice), server/roaming/projection unit
+suites green. Browser walk on the harness verified the UI criteria
+end-to-end, including pairing through the real dialog (sync-options
+step), one live row while both online (mirror blob present server-side
+but invisible), one greyed readable fallback with the peer dead,
+materialize-from-mirror while dead, and resume-as-draft.
+
+**Field-session-grade narrative (the walk's detour):** the harness
+browser tab is HIDDEN, which (1) freezes rAF-driven auto-animate exit
+animations — removed sidebar rows persist as position:absolute DOM
+corpses that made every state transition look like a duplicated row, and
+(2) throttles schedulers so mid-session convergence can't be observed.
+Hours went into chasing "impossible" React states before the corpse
+signature (overlapping rects + frozen animation) identified the
+instrument as the culprit. Two real findings came out of the chase: the
+initial per-component reachability computations DID latch different
+vintages (fixed: one atom, one read, prop-drilled), and any rule
+counting `synchronizing` as reachable oscillates on a dead peer's retry
+loop (fixed: `live`-only). Residual: one visible-window
+kill-the-desktop check in real use; if rows fail to flip without a
+reload there, the suspect is the client shell-status pipeline, not the
+row logic.
+
+Superseded by this record: M5's "mirrored rows appear tagged with the
+source machine (always visible)" surfacing and the resume-as-first-turn
+flow, per the 2026-07-30 corrections.
