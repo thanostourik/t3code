@@ -6,9 +6,11 @@
  * browser sends the session cookie, desktop sends the bearer token.
  */
 import {
+  ROAMING_BRIEF_GENERATE_PATH,
   ROAMING_BRIEF_SAVE_PATH,
   ROAMING_MATERIALIZE_PATH,
   ROAMING_THREAD_PARK_PATH,
+  ROAMING_THREAD_RESUMED_PATH,
   ROAMING_THREAD_TRANSCRIPT_PATH,
   ROAMING_WIP_DIVERGENCE_PATH,
   ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
@@ -32,10 +34,14 @@ import {
   RoamingWipDivergenceResponse,
   RoamingWipTakeoverRequest,
   RoamingWipTakeoverResponse,
+  RoamingBriefGenerateRequest,
+  RoamingBriefGenerateResponse,
   RoamingBriefSaveRequest,
   RoamingBriefSaveResponse,
   RoamingThreadParkRequest,
   RoamingThreadParkResponse,
+  RoamingThreadResumedRequest,
+  RoamingThreadResumedResponse,
   RoamingThreadTranscriptRequest,
   RoamingThreadTranscriptResponse,
 } from "@t3tools/contracts";
@@ -230,6 +236,32 @@ export function saveRoamingBrief(body: RoamingBriefSaveRequest): Promise<Roaming
     path: ROAMING_BRIEF_SAVE_PATH,
     requestSchema: RoamingBriefSaveRequest,
     responseSchema: RoamingBriefSaveResponse,
+    body,
+  });
+}
+
+/** Generate a resume brief on THIS machine from its local transcript copy (M5.5). */
+export function generateRoamingBrief(
+  body: RoamingBriefGenerateRequest,
+): Promise<RoamingBriefGenerateResponse> {
+  return postRoaming({
+    operation: "roaming.brief-generate",
+    path: ROAMING_BRIEF_GENERATE_PATH,
+    requestSchema: RoamingBriefGenerateRequest,
+    responseSchema: RoamingBriefGenerateResponse,
+    body,
+  });
+}
+
+/** Record that a mirrored thread was continued locally — supersedes its fallback row (M5.5). */
+export function markRoamingThreadResumed(
+  body: RoamingThreadResumedRequest,
+): Promise<RoamingThreadResumedResponse> {
+  return postRoaming({
+    operation: "roaming.thread-resumed",
+    path: ROAMING_THREAD_RESUMED_PATH,
+    requestSchema: RoamingThreadResumedRequest,
+    responseSchema: RoamingThreadResumedResponse,
     body,
   });
 }
