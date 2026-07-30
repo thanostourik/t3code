@@ -43,7 +43,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { deriveTimelineEntries, deriveWorkLogEntries } from "../session-logic";
-import { useEnvironmentRoamingThreads, useProjects } from "../state/entities";
+import { readThreadShell, useEnvironmentRoamingThreads, useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useRoamingProjects } from "../state/entities";
 import { primaryServerProvidersAtom, primaryServerSettingsAtom } from "../state/server";
@@ -204,15 +204,19 @@ export function MirroredThreadView() {
   );
 
   // The source thread's model is only ever the resume draft's DEFAULT, and
-  // only when that provider instance exists here — never a silent pick on a
-  // different provider (M5.5 b). Null = the composer's own default stands.
+  // only when it is actually selectable here: enabled provider instance AND
+  // a model this machine knows — never a silent pick on a different or
+  // unavailable provider (M5.5 b). Null = the composer's own default stands.
   const sourceModelSelection = useMemo((): ModelSelection | null => {
     const reduced = state.transcript?.modelSelection;
     if (reduced === undefined) {
       return null;
     }
     const provider = providers.find((candidate) => candidate.instanceId === reduced.instanceId);
-    if (provider === undefined) {
+    if (provider === undefined || !provider.enabled) {
+      return null;
+    }
+    if (!provider.models.some((model) => model.slug === reduced.model)) {
       return null;
     }
     return createModelSelection(provider.instanceId, reduced.model, reduced.options ?? null);
@@ -266,34 +270,61 @@ export function MirroredThreadView() {
         }
         // An ordinary new-thread draft: prompt pre-filled, model picked by
         // the user in the composer, nothing auto-started.
-        const draftId = newDraftId();
-        const draftThreadId = newThreadId();
-        const { setLogicalProjectDraftThreadId, applyStickyState, setModelSelection, setPrompt } =
-          useComposerDraftStore.getState();
+        const {
+          getComposerDraft,
+          getDraftSessionByLogicalProjectKey,
+          setLogicalProjectDraftThreadId,
+          applyStickyState,
+          setModelSelection,
+          setPrompt,
+        } = useComposerDraftStore.getState();
         const projectRef = scopeProjectRef(primaryEnvironmentId, localProject.id);
         const logicalProjectKey = deriveLogicalProjectKeyFromSettings(
           localProject,
           projectGroupingSettings,
         );
-        const envMode = primaryServerSettings.defaultThreadEnvMode;
-        setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
-          threadId: draftThreadId,
-          createdAt: new Date().toISOString(),
-          branch: null,
-          worktreePath: null,
-          envMode,
-          startFromOrigin: resolveNewDraftStartFromOrigin({
+        // Installing a fresh draftId would DELETE the project's stored
+        // unsent draft, prompt included — reuse its session instead and put
+        // the brief above any unsent text so nothing is discarded.
+        const stored = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+        const storedReusable =
+          stored != null &&
+          stored.promotedTo == null &&
+          readThreadShell(scopeThreadRef(stored.environmentId, stored.threadId)) === null;
+        const draftId = storedReusable ? stored.draftId : newDraftId();
+        const draftThreadId = storedReusable ? stored.threadId : newThreadId();
+        if (storedReusable) {
+          // Re-point the session at the local member (a stored draft may
+          // target a remote member of the logical project); same draftId, so
+          // nothing is deleted and the composer text survives.
+          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
+            threadId: draftThreadId,
+          });
+        } else {
+          const envMode = primaryServerSettings.defaultThreadEnvMode;
+          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
+            threadId: draftThreadId,
+            createdAt: new Date().toISOString(),
+            branch: null,
+            worktreePath: null,
             envMode,
-            newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
-          }),
-        });
-        applyStickyState(draftId);
+            startFromOrigin: resolveNewDraftStartFromOrigin({
+              envMode,
+              newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
+            }),
+          });
+          applyStickyState(draftId);
+        }
         if (sourceModelSelection !== null) {
           // After sticky state so the source thread's selection wins as the
           // default; replaceOptions because it is a complete snapshot.
           setModelSelection(draftId, sourceModelSelection, { replaceOptions: true });
         }
-        setPrompt(draftId, seedText);
+        const existingPrompt = getComposerDraft(draftId)?.prompt ?? "";
+        setPrompt(
+          draftId,
+          existingPrompt.trim().length > 0 ? `${seedText}\n\n${existingPrompt}` : seedText,
+        );
         // Record the supersession link now: the draft already knows the
         // thread id it will promote to, and the fallback row only hides
         // once that thread actually exists (M5.5 d). Best-effort — a failed
