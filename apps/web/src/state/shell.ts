@@ -15,8 +15,11 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
+import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
+import { environmentPresentations } from "./presentation";
+import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
 export const environmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
@@ -93,3 +96,39 @@ export const environmentShellStatusesAtom = Atom.make((get) => {
   }
   return statuses;
 }).pipe(Atom.withLabel("environment-shell-statuses"));
+
+/**
+ * Environments whose rows are trustworthy as LIVE rows (roaming M5.5 a):
+ * the primary and desktop-local sandboxes always; a remote only while its
+ * shell is `live` — an active, synchronized connection. A thread must
+ * render as exactly one row, ever: a normal row while its environment is
+ * reachable, the greyed mirrored fallback when it is not — never both.
+ *
+ * Deliberately STRICTER than the project rows' rule (which counts
+ * `synchronizing` as live to avoid reconnect flapping): a dead peer's
+ * retry loop flaps cached ↔ synchronizing forever, so any rule that
+ * accepts `synchronizing` oscillates — and components that render at
+ * different instants latch different verdicts, committing a thread as a
+ * live row AND a fallback row at once (observed). `live` is stable: a
+ * dead peer can never reach it, and a genuine reconnect converges in one
+ * flip. ONE derived atom so every consumer decides from the same
+ * snapshot.
+ */
+export const reachableEnvironmentIdsAtom = Atom.make((get) => {
+  const reachable = new Set<EnvironmentId>();
+  const primaryEnvironmentId = get(primaryEnvironmentIdAtom);
+  if (primaryEnvironmentId !== null) {
+    reachable.add(primaryEnvironmentId);
+  }
+  const statuses = get(environmentShellStatusesAtom);
+  for (const [environmentId, presentation] of get(environmentPresentations.presentationsAtom)) {
+    if (isDesktopLocalConnectionTarget(presentation.entry.target)) {
+      reachable.add(environmentId);
+      continue;
+    }
+    if (statuses.get(environmentId) === "live") {
+      reachable.add(environmentId);
+    }
+  }
+  return reachable;
+}).pipe(Atom.withLabel("reachable-environment-ids"));

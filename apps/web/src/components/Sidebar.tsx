@@ -142,7 +142,7 @@ import {
   useRoamingMaterializations,
 } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
-import { environmentShellStatusesAtom } from "../state/shell";
+import { environmentShellStatusesAtom, reachableEnvironmentIdsAtom } from "../state/shell";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
@@ -2619,33 +2619,43 @@ function useMaterialize() {
  * stays invisible behind them — one row per thread, ever (the
  * offline-project-row model applied to threads). Opening a fallback row
  * shows the read-only transcript from the local copy.
+ *
+ * `reachableEnvironmentIds` is passed down from a single read in the
+ * projects content — computing it per component was observed tearing
+ * during reconnect flapping (two components committed different
+ * reachability vintages) and rendered a thread as a live row AND a
+ * fallback row at once.
  */
-function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null }) {
+function SidebarMirroredThreadRows(props: {
+  workspaceProjectId: string | null;
+  reachableEnvironmentIds: ReadonlySet<string>;
+}) {
+  const { reachableEnvironmentIds } = props;
   const router = useRouter();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
   const { environments } = useEnvironments();
-  const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
-  // Same liveness rule as the project rows (single point above): live or
-  // synchronizing counts as reachable, an errored connection counts as dead.
-  const reachableAuthorIds = useMemo(() => {
-    const reachable = new Set<string>();
-    for (const environment of environments) {
-      if (environment.connection.phase === "error") continue;
-      const status = environmentShellStatuses.get(environment.environmentId);
-      if (status === "live" || status === "synchronizing") {
-        reachable.add(environment.environmentId);
+  const allThreadShells = useThreadShells();
+  // Structural belt on top of the author-reachability gate: a fallback row
+  // never renders while ANY reachable environment holds a live shell for
+  // the same thread.
+  const liveRowThreadIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const shell of allThreadShells) {
+      if (reachableEnvironmentIds.has(shell.environmentId)) {
+        ids.add(shell.id);
       }
     }
-    return reachable;
-  }, [environments, environmentShellStatuses]);
+    return ids;
+  }, [allThreadShells, reachableEnvironmentIds]);
   if (props.workspaceProjectId === null) {
     return null;
   }
   const rows = roamingThreads.filter(
     (thread) =>
       thread.workspaceProjectId === props.workspaceProjectId &&
-      !reachableAuthorIds.has(thread.authorEnvironmentId),
+      !reachableEnvironmentIds.has(thread.authorEnvironmentId) &&
+      !liveRowThreadIds.has(thread.threadId),
   );
   if (rows.length === 0) {
     return null;
@@ -2690,7 +2700,10 @@ function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null })
   );
 }
 
-function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
+function SidebarOfflineProjectRow(props: {
+  entry: EnvironmentRoamingProject;
+  reachableEnvironmentIds: ReadonlySet<string>;
+}) {
   const { environmentId, roamingProject } = props.entry;
   const materializations = useRoamingMaterializations();
   const materialization =
@@ -2777,7 +2790,10 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
         )}
       </div>
       <SidebarMenuSub className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1 py-0 sm:mx-1 sm:px-1.5">
-        <SidebarMirroredThreadRows workspaceProjectId={roamingProject.workspaceProjectId} />
+        <SidebarMirroredThreadRows
+          workspaceProjectId={roamingProject.workspaceProjectId}
+          reachableEnvironmentIds={props.reachableEnvironmentIds}
+        />
       </SidebarMenuSub>
       {materializeDialog}
     </SidebarMenuItem>
@@ -2788,7 +2804,9 @@ export default function Sidebar() {
   const projects = useProjects();
   const roamingProjects = useRoamingProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const threads = useThreadShells();
+  const reachableEnvironmentIds = useAtomValue(reachableEnvironmentIdsAtom);
+  const allThreads = useThreadShells();
+  const threads = useMemo(() => allThreads.filter((thread) => reachableEnvironmentIds.has(thread.environmentId)), [allThreads, reachableEnvironmentIds]);
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -5643,8 +5661,8 @@ export default function Sidebar() {
             </div>
           ) : null}
         </SidebarGroup>
-        <SidebarMenu>{Array.from(new Set((scopedProjectGroup ? [scopedProjectGroup] : projectGroups).flatMap((project) => project.memberProjects.flatMap((member) => member.workspaceProjectId ? [member.workspaceProjectId] : [])))).map((workspaceProjectId) => <SidebarMirroredThreadRows key={workspaceProjectId} workspaceProjectId={workspaceProjectId} />)}</SidebarMenu>
-        <SidebarMenu>{offlineRoamingProjects.map((entry) => <SidebarOfflineProjectRow key={`${entry.environmentId}:${entry.roamingProject.workspaceProjectId}`} entry={entry} />)}</SidebarMenu>
+        <SidebarMenu>{Array.from(new Set((scopedProjectGroup ? [scopedProjectGroup] : projectGroups).flatMap((project) => project.memberProjects.flatMap((member) => member.workspaceProjectId ? [member.workspaceProjectId] : [])))).map((workspaceProjectId) => <SidebarMirroredThreadRows key={workspaceProjectId} workspaceProjectId={workspaceProjectId} reachableEnvironmentIds={reachableEnvironmentIds} />)}</SidebarMenu>
+        <SidebarMenu>{offlineRoamingProjects.map((entry) => <SidebarOfflineProjectRow key={`${entry.environmentId}:${entry.roamingProject.workspaceProjectId}`} entry={entry} reachableEnvironmentIds={reachableEnvironmentIds} />)}</SidebarMenu>
       </SidebarContent>
       <SidebarChromeFooter />
     </>
