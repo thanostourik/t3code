@@ -111,6 +111,7 @@ import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
+import { RoamingThreadResumptions } from "./roaming/RoamingThreadResumptions.ts";
 import { TranscriptSync } from "./roaming/TranscriptSync.ts";
 import { Materializer } from "./roaming/Materializer.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -1072,6 +1073,7 @@ const buildAppUnderTest = (options?: {
           ...options?.layers?.materializer,
         } satisfies Materializer["Service"]),
       ),
+      Layer.provide(Layer.succeed(RoamingThreadResumptions, { record: () => Effect.void })),
       Layer.provide(Layer.mock(RoamingService)({})),
       Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
       Layer.provide(
@@ -1081,6 +1083,7 @@ const buildAppUnderTest = (options?: {
           captureAll: () => Effect.void,
           park: () => Effect.die("unused"),
           saveBrief: () => Effect.die("unused"),
+          generateBrief: () => Effect.die("unused"),
         } satisfies TranscriptSync["Service"]),
       ),
       Layer.provide(

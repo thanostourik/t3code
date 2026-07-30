@@ -18,6 +18,7 @@
  * available, with an honest notice.
  */
 import {
+  ModelSelection,
   ROAMING_BRIEF_MAX_CHARS,
   ROAMING_TRANSCRIPT_MAX_ACTIVITY_PAYLOAD_BYTES,
   ROAMING_TRANSCRIPT_MAX_BYTES,
@@ -91,6 +92,16 @@ export class TranscriptSync extends Context.Service<
       threadId: ThreadId,
       markdown: string,
     ) => Effect.Effect<RoamingBriefPayload, TranscriptBriefError>;
+    /**
+     * Produce a brief ON THIS machine from its local transcript copy (M5.5 —
+     * resume needs zero preparation on the source machine). Stateless: no
+     * blob write; the markdown seeds the resume draft. Generation uses the
+     * transcript's carried model selection; a missing/unavailable provider
+     * falls back to the deterministic digest with a notice.
+     */
+    readonly generateBrief: (
+      threadId: ThreadId,
+    ) => Effect.Effect<{ markdown: string; notices: string[] }, TranscriptBriefError>;
   }
 >()("t3/roaming/TranscriptSync") {}
 
@@ -269,6 +280,8 @@ const CAPTURE_EVENT_TYPES = new Set([
 ]);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+const decodeModelSelection = Schema.decodeUnknownEffect(ModelSelection);
 
 const make = Effect.gen(function* () {
   const peers = yield* RoamingPeers;
@@ -575,6 +588,65 @@ const make = Effect.gen(function* () {
       return { brief, notices };
     });
 
+  const generateBrief: TranscriptSync["Service"]["generateBrief"] = (threadId) =>
+    Effect.gen(function* () {
+      const transcript = yield* readOwnTranscript(threadId);
+      if (transcript === null) {
+        return yield* new TranscriptBriefError({ reason: "thread-unknown" });
+      }
+      const payload = transcript.payload;
+      const notices: string[] = [];
+      // Provider CLIs need a working directory; the materialized local
+      // checkout when one exists, else the process cwd.
+      const project = yield* projectRepository.listAll().pipe(
+        Effect.map((projects) =>
+          projects.find((candidate) => candidate.workspaceProjectId === payload.workspaceProjectId),
+        ),
+        Effect.orElseSucceed(() => undefined),
+      );
+      const modelSelection =
+        payload.modelSelection === undefined
+          ? null
+          : yield* decodeModelSelection(payload.modelSelection).pipe(
+              Effect.orElseSucceed(() => null),
+            );
+      const fallback = (notice: string) => {
+        notices.push(notice);
+        return fallbackBriefMarkdown(payload);
+      };
+      const markdown =
+        modelSelection === null
+          ? fallback(
+              "Brief was assembled without an agent (the conversation carries no usable model) — edit it before sending.",
+            )
+          : yield* textGeneration
+              .generateResumptionBrief({
+                cwd: project?.workspaceRoot ?? ".",
+                title: payload.title,
+                branch: payload.branch,
+                transcriptText: transcriptTextForBrief(payload),
+                modelSelection,
+              })
+              .pipe(
+                Effect.map((result) => result.markdown),
+                Effect.catch((error) =>
+                  Effect.logWarning("roaming transcripts: resume brief fell back", {
+                    threadId,
+                    error,
+                  }).pipe(
+                    Effect.andThen(() =>
+                      Effect.succeed(
+                        fallback(
+                          "Brief was assembled without an agent (no provider could generate it) — edit it before sending.",
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+      return { markdown: markdown.slice(0, ROAMING_BRIEF_MAX_CHARS), notices };
+    });
+
   const saveBrief: TranscriptSync["Service"]["saveBrief"] = (threadId, markdown) =>
     Effect.gen(function* () {
       // Anchor on an existing brief or transcript — a brief for a thread this
@@ -659,7 +731,14 @@ const make = Effect.gen(function* () {
       );
     });
 
-  return { start, captureThread, captureAll, park, saveBrief } satisfies TranscriptSync["Service"];
+  return {
+    start,
+    captureThread,
+    captureAll,
+    park,
+    saveBrief,
+    generateBrief,
+  } satisfies TranscriptSync["Service"];
 });
 
 export const layer = Layer.effect(TranscriptSync, make);

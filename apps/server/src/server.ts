@@ -82,6 +82,7 @@ import { layer as PeerMirrorLayer } from "./roaming/PeerMirror.ts";
 import { layer as RoamingServiceLayer } from "./roaming/RoamingService.ts";
 import { layer as VaultSyncLayer } from "./roaming/VaultSync.ts";
 import { layer as TranscriptSyncLayer } from "./roaming/TranscriptSync.ts";
+import { layer as RoamingThreadResumptionsLayer } from "./roaming/RoamingThreadResumptions.ts";
 import { layer as MaterializerLayer } from "./roaming/Materializer.ts";
 import { layer as WipSnapshotReactorLayer } from "./roaming/WipSnapshotReactor.ts";
 import { layer as RoamingAutoEnrollLayer } from "./roaming/RoamingAutoEnroll.ts";
@@ -289,6 +290,7 @@ const PlatformServicesLive = Layer.unwrap(
 
 const RoamingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(TranscriptSyncLayer),
+  Layer.provideMerge(RoamingThreadResumptionsLayer),
   Layer.provideMerge(WipSnapshotReactorLayer),
   Layer.provideMerge(MaterializerLayer),
   Layer.provideMerge(RoamingAutoEnrollLayer),
