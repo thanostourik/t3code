@@ -336,6 +336,40 @@ chosen by the user, source model as default — the transcript payload
 gains the source modelSelection); hand-off optional. This paragraph is
 deleted when M5.5 lands.
 
+**M5.5 analysis pass (2026-07-31) — mechanism decisions, recorded before
+code:**
+
+- The one-row gate lives in the WEB CLIENT, not the server shell: whether
+  the author machine's live thin-client rows are present is a property of
+  the client's connection to that environment (the same environment-status
+  signal that greys offline project rows), which the server cannot
+  observe. The server shell keeps listing every non-author,
+  non-tombstoned transcript; the client hides mirrored rows while their
+  `authorEnvironmentId` is reachable.
+- Correction (e) is fixed structurally in SQL: the shell query excludes
+  transcripts authored by this machine's own environmentId — race-proof
+  under any event ordering. The existing local-projection-row exclusion
+  stays as a second belt.
+- Correction (d) needs a durable source→resumed link that does not exist
+  today: a new local-only (never mirrored) table maps source threadId →
+  resumed local threadId, written when the resume draft's first turn
+  creates the local thread; the shell query excludes superseded sources
+  while the resumed thread exists.
+- Resume-as-draft reuses the existing draft composer
+  (`/draft/$draftId` + composer draft store) — no new composer surface.
+  The brief is produced on the resuming machine by the existing
+  background text-generation seam (its transcript-text input is
+  source-agnostic; deterministic fallback unchanged) from the local
+  transcript copy; an existing hand-off brief wins as the pre-reviewed
+  nicety.
+- The transcript payload's new `modelSelection` is optional with the
+  schema version unchanged — pre-M5.5 payloads still decode; resume
+  defaults to it only when that provider/model is available locally,
+  otherwise the composer's normal default stands.
+- Correction (f): the healthy-enabled sync state renders ONE label on
+  both machines; machine-local freshness detail (last sent/received age)
+  moves to the tooltip.
+
 ### Bootstrap recipes (M6)
 
 The clone was never the expensive part — setup is. First materialization
