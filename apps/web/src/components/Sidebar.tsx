@@ -125,7 +125,7 @@ import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
-import { environmentShellStatusesAtom } from "../state/shell";
+import { environmentShellStatusesAtom, reachableEnvironmentIdsAtom } from "../state/shell";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -900,6 +900,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 interface SidebarProjectThreadListProps {
   projectKey: string;
   workspaceProjectId: string | null;
+  reachableEnvironmentIds: ReadonlySet<string>;
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
@@ -952,6 +953,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   const {
     projectKey,
     workspaceProjectId,
+    reachableEnvironmentIds,
     projectExpanded,
     hasOverflowingThreads,
     hiddenThreadStatus,
@@ -988,6 +990,13 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   } = props;
   const showMoreButtonRender = useMemo(() => <button type="button" />, []);
   const showLessButtonRender = useMemo(() => <button type="button" />, []);
+  // M5.5 (a): an unreachable environment's threads render only as the
+  // greyed mirrored fallback rows below — a cached shell must never render
+  // as a live-looking row next to them.
+  const reachableRenderedThreads = useMemo(
+    () => renderedThreads.filter((thread) => reachableEnvironmentIds.has(thread.environmentId)),
+    [renderedThreads, reachableEnvironmentIds],
+  );
 
   return (
     <SidebarMenuSub
@@ -1005,7 +1014,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         </SidebarMenuSubItem>
       ) : null}
       {shouldShowThreadPanel &&
-        renderedThreads.map((thread) => {
+        reachableRenderedThreads.map((thread) => {
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
             <SidebarThreadRow
@@ -1038,7 +1047,10 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
           );
         })}
       {shouldShowThreadPanel ? (
-        <SidebarMirroredThreadRows workspaceProjectId={workspaceProjectId} />
+        <SidebarMirroredThreadRows
+          workspaceProjectId={workspaceProjectId}
+          reachableEnvironmentIds={reachableEnvironmentIds}
+        />
       ) : null}
 
       {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
@@ -1095,6 +1107,9 @@ interface SidebarProjectItemProps {
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
   isManualProjectSorting: boolean;
   dragHandleProps: SortableProjectHandleProps | null;
+  // M5.5 (a): passed down from ONE read in the projects content so live
+  // rows and mirrored fallback rows always share a reachability vintage.
+  reachableEnvironmentIds: ReadonlySet<string>;
 }
 
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
@@ -2465,6 +2480,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ?.workspaceProjectId ??
           null
         }
+        reachableEnvironmentIds={props.reachableEnvironmentIds}
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
@@ -3279,33 +3295,43 @@ function useMaterialize() {
  * stays invisible behind them — one row per thread, ever (the
  * offline-project-row model applied to threads). Opening a fallback row
  * shows the read-only transcript from the local copy.
+ *
+ * `reachableEnvironmentIds` is passed down from a single read in the
+ * projects content — computing it per component was observed tearing
+ * during reconnect flapping (two components committed different
+ * reachability vintages) and rendered a thread as a live row AND a
+ * fallback row at once.
  */
-function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null }) {
+function SidebarMirroredThreadRows(props: {
+  workspaceProjectId: string | null;
+  reachableEnvironmentIds: ReadonlySet<string>;
+}) {
+  const { reachableEnvironmentIds } = props;
   const router = useRouter();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
   const { environments } = useEnvironments();
-  const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
-  // Same liveness rule as the project rows (single point above): live or
-  // synchronizing counts as reachable, an errored connection counts as dead.
-  const reachableAuthorIds = useMemo(() => {
-    const reachable = new Set<string>();
-    for (const environment of environments) {
-      if (environment.connection.phase === "error") continue;
-      const status = environmentShellStatuses.get(environment.environmentId);
-      if (status === "live" || status === "synchronizing") {
-        reachable.add(environment.environmentId);
+  const allThreadShells = useThreadShells();
+  // Structural belt on top of the author-reachability gate: a fallback row
+  // never renders while ANY reachable environment holds a live shell for
+  // the same thread.
+  const liveRowThreadIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const shell of allThreadShells) {
+      if (reachableEnvironmentIds.has(shell.environmentId)) {
+        ids.add(shell.id);
       }
     }
-    return reachable;
-  }, [environments, environmentShellStatuses]);
+    return ids;
+  }, [allThreadShells, reachableEnvironmentIds]);
   if (props.workspaceProjectId === null) {
     return null;
   }
   const rows = roamingThreads.filter(
     (thread) =>
       thread.workspaceProjectId === props.workspaceProjectId &&
-      !reachableAuthorIds.has(thread.authorEnvironmentId),
+      !reachableEnvironmentIds.has(thread.authorEnvironmentId) &&
+      !liveRowThreadIds.has(thread.threadId),
   );
   if (rows.length === 0) {
     return null;
@@ -3350,7 +3376,10 @@ function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null })
   );
 }
 
-function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
+function SidebarOfflineProjectRow(props: {
+  entry: EnvironmentRoamingProject;
+  reachableEnvironmentIds: ReadonlySet<string>;
+}) {
   const { environmentId, roamingProject } = props.entry;
   const materializations = useRoamingMaterializations();
   const materialization =
@@ -3437,7 +3466,10 @@ function SidebarOfflineProjectRow(props: { entry: EnvironmentRoamingProject }) {
         )}
       </div>
       <SidebarMenuSub className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1 py-0 sm:mx-1 sm:px-1.5">
-        <SidebarMirroredThreadRows workspaceProjectId={roamingProject.workspaceProjectId} />
+        <SidebarMirroredThreadRows
+          workspaceProjectId={roamingProject.workspaceProjectId}
+          reachableEnvironmentIds={props.reachableEnvironmentIds}
+        />
       </SidebarMenuSub>
       {materializeDialog}
     </SidebarMenuItem>
@@ -3530,6 +3562,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       }),
     [roamingProjects, sortedProjects],
   );
+  // ONE read per commit, passed down to live thread rows and mirrored
+  // fallback rows alike (M5.5 a), so the two row kinds always share a
+  // reachability vintage and a thread can never render as both.
+  const reachableEnvironmentIds = useAtomValue(reachableEnvironmentIdsAtom);
 
   const handleProjectSortOrderChange = useCallback(
     (sortOrder: SidebarProjectSortOrder) => {
@@ -3671,6 +3707,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         }
                         isManualProjectSorting={isManualProjectSorting}
                         dragHandleProps={dragHandleProps}
+                        reachableEnvironmentIds={reachableEnvironmentIds}
                       />
                     )}
                   </SortableProjectItem>
@@ -3701,6 +3738,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
                 isManualProjectSorting={isManualProjectSorting}
                 dragHandleProps={null}
+                reachableEnvironmentIds={reachableEnvironmentIds}
               />
             ))}
           </SidebarMenu>
@@ -3712,6 +3750,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarOfflineProjectRow
                 key={`${entry.environmentId}:${entry.roamingProject.workspaceProjectId}`}
                 entry={entry}
+                reachableEnvironmentIds={reachableEnvironmentIds}
               />
             ))}
           </SidebarMenu>
