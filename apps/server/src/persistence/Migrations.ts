@@ -53,6 +53,7 @@ import Migration0037 from "./Migrations/037_RoamingPeersAndProjectionWorkspaceId
 import Migration0038 from "./Migrations/038_RoamingMaterializations.ts";
 import Migration0039 from "./Migrations/039_RoamingPeerSyncEnabled.ts";
 import Migration0040 from "./Migrations/040_DropRoamingMaterializations.ts";
+import Migration0041 from "./Migrations/041_RoamingThreadResumptions.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -105,6 +106,7 @@ export const migrationEntries = [
   [38, "RoamingMaterializations", Migration0038],
   [39, "RoamingPeerSyncEnabled", Migration0039],
   [40, "DropRoamingMaterializations", Migration0040],
+  [41, "RoamingThreadResumptions", Migration0041],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
