@@ -24,9 +24,16 @@ live in `21-roaming-history.md`.
   `accept-m37-stress.mjs`, `accept-m38.mjs`, `accept-m4.mjs`,
   `accept-m5.mjs` (transcripts ride the P2P mirror only — no transport
   variants; includes a harness-restart leg asserting B's reconcile never
-  tombstones A's transcripts, and drives resume as explicit
-  thread.create + thread.turn.start — the raw dispatch endpoint has no
-  client-side bootstrap).
+  tombstones A's transcripts; its resume leg predates M5.5 and now
+  simulates only the server-visible half of resume — thread.create with
+  the brief text — the product flow is the M5.5 draft),
+  `accept-m55.mjs` (M5.5 server-verifiable criteria: payload
+  modelSelection, stateless zero-prep brief generation on B, supersession
+  lifecycle incl. link-before-thread and restore-on-delete, and a
+  tight-loop probe of the author delete-race window). The M5.5 UI
+  criteria (one row per thread, greyed fallback, resume-as-draft) are
+  client-side and were verified by a browser walk on the harness —
+  headless caveat in Accepted risks.
   `accept-m2.5.mjs` is the canonical-workflow re-run every milestone ends
   with. `accept-m38.mjs` and `accept-m4.mjs` run their origins with
   `receive.hideRefs refs/t3` (bundle fallback) by default and again with
@@ -473,7 +480,7 @@ live in `21-roaming-history.md`.
   resume receives an authoritative `roaming-wip-status-replaced` event,
   including an empty array, before replay/live events.
 
-## Transcripts + briefs (M5)
+## Transcripts + briefs (M5, surfacing corrected in M5.5)
 
 - Blob kinds `transcript`/`brief`, key `<threadId>`, JSON payloads
   (`RoamingTranscriptPayload` / `RoamingBriefPayload` in
@@ -484,6 +491,13 @@ live in `21-roaming-history.md`.
   activity payload (`payloadTruncated`, summary still ships),
   `ROAMING_BRIEF_MAX_CHARS` 20k. Attachment bytes do not roam (name/mime/
   size metadata only).
+- M5.5: the payload carries the source thread's `modelSelection`
+  (optional `RoamingTranscriptModelSelection` — plain-string instanceId
+  per the self-contained-contract rule, schema version unchanged so
+  pre-M5.5 payloads decode). It is only ever the resume draft's picker
+  DEFAULT, honored when that provider instance is enabled locally AND the
+  model slug exists in its model list; otherwise the composer default
+  stands.
 - `TranscriptSync` (apps/server/src/roaming/TranscriptSync.ts): builds the
   reduced payload from `getThreadDetailById` (committed projections, never
   the event log), keyed-coalesced per threadId. Triggers: thread lifecycle
@@ -514,19 +528,60 @@ live in `21-roaming-history.md`.
   (either machine, newest-wins). `POST /api/roaming/threads/transcript`
   returns local transcript + brief + author.
 - Shell: `roamingThreads` (`RoamingThreadShell`) from
-  `listRoamingThreadShells` — transcript blobs LEFT JOIN
-  projection_threads, excluding any threadId with a LOCAL row (the local
-  shell is authoritative; also the author filter) and tombstones;
+  `listRoamingThreadShells` — transcript blobs, excluding (M5.5, each a
+  structural SQL condition): (1) any blob whose `author_environment_id`
+  is NOT in `roaming_peers` — this machine is never its own peer, so the
+  author can never list its own thread as mirrored under any
+  delete/tombstone ordering (the race-proof fix for the author-corpse
+  field bug); the LEFT JOIN projection_threads local-row exclusion stays
+  as a second belt; (2) any source threadId whose
+  `roaming_thread_resumptions` row points at a live (non-deleted)
+  projection thread — superseded by the resumed thread; deleting the
+  resumed thread restores the fallback row; (3) tombstones.
   `getRoamingThreadShellById` includes tombstones for live upserts.
   Transcript/brief blob changes emit `roaming-thread-upserted`
   (sequence 0; `deleted: true` upsert = removal, no separate event);
   resume catch-up seeds the rows. Gate-off masks to `[]`.
-- Web: mirrored rows inside each project's thread list (live AND offline
-  registry rows), `/mirrored/$threadId` read-only view (timeline
-  components, affordances stubbed), Hand off header action + brief dialog,
-  Continue here = new local thread via the client bootstrap turn start
-  with the brief as the visible first user message (disabled-with-reason
-  until materialized). Concept-free copy throughout.
+- `roaming_thread_resumptions` (migration 041): machine-local, never
+  mirrored — `source_thread_id PK, resumed_thread_id, created_at`,
+  insert-or-replace via `RoamingThreadResumptions.record`, written by
+  `POST /api/roaming/threads/resumed` (access:write, roaming-gated). The
+  web records the link at DRAFT CREATION using the draft session's future
+  threadId — the exclusion only bites once that thread actually exists,
+  so an unsent draft never hides the source row.
+- `POST /api/roaming/briefs/generate` (access:write, roaming-gated):
+  stateless brief generation on THIS machine from its local transcript
+  copy via `TranscriptSync.generateBrief` — the transcript's carried
+  modelSelection drives the text-generation job; no/unusable provider →
+  deterministic digest + notice; never writes a brief blob.
+- Web one-row gate (M5.5): `reachableEnvironmentIdsAtom`
+  (apps/web/src/state/shell.ts) — primary + desktop-local always, a
+  remote only while its shell status is `live`. Deliberately STRICTER
+  than the project rows' live/synchronizing rule: a dead peer's retry
+  loop flaps cached↔synchronizing forever, so a looser rule oscillates
+  and components latching different vintages rendered a thread as a live
+  row AND a fallback row at once. Read ONCE per commit in
+  `SidebarProjectsContent` and prop-drilled to both row kinds:
+  `SidebarProjectThreadList` filters cached shells of unreachable
+  environments; `SidebarMirroredThreadRows` renders only unreachable
+  authors, with a structural belt (no fallback while any reachable
+  environment holds a live shell for the same threadId). Fallback rows
+  render greyed (`opacity-60`) with "From <machine> (offline) —
+  read-only copy".
+- Web resume-as-draft (M5.5, MirroredThreadView): Continue here →
+  hand-off brief if present, else `briefs/generate` → reuse the
+  project's stored unsent draft session when one exists (fresh draftId
+  would DELETE it, prompt included; the brief lands above unsent text)
+  else a fresh draft with sticky state → source model seeded only when
+  selectable locally → record resumption link → navigate
+  `/draft/$draftId`. Nothing auto-starts; disabled-with-reason until
+  materialized. The mirrored view header carries the chat header's
+  title-bar treatment (workspace-topbar / drag-region / WCO + safe-area
+  insets + collapsed-sidebar inset).
+- Sync-status copy (M5.5 f): every non-error, non-blocked state renders
+  the label "Synced" on both machines (activity timestamps are
+  machine-local); freshness/degradation detail lives in the tooltip and
+  dot color only.
 - Resume threads are ordinary local threads (new UUID) — never mirrored
   back as the same thread; no import path into the local event log exists.
 
@@ -596,3 +651,13 @@ live in `21-roaming-history.md`.
   other local branches do not roam. Both
   machines must run ≥M3.8 builds before branch-aware behavior holds
   end-to-end.
+- M5.5 one-row invariant: fresh mounts of both states verified on the
+  harness (both-online → one live row; peer-dead → one greyed fallback).
+  MID-SESSION convergence (row flipping live↔fallback without a reload)
+  could not be measured there: the automation browser tab is hidden,
+  which freezes rAF-driven exit animations (auto-animate keeps removed
+  rows as position:absolute DOM corpses) and throttles schedulers —
+  every transition looked duplicated until identified. One
+  visible-window kill-the-desktop field check is pending. Removing a
+  peer also hides its mirrored thread rows (the peers-membership author
+  filter) — consistent with gate-off masking.
