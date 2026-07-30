@@ -14,6 +14,7 @@ import {
   WorkspaceProjectId,
 } from "./baseSchemas.ts";
 import { RepositoryIdentity } from "./environment.ts";
+import { ProviderOptionSelection } from "./model.ts";
 
 // ── Roaming blob record (decision D3) ───────────────────────────────
 //
@@ -336,6 +337,20 @@ export const RoamingTranscriptPlan = Schema.Struct({
 });
 export type RoamingTranscriptPlan = typeof RoamingTranscriptPlan.Type;
 
+/**
+ * The source thread's model selection, reduced (M5.5): only ever a DEFAULT
+ * for the resume draft's picker on the other machine — never dispatched
+ * as-is. `instanceId` stays a plain string (self-contained contract); the
+ * resuming machine honors the selection only when that provider instance
+ * and model exist locally.
+ */
+export const RoamingTranscriptModelSelection = Schema.Struct({
+  instanceId: TrimmedNonEmptyString,
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+});
+export type RoamingTranscriptModelSelection = typeof RoamingTranscriptModelSelection.Type;
+
 /** Payload of blob kind=transcript (key=threadId), JSON-encoded. */
 export const RoamingTranscriptPayload = Schema.Struct({
   schemaVersion: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
@@ -358,6 +373,12 @@ export const RoamingTranscriptPayload = Schema.Struct({
   deleted: Schema.optional(Schema.Boolean),
   /** Set when the whole-payload cap forced dropping oldest entries. */
   truncated: Schema.optional(Schema.Boolean),
+  /**
+   * The thread's model selection on the authoring machine (M5.5). Optional
+   * with the schema version unchanged: pre-M5.5 payloads decode without it
+   * and resume falls back to the composer's normal default.
+   */
+  modelSelection: Schema.optional(RoamingTranscriptModelSelection),
   messages: Schema.Array(RoamingTranscriptMessage).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -452,6 +473,43 @@ export const RoamingBriefSaveResponse = Schema.Struct({
   brief: RoamingBriefPayload,
 });
 export type RoamingBriefSaveResponse = typeof RoamingBriefSaveResponse.Type;
+
+/**
+ * Local (user-session) RPC: produce a resumption brief ON THIS machine from
+ * its local transcript copy (M5.5 — resume needs zero preparation on the
+ * source machine). Stateless: nothing is written to the blob store; the
+ * markdown seeds the resume draft and lives on as ordinary composer text.
+ * Callers prefer an existing hand-off brief blob (the pre-reviewed nicety)
+ * and only fall back to this route.
+ */
+export const RoamingBriefGenerateRequest = Schema.Struct({
+  threadId: ThreadId,
+});
+export type RoamingBriefGenerateRequest = typeof RoamingBriefGenerateRequest.Type;
+
+export const RoamingBriefGenerateResponse = Schema.Struct({
+  markdown: Schema.String,
+  /** Honest caveats that are not failures ("no provider answered; deterministic digest"). */
+  notices: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type RoamingBriefGenerateResponse = typeof RoamingBriefGenerateResponse.Type;
+
+/**
+ * Local (user-session) RPC: record that a mirrored thread was continued
+ * locally (M5.5 d). The link is machine-local and never mirrored; while the
+ * resumed thread exists, the source thread's fallback row is superseded —
+ * excluded from this machine's mirrored-thread shell.
+ */
+export const RoamingThreadResumedRequest = Schema.Struct({
+  sourceThreadId: ThreadId,
+  resumedThreadId: ThreadId,
+});
+export type RoamingThreadResumedRequest = typeof RoamingThreadResumedRequest.Type;
+
+export const RoamingThreadResumedResponse = Schema.Struct({
+  recorded: Schema.Boolean,
+});
+export type RoamingThreadResumedResponse = typeof RoamingThreadResumedResponse.Type;
 
 // ── Registry entry payload (kind=registry, key=workspaceProjectId) ──
 
@@ -984,3 +1042,5 @@ export const ROAMING_WIP_DIVERGENCE_RESOLVE_PATH = "/api/roaming/wip/divergence/
 export const ROAMING_THREAD_TRANSCRIPT_PATH = "/api/roaming/threads/transcript";
 export const ROAMING_THREAD_PARK_PATH = "/api/roaming/threads/park";
 export const ROAMING_BRIEF_SAVE_PATH = "/api/roaming/briefs/save";
+export const ROAMING_BRIEF_GENERATE_PATH = "/api/roaming/briefs/generate";
+export const ROAMING_THREAD_RESUMED_PATH = "/api/roaming/threads/resumed";
