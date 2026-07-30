@@ -48,9 +48,11 @@ the 2026-07-15 post-M3.8 audit fixes and the 2026-07-16 code cleanup
 The branch-aware ship gate is closed. M4 (takeover + divergence) done
 2026-07-18 (PRs #63–#69), followed by the 2026-07-19→22 remediation
 series (PRs #71–#81). M5 (briefs + transcripts) done 2026-07-22
-(PRs #82–#86; results in the history file). M6–M7 remain queued in
-execution order: M6 bootstrap recipes, M7 cloud store. M6 is next; no
-milestone is active.
+(PRs #82–#86; results in the history file). The 2026-07-30 field session
+rejected M5's surfaced UX (duplicate rows, mandatory hand-off, silent
+model pick) — corrections are binding decisions below and run as
+**M5.5 (corrective)** before M6. Queue: M5.5, M6 bootstrap recipes,
+M7 cloud store. M5.5 is next; no milestone is active.
 
 ## Thesis
 
@@ -112,6 +114,25 @@ history file.
   cloud milestone. Kickoff prompts address milestones by number; records
   keep the numbering of their date (era map at the top of the history
   file).
+
+- **2026-07-30 — M5.5 product corrections (field):** M5's mechanics stand;
+  its surfaced UX is rejected and corrected as follows. (a) **One row per
+  thread, ever**: a mirrored transcript must never add a row next to the
+  live thin-client thread — the transcript is invisible redundancy behind
+  the live connection (exactly the offline-project-row model): the thread
+  appears once, live while the peer is reachable, greyed/read-only from
+  the local copy when it is not. (b) **Resume is a normal draft**: the
+  brief is generated ON the resuming machine from its local transcript
+  copy, pre-filled into an ordinary composer where the user picks the
+  model (default: the source thread's model when available locally); a
+  turn is never auto-started on a model the user did not choose. (c)
+  **Hand-off is optional, never a prerequisite**: reading and resuming
+  require zero preparation on the source machine; the explicit action
+  survives only as a nicety (pre-reviewed brief + final WIP snapshot).
+  (d) After continuing, the fallback row is superseded by the local
+  thread, not shown alongside it. (e) The author machine never renders
+  its own thread as mirrored, under any event ordering (delete race).
+  (f) Sync-status copy reads identically on both machines.
 
 ## Architecture
 
@@ -304,6 +325,17 @@ the visible first user message; no local checkout → disabled-with-reason
 file/diff affordances inert in the read-only view. Deliberately no
 provider-session transplants. Mechanics in the reference.
 
+**Superseded in part (2026-07-30, M5.5 pending):** the shipped surfacing —
+separate mirrored rows, a dedicated read-only route reachable while the
+peer is live, hand-off as the implied entry to resume, and a
+provider-default model fallback on resume — is rejected by the binding
+M5.5 corrections above. Target model: mirrored transcripts stay invisible
+behind the live thin-client rows and surface only for an unreachable
+peer; resume opens a pre-filled draft (brief generated locally, model
+chosen by the user, source model as default — the transcript payload
+gains the source modelSelection); hand-off optional. This paragraph is
+deleted when M5.5 lands.
+
 ### Bootstrap recipes (M6)
 
 The clone was never the expensive part — setup is. First materialization
@@ -345,6 +377,7 @@ detail live in the history and reference files.
 | M3.8 — Branch-aware sync model (SHIP GATE) | Full working-state snapshots, ancestry classifier, safe HEAD transitions, parking/takeover, branch-aware materialize. | ✅ 2026-07-11. |
 | M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | ✅ 2026-07-18. |
 | M5 — Briefs + transcripts | "Conversations" pairing row + mirrored read-only threads + park/brief/resume. | ✅ 2026-07-22. |
+| M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | Both machines online: every thread appears exactly once per machine. Peer offline: its threads stay in the list, greyed, readable. Continue here opens a pre-filled composer, source model defaulted, nothing auto-started. Delete on the author removes the thread everywhere including the author's own view. Canonical re-run. |
 | M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 
