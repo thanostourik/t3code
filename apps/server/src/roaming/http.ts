@@ -22,7 +22,9 @@ import {
   ROAMING_WIP_TAKEOVER_PATH,
   ROAMING_THREAD_TRANSCRIPT_PATH,
   ROAMING_THREAD_PARK_PATH,
+  ROAMING_THREAD_RESUMED_PATH,
   ROAMING_BRIEF_SAVE_PATH,
+  ROAMING_BRIEF_GENERATE_PATH,
   ROAMING_MIRROR_FETCH_PATH,
   ROAMING_MIRROR_MANIFEST_PATH,
   ROAMING_MIRROR_PUSH_PATH,
@@ -62,8 +64,12 @@ import {
   RoamingBriefPayload,
   RoamingBriefSaveRequest,
   RoamingBriefSaveResponse,
+  RoamingBriefGenerateRequest,
+  RoamingBriefGenerateResponse,
   RoamingThreadParkRequest,
   RoamingThreadParkResponse,
+  RoamingThreadResumedRequest,
+  RoamingThreadResumedResponse,
   RoamingThreadTranscriptRequest,
   RoamingThreadTranscriptResponse,
   RoamingTranscriptPayload,
@@ -85,6 +91,7 @@ import { Materializer } from "./Materializer.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingService } from "./RoamingService.ts";
+import { RoamingThreadResumptions } from "./RoamingThreadResumptions.ts";
 import { TranscriptSync } from "./TranscriptSync.ts";
 import { WipSnapshotReactor } from "./WipSnapshotReactor.ts";
 
@@ -640,6 +647,44 @@ const briefSaveRoute = HttpRouter.add(
   ),
 );
 
+const briefGenerateRoute = HttpRouter.add(
+  "POST",
+  ROAMING_BRIEF_GENERATE_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingBriefGenerateRequest);
+      const transcripts = yield* TranscriptSync;
+      const result = yield* transcripts
+        .generateBrief(body.threadId)
+        .pipe(
+          Effect.mapError((error) =>
+            error.reason === "thread-unknown"
+              ? reject(404, "No mirrored conversation exists for that thread")
+              : reject(500, "Internal Server Error"),
+          ),
+        );
+      return yield* respondJson(RoamingBriefGenerateResponse, result);
+    }),
+  ),
+);
+
+const threadResumedRoute = HttpRouter.add(
+  "POST",
+  ROAMING_THREAD_RESUMED_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingThreadResumedRequest);
+      const resumptions = yield* RoamingThreadResumptions;
+      yield* resumptions
+        .record(body.sourceThreadId, body.resumedThreadId)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      return yield* respondJson(RoamingThreadResumedResponse, { recorded: true });
+    }),
+  ),
+);
+
 export const roamingRoutesLayer = Layer.mergeAll(
   manifestRoute,
   fetchRoute,
@@ -659,4 +704,6 @@ export const roamingRoutesLayer = Layer.mergeAll(
   threadTranscriptRoute,
   threadParkRoute,
   briefSaveRoute,
+  briefGenerateRoute,
+  threadResumedRoute,
 );
