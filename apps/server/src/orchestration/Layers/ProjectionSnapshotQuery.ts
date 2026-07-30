@@ -1778,8 +1778,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       FROM roaming_blobs AS blobs
       LEFT JOIN projection_threads AS local ON local.thread_id = blobs.key
       LEFT JOIN roaming_blobs AS briefs ON briefs.kind = 'brief' AND briefs.key = blobs.key
+      LEFT JOIN roaming_thread_resumptions AS resumption
+        ON resumption.source_thread_id = blobs.key
+      LEFT JOIN projection_threads AS resumed
+        ON resumed.thread_id = resumption.resumed_thread_id
+        AND resumed.deleted_at IS NULL
       WHERE blobs.kind = 'transcript'
         AND local.thread_id IS NULL
+        -- M5.5 (e): a mirrored row must come from a paired peer. This machine
+        -- is never its own peer, so its own blobs can never surface here —
+        -- race-proof under any delete/tombstone ordering, unlike the
+        -- local-projection-row join above (kept as a second belt).
+        AND blobs.author_environment_id IN (SELECT environment_id FROM roaming_peers)
+        -- M5.5 (d): a source thread continued locally is superseded by the
+        -- resumed thread while that thread exists.
+        AND resumed.thread_id IS NULL
         AND (${threadId} IS NULL OR blobs.key = ${threadId})
       ORDER BY blobs.key
     `;
