@@ -1911,3 +1911,142 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+// ── Mirrored thread shells (M5.5 exclusions) ────────────────────────────
+//
+// A mirrored row must come from a paired peer (this machine is never its
+// own peer — race-proof author exclusion under any delete/tombstone
+// ordering), and a source thread continued locally is superseded while the
+// resumed thread exists.
+projectionSnapshotLayer("ProjectionSnapshotQuery roaming thread shells", (it) => {
+  const transcriptPayload = (threadId: string, deleted = false) =>
+    JSON.stringify({
+      schemaVersion: 1,
+      threadId,
+      workspaceProjectId: "wp-1",
+      title: "Mirrored thread",
+      branch: null,
+      capturedAt: "2026-07-30T00:00:00.000Z",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      ...(deleted ? { deleted: true } : {}),
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+    });
+
+  const resetRoamingTables = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`DELETE FROM roaming_blobs`;
+    yield* sql`DELETE FROM roaming_peers`;
+    yield* sql`DELETE FROM roaming_thread_resumptions`;
+    yield* sql`DELETE FROM projection_threads`;
+  });
+
+  const insertTranscriptBlob = (threadId: string, authorEnvironmentId: string, deleted = false) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO roaming_blobs (
+          kind, key, workspace_project_id, version, content_hash,
+          author_environment_id, updated_at, schema_version, payload
+        )
+        VALUES (
+          'transcript', ${threadId}, 'wp-1', 1, ${"hash-" + threadId},
+          ${authorEnvironmentId}, '2026-07-30T00:00:00.000Z', 1,
+          ${transcriptPayload(threadId, deleted)}
+        )
+      `;
+    });
+
+  const insertPeer = (environmentId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO roaming_peers (environment_id, base_urls, enrolled_at)
+        VALUES (${environmentId}, '[]', '2026-07-30T00:00:00.000Z')
+      `;
+    });
+
+  it.effect("lists only transcripts authored by a paired peer (author delete race)", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      yield* resetRoamingTables;
+      yield* insertPeer("peer-env");
+      yield* insertTranscriptBlob("thread-from-peer", "peer-env");
+      // The author machine's own blob with NO local projection row — the
+      // exact delete-race window that surfaced the author's own corpse.
+      yield* insertTranscriptBlob("thread-own-deleted", "own-env");
+
+      const shells = yield* snapshotQuery.listRoamingThreadShells();
+      assert.deepStrictEqual(
+        shells.map((shell) => shell.threadId),
+        ["thread-from-peer"],
+      );
+      const own = yield* snapshotQuery.getRoamingThreadShellById(
+        ThreadId.make("thread-own-deleted"),
+      );
+      assert.isTrue(own._tag === "None");
+    }),
+  );
+
+  it.effect("keeps tombstones out of the list but visible to getById (live removal upserts)", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      yield* resetRoamingTables;
+      yield* insertPeer("peer-env");
+      yield* insertTranscriptBlob("thread-tombstoned", "peer-env", true);
+
+      const shells = yield* snapshotQuery.listRoamingThreadShells();
+      assert.deepStrictEqual(shells, []);
+      const shell = yield* snapshotQuery.getRoamingThreadShellById(
+        ThreadId.make("thread-tombstoned"),
+      );
+      assert.isTrue(shell._tag === "Some" && shell.value.deleted === true);
+    }),
+  );
+
+  it.effect("supersedes a source thread while its resumed local thread exists", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* resetRoamingTables;
+      yield* insertPeer("peer-env");
+      yield* insertTranscriptBlob("thread-source", "peer-env");
+      yield* sql`
+        INSERT INTO roaming_thread_resumptions (source_thread_id, resumed_thread_id, created_at)
+        VALUES ('thread-source', 'thread-resumed', '2026-07-30T00:00:00.000Z')
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, branch, worktree_path, latest_turn_id,
+          latest_user_message_at, pending_approval_count,
+          pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'thread-resumed', 'project-1', 'Resumed thread',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access',
+          'default', NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-07-30T00:00:00.000Z', '2026-07-30T00:00:00.000Z', NULL
+        )
+      `;
+
+      const superseded = yield* snapshotQuery.listRoamingThreadShells();
+      assert.deepStrictEqual(superseded, []);
+
+      // Deleting the resumed thread brings the fallback row back.
+      yield* sql`
+        UPDATE projection_threads
+        SET deleted_at = '2026-07-30T01:00:00.000Z'
+        WHERE thread_id = 'thread-resumed'
+      `;
+      const restored = yield* snapshotQuery.listRoamingThreadShells();
+      assert.deepStrictEqual(
+        restored.map((shell) => shell.threadId),
+        ["thread-source"],
+      );
+    }),
+  );
+});
