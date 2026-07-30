@@ -3009,7 +3009,7 @@ function ProjectSyncIndicator(props: {
                 className="inline-flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70"
               >
                 <span className="size-2 shrink-0 rounded-full bg-muted-foreground/50" />
-                <span className="whitespace-nowrap">Sync on</span>
+                <span className="whitespace-nowrap">Synced</span>
               </span>
             }
           />
@@ -3023,6 +3023,11 @@ function ProjectSyncIndicator(props: {
   // A persistent pill so "sync is on and healthy" is always visible — not a
   // dot that vanishes after two minutes. States, most-urgent first:
   //   error → red · blocked → amber · completed activity → green · idle.
+  // M5.5 (f): every non-error, non-blocked state reads "Synced" — the label
+  // must be identical on both machines, and activity timestamps are
+  // machine-local (one side captures, the other applies, an untouched
+  // project records nothing). Freshness and degradation detail live in the
+  // tooltip and the dot color.
   type Pill = { icon: "spinner" | "dot"; dotClass: string; text: string; tip: string };
   let pill: Pill;
   if (entry.lastError) {
@@ -3065,7 +3070,7 @@ function ProjectSyncIndicator(props: {
     pill = {
       icon: "dot",
       dotClass: "bg-amber-500",
-      text: "Sync on",
+      text: "Synced",
       tip: entry.notice,
     };
   } else if (
@@ -3089,7 +3094,7 @@ function ProjectSyncIndicator(props: {
     pill = {
       icon: "dot",
       dotClass: "bg-emerald-500",
-      text: `Synced ${formatElapsedDurationLabel(lastActivityIso, now)}`,
+      text: "Synced",
       tip: entry.lastAppliedAt
         ? `Synced — received ${formatRelativeTimeLabel(entry.lastAppliedAt)}`
         : `Synced — sent ${formatRelativeTimeLabel(entry.lastPushedAt ?? "")}`,
@@ -3098,7 +3103,7 @@ function ProjectSyncIndicator(props: {
     pill = {
       icon: "dot",
       dotClass: "bg-muted-foreground/50",
-      text: "Sync on",
+      text: "Synced",
       tip: "Sync is on for this project — no changes yet",
     };
   }
@@ -3269,20 +3274,39 @@ function useMaterialize() {
 }
 
 /**
- * Mirrored-conversation rows (M5): conversations from the user's other
- * machine, readable here even while that machine is offline. Rendered inside
- * the project's ONE thread list; opening one shows the read-only transcript.
+ * Mirrored-conversation rows (M5, surfacing corrected in M5.5): the greyed
+ * fallback for a peer that is UNREACHABLE. While the author machine is live,
+ * its threads are already in the list as thin-client rows and the mirror
+ * stays invisible behind them — one row per thread, ever (the
+ * offline-project-row model applied to threads). Opening a fallback row
+ * shows the read-only transcript from the local copy.
  */
 function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null }) {
   const router = useRouter();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
   const { environments } = useEnvironments();
+  const environmentShellStatuses = useAtomValue(environmentShellStatusesAtom);
+  // Same liveness rule as the project rows (single point above): live or
+  // synchronizing counts as reachable, an errored connection counts as dead.
+  const reachableAuthorIds = useMemo(() => {
+    const reachable = new Set<string>();
+    for (const environment of environments) {
+      if (environment.connection.phase === "error") continue;
+      const status = environmentShellStatuses.get(environment.environmentId);
+      if (status === "live" || status === "synchronizing") {
+        reachable.add(environment.environmentId);
+      }
+    }
+    return reachable;
+  }, [environments, environmentShellStatuses]);
   if (props.workspaceProjectId === null) {
     return null;
   }
   const rows = roamingThreads.filter(
-    (thread) => thread.workspaceProjectId === props.workspaceProjectId,
+    (thread) =>
+      thread.workspaceProjectId === props.workspaceProjectId &&
+      !reachableAuthorIds.has(thread.authorEnvironmentId),
   );
   if (rows.length === 0) {
     return null;
@@ -3298,8 +3322,8 @@ function SidebarMirroredThreadRows(props: { workspaceProjectId: string | null })
             <SidebarMenuSubButton
               render={<div role="button" tabIndex={0} />}
               size="sm"
-              className="h-6 w-full translate-x-0 cursor-pointer justify-start gap-1.5 px-2 text-left text-xs text-muted-foreground/80 hover:bg-accent"
-              title={`From ${machineLabel} — read-only`}
+              className="h-6 w-full translate-x-0 cursor-pointer justify-start gap-1.5 px-2 text-left text-xs text-muted-foreground/80 opacity-60 hover:bg-accent hover:opacity-100"
+              title={`From ${machineLabel} (offline) — read-only copy`}
               onClick={() => {
                 void router.navigate({
                   to: "/mirrored/$threadId",
