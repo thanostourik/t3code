@@ -174,6 +174,15 @@ export const buildTranscriptPayload = (input: {
     ...(thread.latestTurn !== null ? { lastTurnState: thread.latestTurn.state } : {}),
     ...(input.parked === true ? { parked: true } : {}),
     ...(truncated ? { truncated: true } : {}),
+    // M5.5: the source model is the resume draft's default on the other
+    // machine — carried reduced, never dispatched as-is.
+    modelSelection: {
+      instanceId: thread.modelSelection.instanceId,
+      model: thread.modelSelection.model,
+      ...(thread.modelSelection.options !== undefined && thread.modelSelection.options.length > 0
+        ? { options: thread.modelSelection.options }
+        : {}),
+    },
     messages: keptMessages,
     proposedPlans,
     activities: keptActivities,
