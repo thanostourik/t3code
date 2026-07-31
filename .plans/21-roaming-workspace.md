@@ -52,9 +52,10 @@ series (PRs #71–#81). M5 (briefs + transcripts) done 2026-07-22
 the corrections are binding decisions below and landed as **M5.5** on
 2026-07-31 (PRs #89–#94; results in the history file). One field check
 remains open from M5.5 acceptance: a visible-window kill-the-desktop walk
-(the harness browser is headless — see history). Queue: M6 bootstrap recipes, M7 cloud store. **M5.6 bidirectional
-pairing is active** (started 2026-07-31; analysis pass done — design and
-deviations in the "Bidirectional pairing" section below).
+(the harness browser is headless — see history). **M5.6** (bidirectional pairing, the 2026-07-31 binding decision) done
+2026-07-31 (PRs #100–#105; results in the history file) — the same
+visible-window caveat applies to its row-flip convergence. Queue: M6
+bootstrap recipes, M7 cloud store. No milestone is active.
 
 ## Thesis
 
@@ -238,15 +239,6 @@ existing offline model (greyed rows + Materialize), never a dead row.
 Client-attach URL advertisement does not weaken mirror
 tamper-resistance: the callee still never dials caller-supplied URLs for
 mirror traffic.
-
-Analysis deviations recorded 2026-07-31: (a) the M1 "the server
-advertises no URLs" rule is amended to best-effort self-advertisement
-for client attach only; (b) the reverse grant rides a NEW handshake call
-(`attach-registration`) rather than a change to the machine-credential
-wire, so pre-M5.6 callees keep pairing cleanly; (c) the reverse attach
-TTL matches the machine credential (365d, not the 30d forward attach
-session) because the registration is server-held with no re-mint path
-short of re-pairing.
 
 ### Vault
 
@@ -449,7 +441,7 @@ detail live in the history and reference files.
 | M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | ✅ 2026-07-18. |
 | M5 — Briefs + transcripts | "Conversations" pairing row + mirrored read-only threads + park/brief/resume. | ✅ 2026-07-22. |
 | M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | ✅ 2026-07-31 (PRs #89–#94; one visible-window field check pending — see history). |
-| M5.6 — Bidirectional pairing | The 2026-07-31 binding decision: the one handshake makes BOTH machines full citizens — each client sees the other machine's projects/threads live when reachable. Analysis done 2026-07-31 (design section): reverse grant via a new best-effort handshake call; server-provided client registration source on the callee. | On the callee machine, the initiator's projects and threads appear live while it is reachable and grey out when not, under the same one-row rules. Canonical re-run. |
+| M5.6 — Bidirectional pairing | The 2026-07-31 binding decision: the one handshake makes BOTH machines full citizens — reverse attach grant + server-provided client registration on the callee. | ✅ 2026-07-31 (PRs #100–#105; accept-m56 + canonical + m5/m55 re-runs ALL PASS; browser walk verified live/greyed/recovered on fresh mounts — visible-window row-flip check pending as in M5.5). |
 | M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 
