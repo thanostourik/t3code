@@ -33,7 +33,12 @@ import {
   ROAMING_HANDSHAKE_COMPLETE_PATH,
   ROAMING_PEERS_REMOVE_PATH,
   ROAMING_PEERS_SYNC_PATH,
+  ROAMING_ATTACH_REGISTRATION_PATH,
+  ROAMING_ATTACH_REGISTRATIONS_LIST_PATH,
   RoamingAddPeerRequest,
+  RoamingAttachRegistration,
+  RoamingRegisterAttachResponse,
+  RoamingListAttachRegistrationsResponse,
   RoamingListPeersResponse,
   RoamingEnrollProjectRequest,
   RoamingEnrollProjectResponse,
@@ -85,6 +90,7 @@ import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { Materializer } from "./Materializer.ts";
+import { RoamingAttachRegistrations } from "./RoamingAttachRegistrations.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingService } from "./RoamingService.ts";
@@ -406,6 +412,10 @@ const removePeerRoute = HttpRouter.add(
         .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
       // Dropping the stored credential stops OUR outbound mirror passes...
       yield* secretStore.remove(roamingPeerSecretName(body.environmentId)).pipe(Effect.ignore);
+      // ...dropping the attach registration makes our clients forget the
+      // machine (M5.6 reverse half; its subscribers emit the shell event)...
+      const attachRegistrations = yield* RoamingAttachRegistrations;
+      yield* attachRegistrations.remove(body.environmentId).pipe(Effect.ignore);
       // ...and revoking every mirror session minted FOR that peer stops its
       // inbound ones — otherwise the other machine keeps syncing until the
       // credential TTL (codex review P1). Subject match also sweeps
@@ -464,6 +474,68 @@ const handshakeCompleteRoute = HttpRouter.add(
       const sessions = yield* SessionStore.SessionStore;
       yield* sessions.revoke(session.sessionId).pipe(Effect.ignore);
       return yield* respondJson(RoamingRemovePeerResponse, { removed: true });
+    }),
+  ),
+);
+
+/**
+ * Reverse half of the unified handshake (M5.6): the initiator, still
+ * holding the handshake bearer, registers how THIS machine's clients can
+ * attach back to it. Requires the mirror half to have completed first —
+ * a registration is only accepted for an environment that already exists
+ * as a peer, so the standing trust decision (the admin pairing code) is
+ * what authorizes it. Un-gated like the other pairing routes: it runs
+ * inside the handshake that turns roaming on.
+ */
+const registerAttachRoute = HttpRouter.add(
+  "POST",
+  ROAMING_ATTACH_REGISTRATION_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireScope(AuthAccessWriteScope);
+      const body = yield* decodeBody(RoamingAttachRegistration);
+      const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+      if (body.environmentId === (yield* serverEnvironment.getEnvironmentId)) {
+        return yield* reject(400, "A machine cannot register itself");
+      }
+      const peers = yield* RoamingPeers;
+      const peer = (yield* peers.list().pipe(Effect.orElseSucceed(() => []))).find(
+        (candidate) => candidate.environmentId === body.environmentId,
+      );
+      if (peer === undefined) {
+        return yield* reject(404, "No pairing exists for that machine");
+      }
+      const registrations = yield* RoamingAttachRegistrations;
+      yield* registrations
+        .upsert(body)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      return yield* respondJson(RoamingRegisterAttachResponse, { registered: true });
+    }),
+  ),
+);
+
+/**
+ * Local (user-session) RPC: the registrations this machine's clients
+ * reconcile into their environment catalog. Carries bearer tokens —
+ * no-store, and 404 while roaming is off like every non-pairing route.
+ */
+const listAttachRegistrationsRoute = HttpRouter.add(
+  "POST",
+  ROAMING_ATTACH_REGISTRATIONS_LIST_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      yield* requireRoamingScope(AuthAccessWriteScope);
+      const registrations = yield* RoamingAttachRegistrations;
+      const list = yield* registrations
+        .list()
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      return yield* respondJson(RoamingListAttachRegistrationsResponse, {
+        registrations: list,
+      }).pipe(
+        Effect.map((httpResponse) =>
+          HttpServerResponse.setHeaders(httpResponse, CREDENTIAL_RESPONSE_HEADERS),
+        ),
+      );
     }),
   ),
 );
@@ -669,6 +741,8 @@ export const roamingRoutesLayer = Layer.mergeAll(
   removePeerRoute,
   setPeerSyncRoute,
   handshakeCompleteRoute,
+  registerAttachRoute,
+  listAttachRegistrationsRoute,
   enrollProjectRoute,
   materializeRoute,
   wipTakeoverRoute,
