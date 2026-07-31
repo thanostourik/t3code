@@ -570,11 +570,14 @@ live in `21-roaming-history.md`.
   environment holds a live shell for the same threadId). Fallback rows
   render greyed (`opacity-60`) with "From <machine> (offline) —
   read-only copy".
-- Web resume-as-draft (M5.5, MirroredThreadView): Continue here on an
-  UNMATERIALIZED project reads "Materialize & continue" and runs the
-  materialize confirm dialog first (shared `useMaterialize`, chained via
-  its onSuccess into the draft once the registered project lands);
-  otherwise → existing brief blob if present, else `briefs/generate` → reuse the
+- Web resume-as-draft (M5.5): the whole flow lives in
+  `useContinueHere` (apps/web/src/hooks), consumed by BOTH the live
+  thin-client thread's ChatHeader (peer online — 2026-07-31 decision) and
+  MirroredThreadView's fallback. On an UNMATERIALIZED project the action
+  reads "Materialize & continue" and runs the materialize confirm dialog
+  first (shared `useMaterialize`, chained via its onSuccess into the
+  draft once the registered project lands); otherwise → existing brief
+  blob if present, else `briefs/generate` → reuse the
   project's stored unsent draft session when one exists (fresh draftId
   would DELETE it, prompt included; the brief lands above unsent text)
   else a fresh draft with sticky state → source model seeded only when

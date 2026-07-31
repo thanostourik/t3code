@@ -136,6 +136,12 @@ history file.
   its own thread as mirrored, under any event ordering (delete race).
   (f) Sync-status copy reads identically on both machines.
 
+- **2026-07-31 — continue anywhere, anytime (field):** Continue-here must
+  be available whenever a mirrored copy exists — INCLUDING while the
+  source machine is live. Peer liveness gates row presentation only,
+  never the ability to continue locally: the live thread's header carries
+  the same Continue-here / Materialize-&-continue action as the offline
+  fallback view.
 - **2026-07-31 — hand-off deleted (field):** supersedes the "survives as
   a nicety" clause of (c): with resume needing nothing from the source
   machine, the explicit hand-off action earned nothing and is removed
