@@ -17,8 +17,10 @@ import {
   CommandId,
   EnvironmentId,
   ProjectId,
+  ROAMING_ATTACH_REGISTRATION_PATH,
   ROAMING_HANDSHAKE_COMPLETE_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
+  RoamingAttachRegistration,
   RoamingMachineCredentialRequest,
   RoamingMachineCredentialResponse,
   type RoamingAttachGrant,
@@ -34,6 +36,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -44,7 +47,10 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { EnvironmentAuth } from "../auth/EnvironmentAuth.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { ServerConfig } from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { advertisedBaseUrls } from "../startupAccess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -119,16 +125,18 @@ const decodeMachineCredentialResponse = Schema.decodeUnknownEffect(
   RoamingMachineCredentialResponse,
 );
 const encodeMachineCredentialRequest = Schema.encodeUnknownEffect(RoamingMachineCredentialRequest);
+const encodeAttachRegistration = Schema.encodeUnknownEffect(RoamingAttachRegistration);
 // Only the credential is needed; the full AuthPairingCredentialResult
 // carries DateTime fields whose wire codec belongs to the HttpApi client.
 const decodePairingCredentialResult = Schema.decodeUnknownEffect(
   Schema.Struct({ credential: Schema.String.check(Schema.isMinLength(1)) }),
 );
-// Only the id is needed from the peer's descriptor; decoding the full
-// ExecutionEnvironmentDescriptor would couple the handshake to fields
-// (capabilities, versions) it has no business validating.
+// Only the id (and, since M5.6, the display label) is needed from the
+// peer's descriptor; decoding the full ExecutionEnvironmentDescriptor
+// would couple the handshake to fields (capabilities, versions) it has no
+// business validating.
 const decodePeerDescriptor = Schema.decodeUnknownEffect(
-  Schema.Struct({ environmentId: EnvironmentId }),
+  Schema.Struct({ environmentId: EnvironmentId, label: Schema.optional(Schema.String) }),
 );
 const encodeRegistryPayloadJson = Schema.encodeUnknownEffect(
   Schema.fromJsonString(RoamingRegistryPayload),
@@ -155,6 +163,8 @@ const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
+  const config = yield* ServerConfig;
+  const fileSystem = yield* FileSystem.FileSystem;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -356,14 +366,16 @@ const make = Effect.gen(function* () {
       };
     });
 
-  const fetchPeerEnvironmentId = (baseUrl: string) =>
+  const fetchPeerDescriptor = (baseUrl: string) =>
     httpClient.get(`${baseUrl.replace(/\/$/, "")}/.well-known/t3/environment`).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap((response) => response.json),
       Effect.flatMap(decodePeerDescriptor),
-      Effect.map((descriptor) => descriptor.environmentId),
       Effect.mapError(internalError("peer descriptor fetch failed")),
     );
+
+  const fetchPeerEnvironmentId = (baseUrl: string) =>
+    fetchPeerDescriptor(baseUrl).pipe(Effect.map((descriptor) => descriptor.environmentId));
 
   /**
    * Derive the client's attach bearer: mint a standard-scoped pairing
@@ -549,6 +561,69 @@ const make = Effect.gen(function* () {
             : yield* fetchPeerEnvironmentId(reachableBaseUrl),
         attachLabel: credential?.label ?? ownLabel,
       });
+
+      // Reverse half (M5.6): make the CALLEE's clients full citizens too.
+      // Mint a standard-scoped attach bearer for them (subject
+      // `roaming-peer:<callee>` so the one-device grouping and the unpair
+      // revocation sweep cover it) and register it on the callee together
+      // with our best-effort self-advertised URLs. Best-effort end to end:
+      // a pre-M5.6 callee answers 404 and pairing stays one-directional.
+      // Runs while the handshake bearer is still valid.
+      if (credential !== null) {
+        yield* Effect.gen(function* () {
+          const runtimeState = yield* readPersistedServerRuntimeState(
+            config.serverRuntimeStatePath,
+          ).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
+          const port = Option.isSome(runtimeState) ? runtimeState.value.port : config.port;
+          // The session represents the CALLEE on this machine's authorized
+          // clients — name it after the callee, not the pairing link (which
+          // names US).
+          const peerLabel = yield* fetchPeerDescriptor(reachableBaseUrl).pipe(
+            Effect.map((descriptor) => descriptor.label),
+            Effect.orElseSucceed(() => undefined),
+          );
+          const reverseSession = yield* auth.issueSession({
+            ttl: MACHINE_CREDENTIAL_TTL,
+            scopes: [...AuthStandardClientScopes],
+            subject: `roaming-peer:${credential.environmentId}`,
+            label: `${peerLabel ?? credential.environmentId} — attach`,
+          });
+          const registrationBody = yield* encodeAttachRegistration({
+            environmentId,
+            label: ownLabel,
+            baseUrls: advertisedBaseUrls(config.host, port),
+            token: reverseSession.token,
+            expiresAt: DateTime.formatIso(reverseSession.expiresAt),
+          });
+          const response = yield* httpClient
+            .pipe(
+              HttpClient.mapRequest(
+                HttpClientRequest.setHeader("authorization", `Bearer ${exchange.token}`),
+              ),
+            )
+            .post(`${reachableBaseUrl.replace(/\/$/, "")}${ROAMING_ATTACH_REGISTRATION_PATH}`, {
+              body: HttpBody.jsonUnsafe(registrationBody),
+            });
+          if (response.status === 404) {
+            // Old callee: revoke the unused session instead of leaving a
+            // 365-day orphan.
+            yield* auth.revokeSession(reverseSession.sessionId).pipe(Effect.ignore);
+            yield* Effect.logInfo(
+              "roaming: peer does not support bidirectional pairing; reverse attach skipped",
+            );
+            return;
+          }
+          yield* HttpClientResponse.filterStatusOk(response);
+        }).pipe(
+          Effect.catch((cause) =>
+            // Never the raw cause: the request bodies above carry live
+            // bearer tokens a structured logger would emit.
+            Effect.logWarning("roaming: reverse attach registration failed", {
+              failureTag: (cause as { readonly _tag?: string })._tag ?? "unknown-failure",
+            }),
+          ),
+        );
+      }
 
       // Retire the handshake session: the generic revoke endpoint forbids
       // self-revocation, so the roaming handshake-complete route exists for
