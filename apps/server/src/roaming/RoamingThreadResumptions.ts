@@ -28,6 +28,10 @@ export class RoamingThreadResumptions extends Context.Service<
       sourceThreadId: ThreadId,
       resumedThreadId: ThreadId,
     ) => Effect.Effect<void, RoamingThreadResumptionError>;
+    /** Source threads superseded by this local thread (for shell-row transitions). */
+    readonly findSourcesByResumedThreadId: (
+      resumedThreadId: ThreadId,
+    ) => Effect.Effect<ReadonlyArray<ThreadId>, RoamingThreadResumptionError>;
   }
 >()("t3/roaming/RoamingThreadResumptions") {}
 
@@ -53,6 +57,19 @@ export const layer = Layer.effect(
         Effect.mapError((cause) => new RoamingThreadResumptionError({ detail: String(cause) })),
       );
 
-    return { record } satisfies RoamingThreadResumptions["Service"];
+    const findSourcesByResumedThreadId: RoamingThreadResumptions["Service"]["findSourcesByResumedThreadId"] =
+      (resumedThreadId) =>
+        Effect.gen(function* () {
+          const rows = yield* sql<{ sourceThreadId: string }>`
+            SELECT source_thread_id AS "sourceThreadId"
+            FROM roaming_thread_resumptions
+            WHERE resumed_thread_id = ${resumedThreadId}
+          `;
+          return rows.map((row) => row.sourceThreadId as ThreadId);
+        }).pipe(
+          Effect.mapError((cause) => new RoamingThreadResumptionError({ detail: String(cause) })),
+        );
+
+    return { record, findSourcesByResumedThreadId } satisfies RoamingThreadResumptions["Service"];
   }),
 );

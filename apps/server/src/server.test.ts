@@ -820,6 +820,7 @@ const buildAppUnderTest = (options?: {
         Layer.provide(
           Layer.succeed(RoamingThreadResumptions, {
             record: () => Effect.void,
+            findSourcesByResumedThreadId: () => Effect.succeed([]),
           } satisfies RoamingThreadResumptions["Service"]),
         ),
         Layer.provide(

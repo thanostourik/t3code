@@ -2238,3 +2238,31 @@ row logic.
 Superseded by this record: M5's "mirrored rows appear tagged with the
 source machine (always visible)" surfacing and the resume-as-first-turn
 flow, per the 2026-07-30 corrections.
+
+## 2026-07-31 — M5.5 field round (first real-machine test of the corrective)
+
+Field results: one-row-while-both-online ✅, live→greyed flip on desktop
+death ✅ (the pending visible-window check — confirmed by the user),
+greyed row readable ✅, resume-as-draft with user-picked model ✅, delete
+on author clean everywhere ✅, "Synced" copy unified ✅. Three defects
+found and fixed same day (PR #96):
+
+- **Supersession never hid the row live** (exit-criterion failure the
+  acceptance missed because it polls the HTTP shell, which is a fresh
+  query, while the browser lives on the event stream): supersession is a
+  SQL-exclusion change, not a blob change, so no shell event ever fired.
+  ws.ts now emits the source row's transition on resumed-thread
+  create/delete; verified live in the harness browser both directions.
+- **Idle "Synced" pill on unmaterialized rows** (user call): suppressed —
+  the pill reports WIP sync, which needs a local checkout.
+- **"No threads yet" above fallback rows**: our integration bug (the
+  empty state counted only real thread rows); suppressed when fallback
+  rows render.
+
+Also surfaced, decisions pending: (1) one-directional pairing means the
+desktop always sees laptop threads as greyed mirrors — live desktop→laptop
+threads need a reverse pairing (works today via the dialog) or an
+auto-bidirectional attach at pairing (M6-adjacent design question);
+(2) Continue-here on an unmaterialized project — recommendation:
+materialize-and-continue as one action; (3) hand-off's post-M5.5 value is
+marginal — recommendation: delete the button + park route.
