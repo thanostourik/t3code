@@ -52,8 +52,9 @@ series (PRs #71–#81). M5 (briefs + transcripts) done 2026-07-22
 the corrections are binding decisions below and landed as **M5.5** on
 2026-07-31 (PRs #89–#94; results in the history file). One field check
 remains open from M5.5 acceptance: a visible-window kill-the-desktop walk
-(the harness browser is headless — see history). Queue: M6 bootstrap
-recipes, M7 cloud store. No milestone is active.
+(the harness browser is headless — see history). Queue: M5.6 bidirectional
+pairing (2026-07-31 binding decision), M6 bootstrap recipes, M7 cloud
+store. No milestone is active.
 
 ## Thesis
 
@@ -134,6 +135,21 @@ history file.
   thread, not shown alongside it. (e) The author machine never renders
   its own thread as mirrored, under any event ordering (delete race).
   (f) Sync-status copy reads identically on both machines.
+
+- **2026-07-31 — hand-off deleted (field):** supersedes the "survives as
+  a nicety" clause of (c): with resume needing nothing from the source
+  machine, the explicit hand-off action earned nothing and is removed
+  entirely (header button, dialog, park route). Briefs remain
+  user-editable; the transcript payload's `parked` field is
+  legacy-decode-only.
+- **2026-07-31 — bidirectional visibility (field):** live thread
+  visibility must work in BOTH directions — the callee machine seeing the
+  initiator's threads only as greyed mirrors defeats the one-list
+  promise. The one-directional attach (M2.5/D4 minted credentials for the
+  initiator only) is not the end state; runs as **M5.6** before M6, with
+  its own analysis pass (mint attach both ways in the one handshake; the
+  callee's server must hand the registration to its own clients; honest
+  offline behavior when the reverse direction is unreachable).
 
 ## Architecture
 
@@ -385,6 +401,7 @@ detail live in the history and reference files.
 | M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | ✅ 2026-07-18. |
 | M5 — Briefs + transcripts | "Conversations" pairing row + mirrored read-only threads + park/brief/resume. | ✅ 2026-07-22. |
 | M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | ✅ 2026-07-31 (PRs #89–#94; one visible-window field check pending — see history). |
+| M5.6 — Bidirectional pairing | The 2026-07-31 binding decision: the one handshake makes BOTH machines full citizens — each client sees the other machine's projects/threads live when reachable. Analysis pass first (reverse attach minting, server-provided client registration on the callee, reverse-unreachable behavior). | On the callee machine, the initiator's projects and threads appear live while it is reachable and grey out when not, under the same one-row rules. Canonical re-run. |
 | M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 
