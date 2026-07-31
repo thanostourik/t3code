@@ -961,6 +961,56 @@ export const RoamingPairMachineResponse = Schema.Struct({
 export type RoamingPairMachineResponse = typeof RoamingPairMachineResponse.Type;
 
 /**
+ * The reverse half of the unified handshake (M5.6 bidirectional pairing):
+ * after the mirror credential is minted, the initiator posts this to the
+ * callee so the callee's OWN clients can attach back to the initiator —
+ * one pairing makes both machines full citizens. Best-effort: a callee
+ * without this route (pre-M5.6) answers 404 and pairing proceeds
+ * one-directionally. Authenticated by the same handshake bearer
+ * (access:write). Carries a bearer token — `cache-control: no-store` on
+ * anything echoing it, and the token must never be logged.
+ */
+export const RoamingAttachRegistration = Schema.Struct({
+  /** The environment this registration attaches to (the initiator). */
+  environmentId: EnvironmentId,
+  /** The initiator's human label, shown as the environment name. */
+  label: TrimmedNonEmptyString,
+  /**
+   * Candidate base URLs for reaching the initiator — best-effort
+   * self-advertisement (bound port x network interfaces, loopback last).
+   * Clients probe in order and identity-check the descriptor at a URL
+   * against `environmentId` before trusting it. Client-attach only: the
+   * callee never dials these for mirror traffic (it holds no mirror
+   * credential — mirror connectivity stays one-directional).
+   */
+  baseUrls: Schema.Array(TrimmedNonEmptyString).check(Schema.isNonEmpty()),
+  /**
+   * Standard-scoped attach bearer minted by the initiator for the callee's
+   * clients (subject `roaming-peer:<callee envId>`, machine-credential TTL).
+   */
+  token: TrimmedNonEmptyString,
+  expiresAt: Schema.NullOr(IsoDateTime),
+});
+export type RoamingAttachRegistration = typeof RoamingAttachRegistration.Type;
+
+export const RoamingRegisterAttachResponse = Schema.Struct({
+  registered: Schema.Boolean,
+});
+export type RoamingRegisterAttachResponse = typeof RoamingRegisterAttachResponse.Type;
+
+/**
+ * Local (user-session) RPC: the server-provided registrations this
+ * machine's clients reconcile into their environment catalog as ordinary
+ * bearer connections (the third producer beside the browser catalog and
+ * the desktop platform source; never persisted into the browser catalog).
+ */
+export const RoamingListAttachRegistrationsResponse = Schema.Struct({
+  registrations: Schema.Array(RoamingAttachRegistration),
+});
+export type RoamingListAttachRegistrationsResponse =
+  typeof RoamingListAttachRegistrationsResponse.Type;
+
+/**
  * Local (user-session) RPCs backing the per-environment sync controls
  * (2026-07-06 product decision): each saved environment row shows whether a
  * mirror to that machine exists and lets the user turn it off. Turning it
@@ -1016,6 +1066,8 @@ export const ROAMING_PEERS_LIST_PATH = "/api/roaming/peers/list";
 export const ROAMING_PEERS_REMOVE_PATH = "/api/roaming/peers/remove";
 export const ROAMING_PEERS_SYNC_PATH = "/api/roaming/peers/sync";
 export const ROAMING_HANDSHAKE_COMPLETE_PATH = "/api/roaming/handshake-complete";
+export const ROAMING_ATTACH_REGISTRATION_PATH = "/api/roaming/attach-registration";
+export const ROAMING_ATTACH_REGISTRATIONS_LIST_PATH = "/api/roaming/attach-registration/list";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
 export const ROAMING_WIP_TAKEOVER_PATH = "/api/roaming/wip/takeover";
