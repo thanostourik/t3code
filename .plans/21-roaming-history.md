@@ -2296,3 +2296,16 @@ User decisions from continued field testing (PR #97):
 Acceptance after the round: accept-m5 (revised), accept-m55, and
 canonical accept-m2.5 ALL PASS on fresh states; typecheck clean across
 contracts/server/web.
+
+## 2026-07-31 — continue-while-live (field round 3)
+
+Field verdict: gating Continue-here on the peer being OFFLINE was an
+accident of entry-point placement (the action only lived on the fallback
+view), not a recorded decision — the mirror copy is present the whole
+time. Now a binding decision: continue anywhere, anytime. The resume flow
+moved into a shared `useContinueHere` hook; the live thin-client thread's
+header carries the action (label reflects the pending work:
+"Materialize & continue" / "Continue here" / "Preparing…"). Verified on
+the harness browser with the peer LIVE end-to-end: dialog-paired thin
+client -> one live row -> header action -> materialize dialog -> clone ->
+pre-filled draft, nothing auto-started (PR #99).

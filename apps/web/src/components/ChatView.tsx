@@ -226,6 +226,7 @@ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
+import { useContinueHere } from "~/hooks/useContinueHere";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -1651,6 +1652,19 @@ function ChatViewContent(props: ChatViewProps) {
   // drive the environment picker in BranchToolbar.
   const allProjects = useProjects();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  // Continue-here on a LIVE remote thread (M5.5, 2026-07-31 decision): the
+  // mirrored copy syncs behind the live connection, so continuing on this
+  // machine never requires the other machine to be offline.
+  const continueHereEligible =
+    routeKind === "server" &&
+    activeThread != null &&
+    primaryEnvironmentId !== null &&
+    activeThread.environmentId !== primaryEnvironmentId &&
+    activeProject?.workspaceProjectId !== undefined;
+  const remoteContinueHere = useContinueHere({
+    threadId: continueHereEligible && activeThread != null ? activeThread.id : null,
+    workspaceProjectId: continueHereEligible ? (activeProject?.workspaceProjectId ?? null) : null,
+  });
   const activeEnvironment =
     activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
@@ -5761,8 +5775,17 @@ function ChatViewContent(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
+            onContinueHere={continueHereEligible ? remoteContinueHere.continueHere : undefined}
+            continueHereLabel={
+              remoteContinueHere.busy
+                ? "Preparing…"
+                : remoteContinueHere.needsMaterialize
+                  ? "Materialize & continue"
+                  : "Continue here"
+            }
           />
         </header>
+        {continueHereEligible ? remoteContinueHere.dialog : null}
         <ThreadErrorBanner
           error={threadError}
           onDismiss={() => setThreadError(activeThread.id, null)}
