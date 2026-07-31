@@ -2309,3 +2309,45 @@ header carries the action (label reflects the pending work:
 the harness browser with the peer LIVE end-to-end: dialog-paired thin
 client -> one live row -> header action -> materialize dialog -> clone ->
 pre-filled draft, nothing auto-started (PR #99).
+
+## 2026-07-31 — M5.6 bidirectional pairing (analysis + results)
+
+Analysis pass (PR #100) verified the one-directional structure: the
+callee ends the M2.5 handshake with only an insert-only peer row
+(`baseUrls: []`, nothing client-visible), client registrations are
+per-browser IndexedDB, and the client environment list has exactly two
+producers (browser catalog, desktop platform source) with a reconcile
+seam ready for a third. Deviations recorded before coding: (a) the M1
+"the server advertises no URLs" rule amended to best-effort
+self-advertisement for client attach only (bound port × interfaces,
+loopback last) — mirror tamper-resistance untouched; (b) the reverse
+grant rides a NEW best-effort handshake call (`attach-registration`)
+instead of changing the machine-credential wire, so pre-M5.6 callees
+keep pairing cleanly (404 → one-directional); (c) reverse attach TTL =
+the machine credential's 365d, not the 30d forward session, because the
+registration is server-held with no re-mint path short of re-pairing.
+Subject `roaming-peer:<envId>` reuses the one-device Authorized-clients
+grouping and the unpair revocation sweep for free.
+
+Landed as PRs #101 (contracts), #102 (callee store/routes/shell event),
+#103 (initiator reverse mint + self-advertisement), #104 (client:
+registrations ride the platform source; identity-probed candidate URLs;
+never the browser catalog), #105 (review fix + accept-m56). The
+independent review pass found one P2 — the freshly minted reverse
+session was revoked only on the 404 path, orphaning a 365-day
+standard-scoped session on network errors — fixed in #105. (Process
+note: the delegated codex review hung silently again and was taken back
+inline; that's three strikes for background codex reviews.)
+
+Acceptance (fresh state per script): accept-m56 ALL PASS (callee-only
+registration + gate-404 + no-store + token reads B's shell but not admin
+routes + both teardown directions), canonical accept-m2.5 ALL PASS,
+accept-m5 and accept-m55 ALL PASS (ws/shell surfaces were touched).
+Browser walk on the harness (headless caveats as M5.5 — fresh mounts,
+`position:absolute` animation corpses filtered): with both machines up
+the callee shows B's project and thread as ONE live ungreyed row; with B
+killed, a fresh mount shows the same thread as ONE greyed mirrored
+fallback plus the pre-existing "Failed to connect. Reconnecting…"
+saved-remote banner; with B restarted, live again. Mid-session
+convergence (row flipping without a reload) remains unmeasurable in the
+hidden tab — same visible-window field check as M5.5 still pending.

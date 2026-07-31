@@ -35,6 +35,14 @@ live in `21-roaming-history.md`.
   criteria (one row per thread, greyed fallback, resume-as-draft) are
   client-side and were verified by a browser walk on the harness —
   headless caveat in Accepted risks.
+  `accept-m56.mjs` (M5.6 server-verifiable criteria: attach registration
+  exists on the callee only and 404s pre-pairing; carries the
+  initiator's envId/label/URLs with `no-store`; its token reads the
+  initiator's shell but not admin routes; unpair on the initiator kills
+  the token, unpair on the callee drops the registration). The M5.6 row
+  presentation (live on the callee while the initiator is reachable,
+  greyed fallback when not) is client-side and was verified by a browser
+  walk on the harness — headless caveat in Accepted risks.
   `accept-m2.5.mjs` is the canonical-workflow re-run every milestone ends
   with. `accept-m38.mjs` and `accept-m4.mjs` run their origins with
   `receive.hideRefs refs/t3` (bundle fallback) by default and again with
@@ -206,6 +214,49 @@ live in `21-roaming-history.md`.
   merged list and their mirrored offline+Materialize rows surface.
 - Credential hygiene: bearer responses `cache-control: no-store`; tokens
   never logged; all network steps complete before anything persists.
+- Attach registrations (M5.6 — the reverse half of the one handshake):
+  after the mirror credential is minted, the initiator mints a
+  standard-scoped 365-day session (subject `roaming-peer:<callee envId>`
+  so the one-device grouping and the removal sweep cover it; label
+  `<callee label> — attach`; TTL = MACHINE_CREDENTIAL_TTL) and POSTs
+  `RoamingAttachRegistration { environmentId, label, baseUrls, token,
+  expiresAt }` to the callee's `POST /api/roaming/attach-registration`
+  (handshake bearer; un-gated pairing-route family but only accepted for
+  an environment that already exists as a peer; self-registration
+  rejected). Best-effort end to end: 404 (pre-M5.6 callee), network
+  error, or rejection revokes the just-minted session and pairing stays
+  one-directional; failures log failure TAGS only (bodies carry live
+  bearers). Advertised URLs come from `advertisedBaseUrls` in
+  `startupAccess.ts` — only URLs the socket listens on: specific bind →
+  that address; default bind → loopback; wildcard → external IPv4
+  interfaces then loopback; actual port from the persisted
+  server-runtime state (config fallback).
+- Callee storage: `roaming_attach_registrations` (migration 042 —
+  environment_id PK, label, base_urls JSON, expires_at, registered_at);
+  token in ServerSecretStore `roaming-attach-<envId>` (written BEFORE
+  the row). `RoamingAttachRegistrations.list()` re-joins tokens and
+  skips rows with a missing secret (fail-closed). Peer removal drops
+  registration + secret. `POST /api/roaming/attach-registration/list`
+  (access:write, roaming-gated 404, `no-store`) hands them to this
+  machine's clients. Store changes emit the payload-free
+  `roaming-attach-registrations-changed` shell event (tokens never ride
+  the shell stream); the web client currently POLLS instead of
+  consuming the event.
+- Client consumption (web): registrations ride `PlatformConnectionSource`
+  (apps/web/src/connection/platform.ts) — fetched from the primary at
+  most every 15s riding the 3s platform tick, converted to
+  `BearerConnectionRegistration`s (connectionId `bearer:<envId>` → the
+  live-gated remote bucket in `reachableEnvironmentIdsAtom`, so the
+  M5.5 one-row rules apply unchanged) and reconciled like desktop
+  platform entries — add/refresh/remove, never written to the browser
+  catalog; primary/desktop-local claims win on envId collision. Candidate
+  URLs are identity-probed in order (2s cap each; first descriptor
+  answering as the registered environment wins; a wrong-machine answer
+  is skipped); nothing answering installs UNVERIFIED on the first
+  candidate (supervisor retry = the offline presentation) and re-probes
+  each refresh. Failed list fetch keeps the previous cache; empty/404
+  clears it (gate-off masking). Hosted static apps have no platform
+  source → no server-provided registrations.
 - `enrollProject` losing the decider race to a concurrent enrollment
   (auto-enroll fires on peer-added while the route call is in flight)
   adopts the winner's workspaceProjectId instead of erroring (M5).
@@ -664,6 +715,16 @@ live in `21-roaming-history.md`.
   other local branches do not roam. Both
   machines must run ≥M3.8 builds before branch-aware behavior holds
   end-to-end.
+- M5.6 reverse attach: the 365d server-held bearer has no refresh path —
+  expiry silently degrades the callee to greyed mirrors until re-pair.
+  An UNVERIFIED candidate URL receives the bearer header on connection
+  attempts; if that IP is later reassigned (DHCP) the token is exposed
+  to whatever listens there — same trust class as the recorded mirror
+  base URLs; LAN-local. Registration freshness on the callee's clients
+  is poll-bound (≤15s); a removed peer's environment can linger while
+  the primary's list fetch fails. The initiator's OTHER browsers still
+  hold no registration (forward attach stays per-browser catalog —
+  pre-existing gap, unchanged).
 - M5.5 one-row invariant: fresh mounts of both states verified on the
   harness (both-online → one live row; peer-dead → one greyed fallback).
   MID-SESSION convergence (row flipping live↔fallback without a reload)
