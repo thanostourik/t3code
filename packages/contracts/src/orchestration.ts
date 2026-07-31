@@ -526,6 +526,15 @@ export const OrchestrationShellStreamEvent = Schema.Union([
     sequence: NonNegativeInt,
     roamingThread: RoamingThreadShell,
   }),
+  /**
+   * The server's attach registrations changed (M5.6). Deliberately
+   * payload-free — bearer tokens never ride the shell stream; clients
+   * refetch over the authenticated no-store HTTP route.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("roaming-attach-registrations-changed"),
+    sequence: NonNegativeInt,
+  }),
 ]);
 export type OrchestrationShellStreamEvent = typeof OrchestrationShellStreamEvent.Type;
 
