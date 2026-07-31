@@ -588,37 +588,51 @@ const make = Effect.gen(function* () {
             subject: `roaming-peer:${credential.environmentId}`,
             label: `${peerLabel ?? credential.environmentId} — attach`,
           });
-          const registrationBody = yield* encodeAttachRegistration({
-            environmentId,
-            label: ownLabel,
-            baseUrls: advertisedBaseUrls(config.host, port),
-            token: reverseSession.token,
-            expiresAt: DateTime.formatIso(reverseSession.expiresAt),
-          });
-          const response = yield* httpClient
-            .pipe(
-              HttpClient.mapRequest(
-                HttpClientRequest.setHeader("authorization", `Bearer ${exchange.token}`),
-              ),
-            )
-            .post(`${reachableBaseUrl.replace(/\/$/, "")}${ROAMING_ATTACH_REGISTRATION_PATH}`, {
-              body: HttpBody.jsonUnsafe(registrationBody),
+          const registered = yield* Effect.gen(function* () {
+            const registrationBody = yield* encodeAttachRegistration({
+              environmentId,
+              label: ownLabel,
+              baseUrls: advertisedBaseUrls(config.host, port),
+              token: reverseSession.token,
+              expiresAt: DateTime.formatIso(reverseSession.expiresAt),
             });
-          if (response.status === 404) {
-            // Old callee: revoke the unused session instead of leaving a
-            // 365-day orphan.
+            const response = yield* httpClient
+              .pipe(
+                HttpClient.mapRequest(
+                  HttpClientRequest.setHeader("authorization", `Bearer ${exchange.token}`),
+                ),
+              )
+              .post(`${reachableBaseUrl.replace(/\/$/, "")}${ROAMING_ATTACH_REGISTRATION_PATH}`, {
+                body: HttpBody.jsonUnsafe(registrationBody),
+              });
+            if (response.status === 404) {
+              yield* Effect.logInfo(
+                "roaming: peer does not support bidirectional pairing; reverse attach skipped",
+              );
+              return false;
+            }
+            yield* HttpClientResponse.filterStatusOk(response);
+            return true;
+          }).pipe(
+            Effect.catch((cause) =>
+              // Never the raw cause: the request bodies above carry live
+              // bearer tokens a structured logger would emit.
+              Effect.logWarning("roaming: reverse attach registration failed", {
+                failureTag: (cause as { readonly _tag?: string })._tag ?? "unknown-failure",
+              }).pipe(Effect.as(false)),
+            ),
+          );
+          // The callee never received the token (404, network error, or a
+          // rejected registration): revoke the unused session instead of
+          // leaving a 365-day orphan in Authorized clients.
+          if (!registered) {
             yield* auth.revokeSession(reverseSession.sessionId).pipe(Effect.ignore);
-            yield* Effect.logInfo(
-              "roaming: peer does not support bidirectional pairing; reverse attach skipped",
-            );
-            return;
           }
-          yield* HttpClientResponse.filterStatusOk(response);
         }).pipe(
+          // Minting is the only failure left out here; pairing stays
+          // best-effort one-directional if it breaks.
           Effect.catch((cause) =>
-            // Never the raw cause: the request bodies above carry live
-            // bearer tokens a structured logger would emit.
-            Effect.logWarning("roaming: reverse attach registration failed", {
+            Effect.logWarning("roaming: reverse attach session mint failed", {
               failureTag: (cause as { readonly _tag?: string })._tag ?? "unknown-failure",
             }),
           ),
