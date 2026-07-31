@@ -364,7 +364,7 @@ export const RoamingTranscriptPayload = Schema.Struct({
   updatedAt: IsoDateTime,
   /** Terminal state of the newest turn at capture time, when one exists. */
   lastTurnState: Schema.optional(Schema.Literals(["running", "interrupted", "completed", "error"])),
-  /** Set by park: this thread was deliberately handed off (a brief exists or is coming). */
+  /** Legacy (hand-off, removed 2026-07-31): kept so old payloads decode. */
   parked: Schema.optional(Schema.Boolean),
   /**
    * Tombstone: the authoring machine deleted (or archived) the thread. All
@@ -443,24 +443,6 @@ export const RoamingThreadTranscriptResponse = Schema.Struct({
   authorEnvironmentId: Schema.NullOr(EnvironmentId),
 });
 export type RoamingThreadTranscriptResponse = typeof RoamingThreadTranscriptResponse.Type;
-
-/**
- * Local (user-session) RPC: park a LOCAL thread — force a final transcript
- * capture (marked `parked`), generate the resumption brief, request a final
- * WIP capture when WIP consent is on (skip-not-fail, surfaced in
- * `notices`). Returns the written brief for immediate editing.
- */
-export const RoamingThreadParkRequest = Schema.Struct({
-  threadId: ThreadId,
-});
-export type RoamingThreadParkRequest = typeof RoamingThreadParkRequest.Type;
-
-export const RoamingThreadParkResponse = Schema.Struct({
-  brief: RoamingBriefPayload,
-  /** Honest caveats that are not failures ("WIP snapshot skipped: sync is off"). */
-  notices: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-});
-export type RoamingThreadParkResponse = typeof RoamingThreadParkResponse.Type;
 
 /** Local (user-session) RPC: save an edited brief (new blob version, newest-wins). */
 export const RoamingBriefSaveRequest = Schema.Struct({
@@ -1040,7 +1022,6 @@ export const ROAMING_WIP_TAKEOVER_PATH = "/api/roaming/wip/takeover";
 export const ROAMING_WIP_DIVERGENCE_PATH = "/api/roaming/wip/divergence";
 export const ROAMING_WIP_DIVERGENCE_RESOLVE_PATH = "/api/roaming/wip/divergence/resolve";
 export const ROAMING_THREAD_TRANSCRIPT_PATH = "/api/roaming/threads/transcript";
-export const ROAMING_THREAD_PARK_PATH = "/api/roaming/threads/park";
 export const ROAMING_BRIEF_SAVE_PATH = "/api/roaming/briefs/save";
 export const ROAMING_BRIEF_GENERATE_PATH = "/api/roaming/briefs/generate";
 export const ROAMING_THREAD_RESUMED_PATH = "/api/roaming/threads/resumed";

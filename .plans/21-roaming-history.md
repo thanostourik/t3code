@@ -2266,3 +2266,33 @@ auto-bidirectional attach at pairing (M6-adjacent design question);
 (2) Continue-here on an unmaterialized project — recommendation:
 materialize-and-continue as one action; (3) hand-off's post-M5.5 value is
 marginal — recommendation: delete the button + park route.
+
+## 2026-07-31 — M5.5 field round 2: hand-off deleted, materialize-and-continue, M5.6 queued
+
+User decisions from continued field testing (PR #97):
+
+- **Hand-off deleted** (supersedes the "survives as a nicety" clause of
+  correction c): with resume needing nothing from the source machine, the
+  explicit action earned nothing — button, dialog, and park route
+  removed; `parked` is legacy-decode-only; accept-m5's park leg replaced
+  by a briefs/save leg. The user's question "what nicety does it even
+  offer?" had no good answer — pre-generating a brief the laptop can
+  generate itself, and forcing a WIP snapshot that continuous capture
+  makes ≤5s stale anyway.
+- **Materialize-and-continue:** Continue-here on an unmaterialized
+  project now reads "Materialize & continue" and runs the shared
+  materialize confirm dialog before opening the pre-filled draft — one
+  action, per canonical step 4. Verified E2E on the harness browser
+  (fresh unmaterialized state → dialog → clone → prefilled draft, nothing
+  auto-started).
+- **Bidirectional visibility queued as M5.6** (binding decision): the
+  field session surfaced that the desktop sees the laptop's threads only
+  as greyed mirrors even while the laptop is live — structural, not a
+  bug: upstream pairing is client→server directional and M2.5/D4 minted
+  credentials for the initiator only. The user's verdict: "of course I
+  want bidirectional — that's the whole point of the Dropbox feeling."
+  M5.6 runs before M6 with its own analysis pass.
+
+Acceptance after the round: accept-m5 (revised), accept-m55, and
+canonical accept-m2.5 ALL PASS on fresh states; typecheck clean across
+contracts/server/web.

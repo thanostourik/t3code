@@ -812,7 +812,6 @@ const buildAppUnderTest = (options?: {
             start: () => Effect.void,
             captureThread: () => Effect.void,
             captureAll: () => Effect.void,
-            park: () => Effect.die("unused"),
             saveBrief: () => Effect.die("unused"),
             generateBrief: () => Effect.die("unused"),
           } satisfies TranscriptSync["Service"]),

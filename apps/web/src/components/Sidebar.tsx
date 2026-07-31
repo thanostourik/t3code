@@ -2920,10 +2920,14 @@ function useRoamingPeerSyncEnabled(environmentId: string | null): boolean | null
   return map.get(environmentId) ?? null;
 }
 
-type MaterializeTarget = {
+export type MaterializeTarget = {
   readonly title: string;
   readonly dirName: string;
   readonly workspaceProjectId: EnvironmentRoamingProject["roamingProject"]["workspaceProjectId"];
+  /** Confirm-button label override ("Materialize & continue" on resume). */
+  readonly confirmLabel?: string;
+  /** Called after a completed materialization (resume chains the draft here). */
+  readonly onSuccess?: (localProjectId: ProjectId | null) => void;
 };
 
 const joinTargetPath = (baseDirectory: string, dirName: string): string => {
@@ -3198,7 +3202,7 @@ function ProjectSyncIndicator(props: {
   );
 }
 
-function useMaterialize() {
+export function useMaterialize() {
   const defaultBaseDirectory = usePrimarySettings((settings) => settings.addProjectBaseDirectory);
   const [pending, setPending] = useState<MaterializeTarget | null>(null);
   const [targetPath, setTargetPath] = useState("");
@@ -3240,6 +3244,7 @@ function useMaterialize() {
           description: result.notices.length > 0 ? result.notices.join(" · ") : undefined,
         });
         setPending(null);
+        target.onSuccess?.(result.localProjectId ?? null);
       } catch (error) {
         toastManager.add({
           type: "error",
@@ -3291,7 +3296,7 @@ function useMaterialize() {
             Cancel
           </Button>
           <Button disabled={busy || targetPath.trim() === ""} onClick={submit}>
-            {busy ? "Materializing…" : "Materialize"}
+            {busy ? "Materializing…" : (pending?.confirmLabel ?? "Materialize")}
           </Button>
         </DialogFooter>
       </DialogPopup>

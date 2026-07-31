@@ -1,11 +1,11 @@
 // M5 briefs + transcripts acceptance on the fresh M0 two-instance harness.
 // Exit criteria: threads from A readable on B (mirrored transcript, shell
-// row, never in A's own mirrored list); park produces an editable brief that
-// mirrors; deletion mirrors as a tombstone; and B's restart/reconcile never
-// tombstones A's live transcripts (author-only writes — the M5 review
-// critical). Transcripts ride the P2P mirror only, so there are no
-// transport variants. The canonical pairing walk remains accept-m2.5.mjs
-// and is rerun separately.
+// row, never in A's own mirrored list); briefs are user-editable and
+// mirror (hand-off/park removed 2026-07-31); deletion mirrors as a
+// tombstone; and B's restart/reconcile never tombstones A's live
+// transcripts (author-only writes — the M5 review critical). Transcripts
+// ride the P2P mirror only, so there are no transport variants. The
+// canonical pairing walk remains accept-m2.5.mjs and is rerun separately.
 //
 // M5.5 note: the product resume flow is now a pre-filled DRAFT (see
 // accept-m55.mjs); this script's resume leg survives as the server-visible
@@ -182,19 +182,10 @@ if (shellA?.roamingThreads?.some((candidate) => candidate.threadId === threadId)
   fail("author filter", "A lists its own thread as mirrored");
 pass("A's own thread is not in A's mirrored list");
 
-// ── Park on A: a brief exists and is editable; both mirror to B ──────────
-const parked = await api(A.url, "/api/roaming/threads/park", {
-  method: "POST",
-  token: adminA,
-  body: { threadId },
-});
-if (!parked.ok) fail("park", `${parked.status}`);
-const parkResult = await parked.json();
-if (!parkResult.brief?.markdown?.length) fail("park", "no brief markdown");
-if (!Array.isArray(parkResult.notices)) fail("park", "no notices array");
-pass(`park produced a brief (${parkResult.notices.length} notices)`);
-
-const EDITED_BRIEF = `${parkResult.brief.markdown}\n\nEDITED-ON-A ${randomUUID()}`;
+// ── Briefs are user-editable and mirror to B (hand-off/park removed
+// 2026-07-31 — a brief is now written via save, generated on demand by
+// the resuming machine) ────────────────────────────────────────────────
+const EDITED_BRIEF = `# Resuming: Fix the login flow\n\nEDITED-ON-A ${randomUUID()}`;
 const saved = await api(A.url, "/api/roaming/briefs/save", {
   method: "POST",
   token: adminA,
@@ -202,18 +193,18 @@ const saved = await api(A.url, "/api/roaming/briefs/save", {
 });
 if (!saved.ok) fail("brief save", `${saved.status}`);
 if (!(await saved.json()).brief.editedAt) fail("brief save", "editedAt missing");
+pass("brief saved on A");
 
-const briefOnB = await waitFor("edited brief reaches B", 120_000, async () => {
+await waitFor("edited brief reaches B", 120_000, async () => {
   const remote = await transcriptOf(B, adminB, threadId);
   return remote?.brief?.markdown === EDITED_BRIEF ? remote : null;
 });
-if (briefOnB.transcript?.parked !== true) fail("park", "mirrored transcript not marked parked");
 await waitFor("B's shell row shows the brief", 60_000, async () => {
   const shell = await shellOf(B, adminB);
   const row = shell?.roamingThreads?.find((candidate) => candidate.threadId === threadId);
-  return row?.hasBrief === true && row.parked === true ? true : null;
+  return row?.hasBrief === true ? true : null;
 });
-pass("edited brief and parked marker mirrored to B");
+pass("edited brief mirrored to B");
 
 // ── Resume on B: materialize, then seed a new local thread from the brief ─
 const bRoot = join(HARNESS_DIR, "m5-b-workspace");
