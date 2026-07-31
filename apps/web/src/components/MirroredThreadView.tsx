@@ -391,11 +391,6 @@ export function MirroredThreadView() {
             <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
               {machineLabel !== null ? `From ${machineLabel}` : "From another machine"}
             </span>
-            {transcript.parked === true ? (
-              <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
-                Handed off
-              </span>
-            ) : null}
           </div>
           <p className="truncate text-[11px] text-muted-foreground">
             Read-only

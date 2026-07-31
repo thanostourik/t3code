@@ -10,12 +10,12 @@
  * into its event log. Thread deletion/archival mirrors as a tombstone
  * payload (`deleted: true`) because the blob store has no delete.
  *
- * Park = force a final transcript capture (marked `parked`), request a final
- * WIP snapshot when WIP consent is on (skip-not-fail), and write an
- * agent-generated resumption brief — via the background text-generation
- * facility, never a thread turn, so parking cannot append to the thread.
- * The brief falls back to a deterministic digest when no provider is
- * available, with an honest notice.
+ * Briefs are generated on the RESUMING machine from its local transcript
+ * copy (`generateBrief` — via the background text-generation facility,
+ * never a thread turn; deterministic-digest fallback with a notice) and
+ * are user-editable via `saveBrief`. The hand-off/park flow was removed
+ * 2026-07-31; the payload's `parked` field and the worker's sticky-parked
+ * handling survive only so legacy blobs keep decoding.
  */
 import {
   ModelSelection,
@@ -25,7 +25,6 @@ import {
   RoamingBriefPayload,
   RoamingTranscriptPayload,
   type OrchestrationThread,
-  type RoamingThreadParkResponse,
   type ThreadId,
   type WorkspaceProjectId,
 } from "@t3tools/contracts";
@@ -49,18 +48,9 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import { RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers } from "./RoamingPeers.ts";
-import { WipSnapshotReactor } from "./WipSnapshotReactor.ts";
 
 /** Character budget for the transcript text handed to brief generation. */
 const BRIEF_INPUT_MAX_CHARS = 50_000;
-
-export class TranscriptParkError extends Schema.TaggedErrorClass<TranscriptParkError>()(
-  "TranscriptParkError",
-  {
-    reason: Schema.Literals(["thread-not-found", "project-not-enrolled", "internal"]),
-    detail: Schema.optional(Schema.String),
-  },
-) {}
 
 export class TranscriptBriefError extends Schema.TaggedErrorClass<TranscriptBriefError>()(
   "TranscriptBriefError",
@@ -78,15 +68,6 @@ export class TranscriptSync extends Context.Service<
     readonly captureThread: (threadId: ThreadId) => Effect.Effect<void>;
     /** Reconcile every enrolled project's threads (startup, settings/peer wake). */
     readonly captureAll: () => Effect.Effect<void>;
-    /**
-     * Park a LOCAL thread: final `parked` transcript capture (runs even when
-     * the Conversations flag is off — clicking Park IS the consent for this
-     * thread, surfaced as a notice), best-effort final WIP snapshot, brief
-     * generation + blob write. Returns the brief for immediate editing.
-     */
-    readonly park: (
-      threadId: ThreadId,
-    ) => Effect.Effect<RoamingThreadParkResponse, TranscriptParkError>;
     /** Save an edited brief as a new blob version (either machine, newest-wins). */
     readonly saveBrief: (
       threadId: ThreadId,
@@ -293,7 +274,6 @@ const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const textGeneration = yield* TextGeneration;
-  const wipReactor = yield* WipSnapshotReactor;
 
   const isEnabled = Effect.gen(function* () {
     if (!(yield* peers.roamingEnabled)) {
@@ -497,97 +477,6 @@ const make = Effect.gen(function* () {
       });
     });
 
-  const park: TranscriptSync["Service"]["park"] = (threadId) =>
-    Effect.gen(function* () {
-      const threadRow = yield* threadRepository
-        .getById({ threadId })
-        .pipe(Effect.orElseSucceed(() => Option.none()));
-      if (Option.isNone(threadRow) || threadRow.value.deletedAt !== null) {
-        return yield* new TranscriptParkError({ reason: "thread-not-found" });
-      }
-      const workspaceProjectId = yield* enrolledWorkspaceProjectId(threadRow.value.projectId);
-      if (workspaceProjectId === null) {
-        return yield* new TranscriptParkError({ reason: "project-not-enrolled" });
-      }
-      const notices: string[] = [];
-      const settings = yield* serverSettings.getSettings.pipe(Effect.orElseSucceed(() => null));
-      if (settings !== null && !settings.roamingTranscriptSync) {
-        notices.push(
-          "Conversation sync is off — this conversation was mirrored for the handoff anyway.",
-        );
-      }
-
-      // Final transcript capture, marked parked — through the worker, so it
-      // can never interleave with an in-flight event capture (a direct call
-      // raced one and the plain rebuild overwrote the parked payload); drain
-      // so the response reflects a completed capture. The worker's merge
-      // spreads options, so a coalesced plain enqueue keeps `parked`.
-      yield* worker.enqueue(threadId, { parked: true, force: true });
-      yield* worker.drainKey(threadId);
-
-      // Final WIP snapshot: consent-gated, skip-not-fail.
-      if (settings !== null && settings.roamingWipSync) {
-        yield* wipReactor.snapshotProject(workspaceProjectId);
-        notices.push("Final work-in-progress snapshot requested.");
-      } else {
-        notices.push("Work-in-progress snapshot skipped: Work in progress sync is off.");
-      }
-
-      // Brief: agent-generated via the background text-generation job;
-      // deterministic fallback (with notice) when no provider answers.
-      const transcript = yield* readOwnTranscript(threadId);
-      if (transcript === null) {
-        return yield* new TranscriptParkError({
-          reason: "internal",
-          detail: "transcript capture produced no payload",
-        });
-      }
-      const project = yield* projectRepository.listAll().pipe(
-        Effect.map((projects) =>
-          projects.find((candidate) => candidate.projectId === threadRow.value.projectId),
-        ),
-        Effect.orElseSucceed(() => undefined),
-      );
-      const generated = yield* textGeneration
-        .generateResumptionBrief({
-          cwd: project?.workspaceRoot ?? ".",
-          title: transcript.payload.title,
-          branch: transcript.payload.branch,
-          transcriptText: transcriptTextForBrief(transcript.payload),
-          modelSelection: threadRow.value.modelSelection,
-        })
-        .pipe(
-          Effect.map((result) => result.markdown),
-          Effect.catch((error) =>
-            Effect.logWarning("roaming transcripts: brief generation fell back", {
-              threadId,
-              error,
-            }).pipe(
-              Effect.andThen(() => {
-                notices.push(
-                  "Brief was assembled without an agent (no provider could generate it) — edit it before resuming.",
-                );
-                return Effect.succeed(fallbackBriefMarkdown(transcript.payload));
-              }),
-            ),
-          ),
-        );
-      const generatedAt = yield* nowIso;
-      const brief: RoamingBriefPayload = {
-        schemaVersion: 1,
-        threadId,
-        workspaceProjectId,
-        markdown: generated.slice(0, ROAMING_BRIEF_MAX_CHARS),
-        generatedAt,
-      };
-      yield* writeBrief(brief).pipe(
-        Effect.mapError(
-          (cause) => new TranscriptParkError({ reason: "internal", detail: String(cause) }),
-        ),
-      );
-      return { brief, notices };
-    });
-
   const generateBrief: TranscriptSync["Service"]["generateBrief"] = (threadId) =>
     Effect.gen(function* () {
       const transcript = yield* readOwnTranscript(threadId);
@@ -735,7 +624,6 @@ const make = Effect.gen(function* () {
     start,
     captureThread,
     captureAll,
-    park,
     saveBrief,
     generateBrief,
   } satisfies TranscriptSync["Service"];
