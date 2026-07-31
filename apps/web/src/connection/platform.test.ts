@@ -7,13 +7,17 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import {
+  buildRoamingRegistration,
   canRetainCachedPlatformRegistrationAfterRefreshFailure,
   canReuseCachedPlatformRegistration,
   primaryRegistrationToRetainAfterTopologyRead,
   provisionDesktopSshEnvironment,
   readPrimaryEnvironmentTargetResult,
+  roamingRegistrationSignature,
   secondaryRegistrationsToRetainAfterTopologyRead,
   secondaryBearerExpiresAtEpochMs,
   secondaryBearerRefreshAtEpochMs,
@@ -221,5 +225,77 @@ describe("primary topology cache", () => {
         target: null,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("buildRoamingRegistration (M5.6)", () => {
+  const INITIATOR_ID = EnvironmentId.make("env-initiator");
+  const registration = {
+    environmentId: INITIATOR_ID,
+    label: "Laptop",
+    baseUrls: ["http://10.0.0.5:14801", "http://127.0.0.1:14801"],
+    token: "attach-token",
+    expiresAt: null,
+  };
+
+  // Serves /.well-known/t3/environment per origin; other origins fail.
+  const descriptorHttpLayer = (byOrigin: Record<string, string>) =>
+    FetchHttpClient.layer.pipe(
+      Layer.provide(
+        Layer.succeed(FetchHttpClient.Fetch, ((input: RequestInfo | URL) => {
+          const url = new URL(
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+          );
+          const environmentId = byOrigin[url.origin];
+          if (environmentId === undefined) {
+            return Promise.reject(new Error("connection refused"));
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                environmentId,
+                label: "Laptop",
+                platform: { os: "linux", arch: "x64" },
+                serverVersion: "0.0.0-test",
+                capabilities: { repositoryIdentity: true },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }) as typeof fetch),
+      ),
+    );
+
+  it.effect("picks the first candidate whose descriptor matches the registered environment", () =>
+    Effect.gen(function* () {
+      const built = yield* buildRoamingRegistration(registration);
+      expect(built.verified).toBe(true);
+      expect(built.registration.profile.httpBaseUrl).toBe("http://127.0.0.1:14801/");
+      expect(built.registration.target.connectionId).toBe(`bearer:${INITIATOR_ID}`);
+      expect(built.registration.credential.token).toBe("attach-token");
+    }).pipe(
+      // First candidate answers as the WRONG environment (loopback echo of
+      // another machine) — it must be skipped, not trusted.
+      Effect.provide(
+        descriptorHttpLayer({
+          "http://10.0.0.5:14801": "env-someone-else",
+          "http://127.0.0.1:14801": INITIATOR_ID,
+        }),
+      ),
+    ),
+  );
+
+  it.effect("installs unverified on the first candidate when nothing answers", () =>
+    Effect.gen(function* () {
+      const built = yield* buildRoamingRegistration(registration);
+      expect(built.verified).toBe(false);
+      expect(built.registration.profile.httpBaseUrl).toBe("http://10.0.0.5:14801/");
+    }).pipe(Effect.provide(descriptorHttpLayer({}))),
+  );
+
+  it("signature covers identity, label, urls, and token", () => {
+    expect(roamingRegistrationSignature(registration)).toBe(
+      `${INITIATOR_ID}|Laptop|http://10.0.0.5:14801,http://127.0.0.1:14801|attach-token`,
+    );
   });
 });
