@@ -111,6 +111,7 @@ import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingService } from "./roaming/RoamingService.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
+import { RoamingAttachRegistrations } from "./roaming/RoamingAttachRegistrations.ts";
 import { RoamingThreadResumptions } from "./roaming/RoamingThreadResumptions.ts";
 import { TranscriptSync } from "./roaming/TranscriptSync.ts";
 import { Materializer } from "./roaming/Materializer.ts";
@@ -1074,6 +1075,17 @@ const buildAppUnderTest = (options?: {
         } satisfies Materializer["Service"]),
       ),
       Layer.provide(Layer.succeed(RoamingThreadResumptions, { record: () => Effect.void, findSourcesByResumedThreadId: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(RoamingAttachRegistrations, {
+            upsert: () => Effect.void,
+            remove: () => Effect.succeed(false),
+            list: () => Effect.succeed([]),
+            subscribeChanges: Effect.gen(function* () {
+              const pubsub = yield* PubSub.unbounded<void>();
+              return yield* PubSub.subscribe(pubsub);
+            }),
+          } satisfies RoamingAttachRegistrations["Service"]),
+        ),
       Layer.provide(Layer.mock(RoamingService)({})),
       Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
       Layer.provide(
