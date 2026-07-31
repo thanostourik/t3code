@@ -51,6 +51,7 @@ import {
   type SidebarProjectGroupingMode,
   ThreadId,
   WorkspaceProjectId,
+  type RoamingThreadShell,
 } from "@t3tools/contracts";
 import {
   parseScopedThreadKey,
@@ -997,13 +998,14 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     () => renderedThreads.filter((thread) => reachableEnvironmentIds.has(thread.environmentId)),
     [renderedThreads, reachableEnvironmentIds],
   );
+  const mirroredRows = useMirroredFallbackRows(workspaceProjectId, reachableEnvironmentIds);
 
   return (
     <SidebarMenuSub
       ref={attachThreadListAutoAnimateRef}
       className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden border-l-0 px-1 py-0 sm:mx-1 sm:px-1.5"
     >
-      {shouldShowThreadPanel && showEmptyThreadState ? (
+      {shouldShowThreadPanel && showEmptyThreadState && mirroredRows.length === 0 ? (
         <SidebarMenuSubItem className="w-full" data-thread-selection-safe>
           <div
             data-thread-selection-safe
@@ -1046,12 +1048,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             />
           );
         })}
-      {shouldShowThreadPanel ? (
-        <SidebarMirroredThreadRows
-          workspaceProjectId={workspaceProjectId}
-          reachableEnvironmentIds={reachableEnvironmentIds}
-        />
-      ) : null}
+      {shouldShowThreadPanel ? <SidebarMirroredThreadRows rows={mirroredRows} /> : null}
 
       {projectExpanded && hasOverflowingThreads && !isThreadListExpanded && (
         <SidebarMenuSubItem className="w-full">
@@ -3011,6 +3008,21 @@ function ProjectSyncIndicator(props: {
     return () => window.clearInterval(interval);
   }, []);
 
+  // This pill reports WIP sync, which only exists for a local checkout — a
+  // remote-only (unmaterialized) row shows no pill instead of an idle
+  // "Synced" (M5.5 field fix).
+  const roamingEntry =
+    props.workspaceProjectId && primaryEnvironmentId
+      ? roamingProjects.find(
+          (candidate) =>
+            candidate.environmentId === primaryEnvironmentId &&
+            candidate.roamingProject.workspaceProjectId === props.workspaceProjectId,
+        )?.roamingProject
+      : undefined;
+  if (roamingEntry !== undefined && roamingEntry.localProjectId === null) {
+    return null;
+  }
+
   if (!entry) {
     // Enrolled + WIP sync on, but no status row in the shell snapshot yet
     // (warm-cache resume used to skip roamingWipStatus until the next pass).
@@ -3289,50 +3301,52 @@ function useMaterialize() {
 }
 
 /**
+ * The greyed fallback rows for a project's mirrored conversations whose
+ * author machine is UNREACHABLE (M5.5): author-reachability gate plus a
+ * structural belt — no fallback while ANY reachable environment holds a
+ * live shell for the same thread. Shared by the thread list (which also
+ * needs the count to suppress its empty state) and the offline project
+ * row; `reachableEnvironmentIds` comes from a single read in the projects
+ * content so live rows and fallback rows always share a vintage.
+ */
+function useMirroredFallbackRows(
+  workspaceProjectId: string | null,
+  reachableEnvironmentIds: ReadonlySet<string>,
+): ReadonlyArray<RoamingThreadShell> {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
+  const allThreadShells = useThreadShells();
+  return useMemo(() => {
+    if (workspaceProjectId === null) {
+      return [];
+    }
+    const liveRowThreadIds = new Set<string>();
+    for (const shell of allThreadShells) {
+      if (reachableEnvironmentIds.has(shell.environmentId)) {
+        liveRowThreadIds.add(shell.id);
+      }
+    }
+    return roamingThreads.filter(
+      (thread) =>
+        thread.workspaceProjectId === workspaceProjectId &&
+        !reachableEnvironmentIds.has(thread.authorEnvironmentId) &&
+        !liveRowThreadIds.has(thread.threadId),
+    );
+  }, [workspaceProjectId, roamingThreads, allThreadShells, reachableEnvironmentIds]);
+}
+
+/**
  * Mirrored-conversation rows (M5, surfacing corrected in M5.5): the greyed
  * fallback for a peer that is UNREACHABLE. While the author machine is live,
  * its threads are already in the list as thin-client rows and the mirror
  * stays invisible behind them — one row per thread, ever (the
  * offline-project-row model applied to threads). Opening a fallback row
  * shows the read-only transcript from the local copy.
- *
- * `reachableEnvironmentIds` is passed down from a single read in the
- * projects content — computing it per component was observed tearing
- * during reconnect flapping (two components committed different
- * reachability vintages) and rendered a thread as a live row AND a
- * fallback row at once.
  */
-function SidebarMirroredThreadRows(props: {
-  workspaceProjectId: string | null;
-  reachableEnvironmentIds: ReadonlySet<string>;
-}) {
-  const { reachableEnvironmentIds } = props;
+function SidebarMirroredThreadRows(props: { rows: ReadonlyArray<RoamingThreadShell> }) {
   const router = useRouter();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
   const { environments } = useEnvironments();
-  const allThreadShells = useThreadShells();
-  // Structural belt on top of the author-reachability gate: a fallback row
-  // never renders while ANY reachable environment holds a live shell for
-  // the same thread.
-  const liveRowThreadIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const shell of allThreadShells) {
-      if (reachableEnvironmentIds.has(shell.environmentId)) {
-        ids.add(shell.id);
-      }
-    }
-    return ids;
-  }, [allThreadShells, reachableEnvironmentIds]);
-  if (props.workspaceProjectId === null) {
-    return null;
-  }
-  const rows = roamingThreads.filter(
-    (thread) =>
-      thread.workspaceProjectId === props.workspaceProjectId &&
-      !reachableEnvironmentIds.has(thread.authorEnvironmentId) &&
-      !liveRowThreadIds.has(thread.threadId),
-  );
+  const { rows } = props;
   if (rows.length === 0) {
     return null;
   }
@@ -3381,6 +3395,10 @@ function SidebarOfflineProjectRow(props: {
   reachableEnvironmentIds: ReadonlySet<string>;
 }) {
   const { environmentId, roamingProject } = props.entry;
+  const offlineMirroredRows = useMirroredFallbackRows(
+    roamingProject.workspaceProjectId,
+    props.reachableEnvironmentIds,
+  );
   const materializations = useRoamingMaterializations();
   const materialization =
     materializations.find(
@@ -3466,10 +3484,7 @@ function SidebarOfflineProjectRow(props: {
         )}
       </div>
       <SidebarMenuSub className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1 py-0 sm:mx-1 sm:px-1.5">
-        <SidebarMirroredThreadRows
-          workspaceProjectId={roamingProject.workspaceProjectId}
-          reachableEnvironmentIds={props.reachableEnvironmentIds}
-        />
+        <SidebarMirroredThreadRows rows={offlineMirroredRows} />
       </SidebarMenuSub>
       {materializeDialog}
     </SidebarMenuItem>
