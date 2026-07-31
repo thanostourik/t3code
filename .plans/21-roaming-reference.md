@@ -26,7 +26,8 @@ live in `21-roaming-history.md`.
   variants; includes a harness-restart leg asserting B's reconcile never
   tombstones A's transcripts; its resume leg predates M5.5 and now
   simulates only the server-visible half of resume — thread.create with
-  the brief text — the product flow is the M5.5 draft),
+  the brief text — the product flow is the M5.5 draft; its park leg was
+  replaced by a briefs/save leg when hand-off was removed 2026-07-31),
   `accept-m55.mjs` (M5.5 server-verifiable criteria: payload
   modelSelection, stateless zero-prep brief generation on B, supersession
   lifecycle incl. link-before-thread and restore-on-delete, and a
@@ -82,8 +83,7 @@ live in `21-roaming-history.md`.
   machine's conversation transcripts (P2P only, never the origin host).
   The pairing dialog's pre-checked "Conversations" row is the consent,
   ONE decision applied to both machines (first-pairing-only on the
-  callee, G8). Park bypasses the flag for its one thread (the explicit
-  action is the consent; surfaced as a notice).
+  callee, G8).
 - `roamingSecretsSync` — per-machine capture consent, propagated at pairing
   (the paired-into machine has no settings UI for it — flagged for a future
   Authorized-clients sync row).
@@ -513,20 +513,14 @@ live in `21-roaming-history.md`.
   guard, B's reconcile tombstoned A's mirrored threads at a higher version
   and killed them on both machines (review critical; regression leg in
   accept-m5).
-- `parked` is sticky: set by park, kept by every capture until a new USER
-  message on the author machine (`unpark` enqueue on user message-sent);
-  passive churn (a turn erroring after the handoff) never strips it. Park
-  runs THROUGH the worker + drainKey — a direct capture raced in-flight
-  event captures.
-- Park (`POST /api/roaming/threads/park`, access:write, roaming-gated):
-  forced parked capture → consent-gated WIP snapshot request
-  (skip-not-fail, surfaced in `notices`) → brief via
-  `TextGeneration.generateResumptionBrief` (background job on the thread's
-  modelSelection; all five provider adapters) with a deterministic
-  fallback digest + notice when no provider answers → kind=brief blob
-  write. `POST /api/roaming/briefs/save` writes edits as new versions
-  (either machine, newest-wins). `POST /api/roaming/threads/transcript`
-  returns local transcript + brief + author.
+- Hand-off/park was REMOVED 2026-07-31 (user decision — resume needs
+  nothing from the source machine, so the explicit action earned
+  nothing): the park route, TranscriptSync.park, the header button, and
+  the dialog are gone. The payload's `parked` field and the worker's
+  sticky-parked handling survive only so legacy blobs keep decoding.
+  `POST /api/roaming/briefs/save` writes edits as new versions (either
+  machine, newest-wins). `POST /api/roaming/threads/transcript` returns
+  local transcript + brief + author.
 - Shell: `roamingThreads` (`RoamingThreadShell`) from
   `listRoamingThreadShells` — transcript blobs, excluding (M5.5, each a
   structural SQL condition): (1) any blob whose `author_environment_id`
@@ -576,8 +570,11 @@ live in `21-roaming-history.md`.
   environment holds a live shell for the same threadId). Fallback rows
   render greyed (`opacity-60`) with "From <machine> (offline) —
   read-only copy".
-- Web resume-as-draft (M5.5, MirroredThreadView): Continue here →
-  hand-off brief if present, else `briefs/generate` → reuse the
+- Web resume-as-draft (M5.5, MirroredThreadView): Continue here on an
+  UNMATERIALIZED project reads "Materialize & continue" and runs the
+  materialize confirm dialog first (shared `useMaterialize`, chained via
+  its onSuccess into the draft once the registered project lands);
+  otherwise → existing brief blob if present, else `briefs/generate` → reuse the
   project's stored unsent draft session when one exists (fresh draftId
   would DELETE it, prompt included; the brief lands above unsent text)
   else a fresh draft with sticky state → source model seeded only when

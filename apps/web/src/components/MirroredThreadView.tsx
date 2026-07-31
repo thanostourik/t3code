@@ -52,6 +52,7 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "../workspaceTitlebar";
 import type { LegendListRef } from "@legendapp/list/react";
 
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { useMaterialize } from "./Sidebar";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { toastManager } from "./ui/toast";
@@ -244,117 +245,183 @@ export function MirroredThreadView() {
       .finally(() => setSavingBrief(false));
   }, [threadId, briefDraft, savingBrief]);
 
-  const handleContinueHere = useCallback(() => {
-    if (
-      threadId === null ||
-      primaryEnvironmentId === null ||
-      localProject === null ||
-      state.transcript === null ||
-      resuming
-    ) {
+  const continueIntoDraft = useCallback(
+    (project: NonNullable<typeof localProject>) => {
+      if (
+        threadId === null ||
+        primaryEnvironmentId === null ||
+        state.transcript === null ||
+        resuming
+      ) {
+        return;
+      }
+      setResuming(true);
+      void (async () => {
+        try {
+          // A hand-off brief is the pre-reviewed nicety and wins; otherwise
+          // the brief is generated HERE from the local transcript copy —
+          // resume never requires preparation on the source machine (M5.5).
+          let seedText = state.brief?.markdown ?? null;
+          if (seedText === null || seedText.length === 0) {
+            const generated = await generateRoamingBrief({ threadId });
+            seedText = generated.markdown;
+            for (const notice of generated.notices) {
+              toastManager.add({ type: "info", title: "Resume brief", description: notice });
+            }
+          }
+          // An ordinary new-thread draft: prompt pre-filled, model picked by
+          // the user in the composer, nothing auto-started.
+          const {
+            getComposerDraft,
+            getDraftSessionByLogicalProjectKey,
+            setLogicalProjectDraftThreadId,
+            applyStickyState,
+            setModelSelection,
+            setPrompt,
+          } = useComposerDraftStore.getState();
+          const projectRef = scopeProjectRef(primaryEnvironmentId, project.id);
+          const logicalProjectKey = deriveLogicalProjectKeyFromSettings(
+            project,
+            projectGroupingSettings,
+          );
+          // Installing a fresh draftId would DELETE the project's stored
+          // unsent draft, prompt included — reuse its session instead and put
+          // the brief above any unsent text so nothing is discarded.
+          const stored = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+          const storedReusable =
+            stored != null &&
+            stored.promotedTo == null &&
+            readThreadShell(scopeThreadRef(stored.environmentId, stored.threadId)) === null;
+          const draftId = storedReusable ? stored.draftId : newDraftId();
+          const draftThreadId = storedReusable ? stored.threadId : newThreadId();
+          if (storedReusable) {
+            // Re-point the session at the local member (a stored draft may
+            // target a remote member of the logical project); same draftId, so
+            // nothing is deleted and the composer text survives.
+            setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
+              threadId: draftThreadId,
+            });
+          } else {
+            const envMode = primaryServerSettings.defaultThreadEnvMode;
+            setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
+              threadId: draftThreadId,
+              createdAt: new Date().toISOString(),
+              branch: null,
+              worktreePath: null,
+              envMode,
+              startFromOrigin: resolveNewDraftStartFromOrigin({
+                envMode,
+                newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
+              }),
+            });
+            applyStickyState(draftId);
+          }
+          if (sourceModelSelection !== null) {
+            // After sticky state so the source thread's selection wins as the
+            // default; replaceOptions because it is a complete snapshot.
+            setModelSelection(draftId, sourceModelSelection, { replaceOptions: true });
+          }
+          const existingPrompt = getComposerDraft(draftId)?.prompt ?? "";
+          setPrompt(
+            draftId,
+            existingPrompt.trim().length > 0 ? `${seedText}\n\n${existingPrompt}` : seedText,
+          );
+          // Record the supersession link now: the draft already knows the
+          // thread id it will promote to, and the fallback row only hides
+          // once that thread actually exists (M5.5 d). Best-effort — a failed
+          // write costs a duplicate fallback row, not the resume.
+          void markRoamingThreadResumed({
+            sourceThreadId: threadId,
+            resumedThreadId: draftThreadId,
+          }).catch(() => {});
+          await navigate({ to: "/draft/$draftId", params: { draftId } });
+        } catch (error) {
+          toastManager.add({
+            type: "error",
+            title: "Could not continue here",
+            description: error instanceof Error ? error.message : "Request failed.",
+          });
+        } finally {
+          setResuming(false);
+        }
+      })();
+    },
+    [
+      threadId,
+      primaryEnvironmentId,
+      sourceModelSelection,
+      state.transcript,
+      state.brief,
+      resuming,
+      projectGroupingSettings,
+      primaryServerSettings,
+      navigate,
+    ],
+  );
+
+  // Materialize-and-continue: on an unmaterialized project, Continue-here
+  // runs materialize (same confirm dialog as the project row) and chains
+  // into the draft once the registered project lands in the shell.
+  const { materialize, dialog: materializeDialog } = useMaterialize();
+  const [pendingResumeProjectId, setPendingResumeProjectId] = useState<string | null>(null);
+  useEffect(() => {
+    if (pendingResumeProjectId === null || primaryEnvironmentId === null) {
       return;
     }
-    setResuming(true);
-    void (async () => {
-      try {
-        // A hand-off brief is the pre-reviewed nicety and wins; otherwise
-        // the brief is generated HERE from the local transcript copy —
-        // resume never requires preparation on the source machine (M5.5).
-        let seedText = state.brief?.markdown ?? null;
-        if (seedText === null || seedText.length === 0) {
-          const generated = await generateRoamingBrief({ threadId });
-          seedText = generated.markdown;
-          for (const notice of generated.notices) {
-            toastManager.add({ type: "info", title: "Resume brief", description: notice });
-          }
+    const project =
+      projects.find(
+        (candidate) =>
+          candidate.environmentId === primaryEnvironmentId &&
+          candidate.id === pendingResumeProjectId,
+      ) ?? null;
+    if (project !== null) {
+      setPendingResumeProjectId(null);
+      continueIntoDraft(project);
+    }
+  }, [pendingResumeProjectId, projects, primaryEnvironmentId, continueIntoDraft]);
+
+  const handleContinueHere = useCallback(() => {
+    if (shell === null || state.transcript === null || resuming) {
+      return;
+    }
+    if (localProject !== null) {
+      continueIntoDraft(localProject);
+      return;
+    }
+    const roamingProject =
+      roamingProjects.find(
+        (entry) =>
+          entry.environmentId === primaryEnvironmentId &&
+          entry.roamingProject.workspaceProjectId === shell.workspaceProjectId,
+      )?.roamingProject ?? null;
+    if (roamingProject === null) {
+      toastManager.add({
+        type: "error",
+        title: "Could not continue here",
+        description: "This project is not available from the mirror copy yet.",
+      });
+      return;
+    }
+    materialize({
+      title: roamingProject.title,
+      dirName: roamingProject.repository.name ?? roamingProject.title,
+      workspaceProjectId: roamingProject.workspaceProjectId,
+      confirmLabel: "Materialize & continue",
+      onSuccess: (localId) => {
+        if (localId !== null) {
+          setPendingResumeProjectId(localId);
         }
-        // An ordinary new-thread draft: prompt pre-filled, model picked by
-        // the user in the composer, nothing auto-started.
-        const {
-          getComposerDraft,
-          getDraftSessionByLogicalProjectKey,
-          setLogicalProjectDraftThreadId,
-          applyStickyState,
-          setModelSelection,
-          setPrompt,
-        } = useComposerDraftStore.getState();
-        const projectRef = scopeProjectRef(primaryEnvironmentId, localProject.id);
-        const logicalProjectKey = deriveLogicalProjectKeyFromSettings(
-          localProject,
-          projectGroupingSettings,
-        );
-        // Installing a fresh draftId would DELETE the project's stored
-        // unsent draft, prompt included — reuse its session instead and put
-        // the brief above any unsent text so nothing is discarded.
-        const stored = getDraftSessionByLogicalProjectKey(logicalProjectKey);
-        const storedReusable =
-          stored != null &&
-          stored.promotedTo == null &&
-          readThreadShell(scopeThreadRef(stored.environmentId, stored.threadId)) === null;
-        const draftId = storedReusable ? stored.draftId : newDraftId();
-        const draftThreadId = storedReusable ? stored.threadId : newThreadId();
-        if (storedReusable) {
-          // Re-point the session at the local member (a stored draft may
-          // target a remote member of the logical project); same draftId, so
-          // nothing is deleted and the composer text survives.
-          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
-            threadId: draftThreadId,
-          });
-        } else {
-          const envMode = primaryServerSettings.defaultThreadEnvMode;
-          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
-            threadId: draftThreadId,
-            createdAt: new Date().toISOString(),
-            branch: null,
-            worktreePath: null,
-            envMode,
-            startFromOrigin: resolveNewDraftStartFromOrigin({
-              envMode,
-              newWorktreesStartFromOrigin: primaryServerSettings.newWorktreesStartFromOrigin,
-            }),
-          });
-          applyStickyState(draftId);
-        }
-        if (sourceModelSelection !== null) {
-          // After sticky state so the source thread's selection wins as the
-          // default; replaceOptions because it is a complete snapshot.
-          setModelSelection(draftId, sourceModelSelection, { replaceOptions: true });
-        }
-        const existingPrompt = getComposerDraft(draftId)?.prompt ?? "";
-        setPrompt(
-          draftId,
-          existingPrompt.trim().length > 0 ? `${seedText}\n\n${existingPrompt}` : seedText,
-        );
-        // Record the supersession link now: the draft already knows the
-        // thread id it will promote to, and the fallback row only hides
-        // once that thread actually exists (M5.5 d). Best-effort — a failed
-        // write costs a duplicate fallback row, not the resume.
-        void markRoamingThreadResumed({
-          sourceThreadId: threadId,
-          resumedThreadId: draftThreadId,
-        }).catch(() => {});
-        await navigate({ to: "/draft/$draftId", params: { draftId } });
-      } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: "Could not continue here",
-          description: error instanceof Error ? error.message : "Request failed.",
-        });
-      } finally {
-        setResuming(false);
-      }
-    })();
+      },
+    });
   }, [
-    threadId,
-    primaryEnvironmentId,
-    localProject,
-    sourceModelSelection,
+    shell,
     state.transcript,
-    state.brief,
     resuming,
-    projectGroupingSettings,
-    primaryServerSettings,
-    navigate,
+    localProject,
+    continueIntoDraft,
+    roamingProjects,
+    primaryEnvironmentId,
+    materialize,
   ]);
 
   if (threadId === null || primaryEnvironmentId === null) {
@@ -391,11 +458,6 @@ export function MirroredThreadView() {
             <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
               {machineLabel !== null ? `From ${machineLabel}` : "From another machine"}
             </span>
-            {transcript.parked === true ? (
-              <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
-                Handed off
-              </span>
-            ) : null}
           </div>
           <p className="truncate text-[11px] text-muted-foreground">
             Read-only
@@ -405,13 +467,19 @@ export function MirroredThreadView() {
         </div>
         <Button
           size="sm"
-          disabled={localProject === null || resuming}
+          disabled={resuming || pendingResumeProjectId !== null}
           title={
-            localProject === null ? "Materialize this project on this machine first" : undefined
+            localProject === null
+              ? "Clones this project onto this machine first, then opens the resume draft"
+              : undefined
           }
           onClick={handleContinueHere}
         >
-          {resuming ? "Preparing…" : "Continue here"}
+          {resuming || pendingResumeProjectId !== null
+            ? "Preparing…"
+            : localProject === null
+              ? "Materialize & continue"
+              : "Continue here"}
         </Button>
       </div>
       {briefMarkdown !== null || briefDraft !== null ? (
@@ -475,6 +543,7 @@ export function MirroredThreadView() {
           onManualNavigation={noop}
         />
       </div>
+      {materializeDialog}
     </div>
   );
 }

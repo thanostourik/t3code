@@ -9,7 +9,6 @@ import {
   ROAMING_BRIEF_GENERATE_PATH,
   ROAMING_BRIEF_SAVE_PATH,
   ROAMING_MATERIALIZE_PATH,
-  ROAMING_THREAD_PARK_PATH,
   ROAMING_THREAD_RESUMED_PATH,
   ROAMING_THREAD_TRANSCRIPT_PATH,
   ROAMING_WIP_DIVERGENCE_PATH,
@@ -38,8 +37,6 @@ import {
   RoamingBriefGenerateResponse,
   RoamingBriefSaveRequest,
   RoamingBriefSaveResponse,
-  RoamingThreadParkRequest,
-  RoamingThreadParkResponse,
   RoamingThreadResumedRequest,
   RoamingThreadResumedResponse,
   RoamingThreadTranscriptRequest,
@@ -214,18 +211,6 @@ export function getRoamingThreadTranscript(
     path: ROAMING_THREAD_TRANSCRIPT_PATH,
     requestSchema: RoamingThreadTranscriptRequest,
     responseSchema: RoamingThreadTranscriptResponse,
-    body,
-  });
-}
-
-export function parkRoamingThread(
-  body: RoamingThreadParkRequest,
-): Promise<RoamingThreadParkResponse> {
-  return postRoaming({
-    operation: "roaming.thread-park",
-    path: ROAMING_THREAD_PARK_PATH,
-    requestSchema: RoamingThreadParkRequest,
-    responseSchema: RoamingThreadParkResponse,
     body,
   });
 }
