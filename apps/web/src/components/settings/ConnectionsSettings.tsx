@@ -1241,13 +1241,13 @@ function groupSessionsByDevice(sessions: ReadonlyArray<ServerClientSessionRecord
   const deviceNames = new Set<string>();
   for (const session of sessions) {
     if (session.subject.startsWith("roaming-peer:")) {
-      deviceNames.add((session.client.label ?? "").replace(/ — sync$/, ""));
+      deviceNames.add((session.client.label ?? "").replace(/ — (sync|attach)$/, ""));
     }
   }
   const groups = new Map<string, ServerClientSessionRecord[]>();
   const loose: ServerClientSessionRecord[] = [];
   for (const session of sessions) {
-    const base = (session.client.label ?? "").replace(/ — sync$/, "");
+    const base = (session.client.label ?? "").replace(/ — (sync|attach)$/, "");
     if (base !== "" && deviceNames.has(base) && !session.current) {
       const group = groups.get(base) ?? [];
       group.push(session);

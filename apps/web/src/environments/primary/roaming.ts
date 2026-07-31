@@ -14,11 +14,13 @@ import {
   ROAMING_WIP_DIVERGENCE_PATH,
   ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
   ROAMING_WIP_TAKEOVER_PATH,
+  ROAMING_ATTACH_REGISTRATIONS_LIST_PATH,
   ROAMING_PEERS_LIST_PATH,
   ROAMING_PEERS_PATH,
   ROAMING_PEERS_REMOVE_PATH,
   ROAMING_PEERS_SYNC_PATH,
   RoamingAddPeerRequest,
+  RoamingListAttachRegistrationsResponse,
   RoamingListPeersResponse,
   RoamingMaterializeRequest,
   RoamingMaterializeResponse,
@@ -128,6 +130,26 @@ export function listRoamingPeers(): Promise<RoamingListPeersResponse> {
     requestSchema: EmptyRequest,
     responseSchema: RoamingListPeersResponse,
     body: {},
+  });
+}
+
+/**
+ * Server-provided attach registrations (M5.6): machines whose clients this
+ * server should attach to. 404 means roaming is off — an empty list, not an
+ * error.
+ */
+export function listRoamingAttachRegistrations(): Promise<RoamingListAttachRegistrationsResponse> {
+  return postRoaming({
+    operation: "roaming.list-attach-registrations",
+    path: ROAMING_ATTACH_REGISTRATIONS_LIST_PATH,
+    requestSchema: EmptyRequest,
+    responseSchema: RoamingListAttachRegistrationsResponse,
+    body: {},
+  }).catch((error: unknown) => {
+    if (error instanceof PrimaryRoamingRequestError && error.status === 404) {
+      return { registrations: [] };
+    }
+    throw error;
   });
 }
 
