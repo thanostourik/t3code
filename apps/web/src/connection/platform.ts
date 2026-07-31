@@ -22,7 +22,11 @@ import {
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
-import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
+import {
+  deriveWsBaseUrl,
+  fetchRemoteEnvironmentDescriptor,
+  normalizeHttpBaseUrl,
+} from "@t3tools/client-runtime/environment";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import { EnvironmentRpcRequestObserver } from "@t3tools/client-runtime/rpc";
 import {
@@ -31,6 +35,7 @@ import {
   type DesktopEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  type RoamingAttachRegistration,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -44,6 +49,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 
 import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
 import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
+import { listRoamingAttachRegistrations } from "../environments/primary/roaming";
 import {
   readPrimaryEnvironmentTarget,
   type PrimaryEnvironmentTarget,
@@ -388,6 +394,72 @@ interface CachedPlatformRegistration {
   readonly refreshAtEpochMs?: number;
 }
 
+// M5.6 bidirectional pairing: the primary server hands out attach
+// registrations for machines this client should reach (the reverse half of
+// the roaming handshake). They ride the platform source so the existing
+// reconcile covers install, refresh, and removal, and they are never
+// written into the browser's own connection catalog. The list route is
+// polled on a throttle riding the 3s platform tick; candidate URLs are
+// identity-probed (first descriptor answering as the registered
+// environment wins) and an unreachable machine still installs on its
+// first candidate so the ordinary supervisor retry/offline presentation
+// applies.
+const ROAMING_REGISTRATIONS_REFRESH_MS = 15_000;
+const ROAMING_PROBE_TIMEOUT = "2 seconds";
+
+interface CachedRoamingRegistration {
+  readonly signature: string;
+  readonly registration: BearerConnectionRegistration;
+  /** Whether a candidate URL answered as the registered environment. */
+  readonly verified: boolean;
+}
+
+export function roamingRegistrationSignature(registration: RoamingAttachRegistration): string {
+  return `${registration.environmentId}|${registration.label}|${registration.baseUrls.join(",")}|${registration.token}`;
+}
+
+export const buildRoamingRegistration = Effect.fn(
+  "web.connectionPlatform.buildRoamingRegistration",
+)(function* (registration: RoamingAttachRegistration) {
+  let chosenBaseUrl: string | undefined;
+  for (const candidate of registration.baseUrls) {
+    const httpBaseUrl = normalizeHttpBaseUrl(candidate);
+    const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
+      Effect.timeout(ROAMING_PROBE_TIMEOUT),
+      Effect.option,
+    );
+    if (
+      Option.isSome(descriptor) &&
+      descriptor.value.environmentId === registration.environmentId
+    ) {
+      chosenBaseUrl = candidate;
+      break;
+    }
+  }
+  const verified = chosenBaseUrl !== undefined;
+  const httpBaseUrl = normalizeHttpBaseUrl(chosenBaseUrl ?? registration.baseUrls[0]!);
+  const connectionId = `bearer:${registration.environmentId}`;
+  return {
+    signature: roamingRegistrationSignature(registration),
+    verified,
+    registration: new BearerConnectionRegistration({
+      target: new BearerConnectionTarget({
+        environmentId: registration.environmentId,
+        label: registration.label,
+        connectionId,
+      }),
+      profile: new BearerConnectionProfile({
+        connectionId,
+        environmentId: registration.environmentId,
+        label: registration.label,
+        httpBaseUrl,
+        wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+      }),
+      credential: new BearerConnectionCredential({ token: registration.token }),
+    }),
+  } satisfies CachedRoamingRegistration;
+});
+
 export type PrimaryEnvironmentTargetRead =
   | {
       readonly _tag: "Success";
@@ -462,6 +534,47 @@ const platformConnectionSourceLayer = Layer.effect(
       });
     }
     const cacheRef = yield* Ref.make(new Map<string, CachedPlatformRegistration>());
+    const roamingCacheRef = yield* Ref.make(new Map<string, CachedRoamingRegistration>());
+    const roamingFetchedAtRef = yield* Ref.make(0);
+
+    // Refresh the server-provided roaming registrations at most every
+    // ROAMING_REGISTRATIONS_REFRESH_MS. A failed list fetch keeps the
+    // previous cache (if the primary is unreachable the whole client is
+    // down anyway); an empty/404 list clears it, which reconciles the
+    // environments away — consistent with roaming's gate-off masking.
+    const refreshRoamingRegistrations = Effect.gen(function* () {
+      const nowEpochMs = yield* Clock.currentTimeMillis;
+      if (nowEpochMs - (yield* Ref.get(roamingFetchedAtRef)) < ROAMING_REGISTRATIONS_REFRESH_MS) {
+        return;
+      }
+      yield* Ref.set(roamingFetchedAtRef, nowEpochMs);
+      const listed = yield* Effect.tryPromise(() => listRoamingAttachRegistrations()).pipe(
+        Effect.map((response) => response.registrations),
+        Effect.catch((error) =>
+          Effect.logDebug("Could not list roaming attach registrations.", { error }).pipe(
+            Effect.as(null),
+          ),
+        ),
+      );
+      if (listed === null) {
+        return;
+      }
+      const previous = yield* Ref.get(roamingCacheRef);
+      const next = new Map<string, CachedRoamingRegistration>();
+      for (const registration of listed) {
+        const signature = roamingRegistrationSignature(registration);
+        const cached = previous.get(registration.environmentId);
+        // A verified entry is settled until the registration changes; an
+        // unverified one re-probes so the machine coming online on a later
+        // candidate URL is eventually found.
+        if (cached !== undefined && cached.signature === signature && cached.verified) {
+          next.set(registration.environmentId, cached);
+          continue;
+        }
+        next.set(registration.environmentId, yield* buildRoamingRegistration(registration));
+      }
+      yield* Ref.set(roamingCacheRef, next);
+    });
 
     // Resolve the full set of platform-managed environments the host currently
     // reports: the primary (same-origin cookie auth) plus any desktop-local
@@ -559,6 +672,19 @@ const platformConnectionSourceLayer = Layer.effect(
             registrations.push(cached.registration);
           }
         }
+      }
+
+      yield* refreshRoamingRegistrations;
+      // Anything already claimed by the primary or a desktop-local backend
+      // wins over a roaming registration for the same environment.
+      const claimedEnvironmentIds = new Set(
+        registrations.map((registration) => registration.target.environmentId),
+      );
+      for (const entry of (yield* Ref.get(roamingCacheRef)).values()) {
+        if (claimedEnvironmentIds.has(entry.registration.target.environmentId)) {
+          continue;
+        }
+        registrations.push(entry.registration);
       }
 
       yield* Ref.set(cacheRef, next);
