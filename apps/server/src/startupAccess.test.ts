@@ -1,6 +1,7 @@
 import { assert, expect, it } from "@effect/vitest";
 
 import {
+  advertisedBaseUrls,
   buildPairingUrl,
   formatHeadlessServeOutput,
   renderTerminalQrCode,
@@ -50,6 +51,40 @@ it("prefers the actual bound port when an http server address is available", () 
   expect(resolveListeningPort({ port: 4123 }, 3773)).toBe(4123);
   expect(resolveListeningPort("pipe", 3773)).toBe(3773);
   expect(resolveListeningPort(null, 3773)).toBe(3773);
+});
+
+it("advertises only URLs the socket actually listens on", () => {
+  // Default bind (host undefined) is loopback-only.
+  expect(advertisedBaseUrls(undefined, 14801)).toEqual(["http://127.0.0.1:14801"]);
+  // A specific bind advertises exactly that address.
+  expect(advertisedBaseUrls("127.0.0.1", 14801)).toEqual(["http://127.0.0.1:14801"]);
+  expect(advertisedBaseUrls("100.64.0.7", 3773)).toEqual(["http://100.64.0.7:3773"]);
+  expect(advertisedBaseUrls("::1", 3773)).toEqual(["http://[::1]:3773"]);
+  // Wildcard bind: every external IPv4 interface, loopback last.
+  expect(
+    advertisedBaseUrls("0.0.0.0", 3773, {
+      en0: [
+        {
+          address: "192.168.1.42",
+          netmask: "255.255.255.0",
+          family: "IPv4",
+          mac: "00:00:00:00:00:00",
+          internal: false,
+          cidr: "192.168.1.42/24",
+        },
+      ],
+      lo0: [
+        {
+          address: "127.0.0.1",
+          netmask: "255.0.0.0",
+          family: "IPv4",
+          mac: "00:00:00:00:00:00",
+          internal: true,
+          cidr: "127.0.0.1/8",
+        },
+      ],
+    }),
+  ).toEqual(["http://192.168.1.42:3773", "http://127.0.0.1:3773"]);
 });
 
 it("builds a pairing URL that embeds the token in the hash", () => {

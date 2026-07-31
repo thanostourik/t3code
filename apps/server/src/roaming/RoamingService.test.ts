@@ -2,6 +2,7 @@ import {
   AuthAccessWriteScope,
   AuthStandardClientScopes,
   EnvironmentId,
+  ROAMING_ATTACH_REGISTRATION_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
 } from "@t3tools/contracts";
 import { NodeServices } from "@effect/platform-node";
@@ -18,6 +19,7 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { EnvironmentAuth } from "../auth/EnvironmentAuth.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { ServerConfig } from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -38,6 +40,7 @@ const MINTED_ATTACH_CODE = "pairing-code-minted-attach";
 const HANDSHAKE_TOKEN = "bearer-handshake";
 const ATTACH_TOKEN = "bearer-attach";
 const MACHINE_TOKEN = "machine-credential-token";
+const ISSUED_SESSION_TOKEN = "locally-issued-session-token";
 
 const jsonResponse = (request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) =>
   HttpClientResponse.fromWeb(
@@ -63,10 +66,17 @@ const makePeerHttpLayer = (options: {
   Effect.gen(function* () {
     const consumedCodes = yield* Ref.make<ReadonlyArray<string>>([]);
     const mintedAttachCodes = yield* Ref.make(0);
+    const attachRegistrations = yield* Ref.make<ReadonlyArray<unknown>>([]);
     const layer = Layer.succeed(
       HttpClient.HttpClient,
       HttpClient.make((request, url) =>
         Effect.gen(function* () {
+          if (url.pathname === "/.well-known/t3/environment") {
+            return jsonResponse(request, {
+              environmentId: PEER_ENVIRONMENT_ID,
+              label: "Test Desktop",
+            });
+          }
           if (url.pathname === "/oauth/token") {
             const form = new URLSearchParams(requestBodyText(request));
             const code = form.get("subject_token") ?? "";
@@ -118,11 +128,18 @@ const makePeerHttpLayer = (options: {
               expiresAt: "2099-01-01T00:00:00.000Z",
             });
           }
+          if (url.pathname === ROAMING_ATTACH_REGISTRATION_PATH) {
+            yield* Ref.update(attachRegistrations, (bodies) => [
+              ...bodies,
+              JSON.parse(requestBodyText(request)),
+            ]);
+            return jsonResponse(request, { registered: true });
+          }
           return jsonResponse(request, { error: "unexpected path" }, 500);
         }),
       ),
     );
-    return { layer, mintedAttachCodes };
+    return { layer, mintedAttachCodes, attachRegistrations };
   });
 
 // The well-known descriptor rides the same mock; attach-only tests need it.
@@ -195,6 +212,13 @@ const unusedStubs = Layer.mergeAll(
     {} as unknown as ProjectionProjectRepository["Service"],
   ),
   Layer.succeed(RepositoryIdentityResolver, {} as unknown as RepositoryIdentityResolver["Service"]),
+  // M5.6 reverse attach reads the bind host + runtime-state path (the
+  // missing file falls back to config.port).
+  Layer.succeed(ServerConfig, {
+    host: undefined,
+    port: 14800,
+    serverRuntimeStatePath: "/nonexistent/server-runtime.json",
+  } as unknown as ServerConfig["Service"]),
 );
 
 const makeAuthLayer = (issued: Ref.Ref<ReadonlyArray<{ scopes: ReadonlyArray<string> }>>) =>
@@ -202,7 +226,11 @@ const makeAuthLayer = (issued: Ref.Ref<ReadonlyArray<{ scopes: ReadonlyArray<str
     issueSession: (input?: { readonly scopes?: ReadonlyArray<string> }) =>
       Ref.update(issued, (calls) => [...calls, { scopes: input?.scopes ?? [] }]).pipe(
         Effect.flatMap(() => DateTime.now),
-        Effect.map((now) => ({ token: MACHINE_TOKEN, expiresAt: now, sessionId: "session-1" })),
+        Effect.map((now) => ({
+          token: ISSUED_SESSION_TOKEN,
+          expiresAt: now,
+          sessionId: "session-1",
+        })),
       ),
   } as unknown as EnvironmentAuth["Service"]);
 
@@ -276,6 +304,31 @@ describe("RoamingService unified pairing handshake", () => {
       // The peer row IS the on-switch (D3); the dialog's choice applies.
       assert.strictEqual(peerRows.length, 1);
       assert.isTrue(settings.roamingSecretsSync);
+    }),
+  );
+
+  it.effect("full handshake posts the reverse attach registration to the callee (M5.6)", () =>
+    Effect.gen(function* () {
+      const peer = yield* makePeerHttpLayer({
+        grantedScopes: [...AuthStandardClientScopes, AuthAccessWriteScope],
+      });
+      yield* runAddPeer({ httpLayer: peer.layer });
+      const registrations = yield* Ref.get(peer.attachRegistrations);
+      assert.lengthOf(registrations, 1);
+      const registration = registrations[0] as {
+        environmentId: string;
+        label: string;
+        baseUrls: ReadonlyArray<string>;
+        token: string;
+      };
+      assert.strictEqual(registration.environmentId, LOCAL_ENVIRONMENT_ID);
+      assert.strictEqual(registration.label, "Test Laptop");
+      // Default bind advertises loopback only, at the config port (the
+      // runtime-state file is absent in tests).
+      assert.deepStrictEqual(registration.baseUrls, ["http://127.0.0.1:14800"]);
+      // The registered token is a freshly issued local session, never the
+      // handshake or mirror bearer received from the callee.
+      assert.strictEqual(registration.token, ISSUED_SESSION_TOKEN);
     }),
   );
 
