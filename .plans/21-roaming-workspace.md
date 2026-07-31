@@ -52,9 +52,9 @@ series (PRs #71–#81). M5 (briefs + transcripts) done 2026-07-22
 the corrections are binding decisions below and landed as **M5.5** on
 2026-07-31 (PRs #89–#94; results in the history file). One field check
 remains open from M5.5 acceptance: a visible-window kill-the-desktop walk
-(the harness browser is headless — see history). Queue: M5.6 bidirectional
-pairing (2026-07-31 binding decision), M6 bootstrap recipes, M7 cloud
-store. No milestone is active.
+(the harness browser is headless — see history). Queue: M6 bootstrap recipes, M7 cloud store. **M5.6 bidirectional
+pairing is active** (started 2026-07-31; analysis pass done — design and
+deviations in the "Bidirectional pairing" section below).
 
 ## Thesis
 
@@ -182,7 +182,9 @@ history file.
   remediation; the manual pick-a-side API had zero callers and is gone).
 - **D4 — Peer trust rides existing pairing:** the one pairing handshake
   additionally mints a long-lived scoped machine-to-machine credential.
-  Machine identity = the persisted server `environmentId`.
+  Machine identity = the persisted server `environmentId`. Since M5.6 the
+  same handshake also carries a reverse attach grant (initiator-minted,
+  standard client scopes) so the callee's clients are full citizens too.
 - **D5 — Encryption deferred to M7 deliberately:** v1 blobs move only
   between the user's own machines over the authenticated channel. Any cloud
   backend makes E2E encryption mandatory, key-management design reviewed
@@ -204,7 +206,47 @@ blob writes, and via a `mirror/wait` long-poll so the callee side (which
 holds no credential for the initiator — one-directional connectivity by
 design) delivers in seconds, not on the interval. The registry entry is
 versioned LWW (conflicts auto-resolve per D3) — it changes rarely; resist
-making it a CRDT.
+making it a CRDT. Mirror connectivity stays one-directional (the initiator
+holds the only mirror credential) even after M5.6 — bidirectional attach
+does not move mirror traffic.
+
+### Bidirectional pairing (M5.6)
+
+One handshake, two full citizens. The initiator-orchestrated handshake
+gains a best-effort reverse half: after minting the mirror credential,
+the initiator mints an attach bearer for the callee (standard client
+scopes, machine-credential TTL, subject `roaming-peer:<envId>` — the
+existing one-device Authorized-clients grouping and unpair revocation
+sweep cover it for free) and posts it, together with its own label and
+best-effort candidate base URLs (bound port × network interfaces,
+loopback last), to a new callee route inside the same handshake. The
+callee stores the registration (metadata in SQLite, token in the secret
+store) and hands it to its own clients: a server-provided connection
+source — the third registration producer beside the browser catalog and
+the desktop platform source — reconciles the records into the client's
+environment registry as ordinary bearer connections, never persisted
+into the browser catalog. Everything downstream is existing machinery:
+connection supervisors, shell cache, the merged one project list, and
+the M5.5 one-row thread rules make the initiator's projects and threads
+live on the callee exactly while it is reachable.
+
+Honesty rules: the reverse half is optional and best-effort — an old or
+non-answering callee route degrades to today's behavior (mirrored greyed
+rows, logged, pairing still succeeds); an unreachable, revoked, or
+expired initiator leaves the environment offline, which renders as the
+existing offline model (greyed rows + Materialize), never a dead row.
+Client-attach URL advertisement does not weaken mirror
+tamper-resistance: the callee still never dials caller-supplied URLs for
+mirror traffic.
+
+Analysis deviations recorded 2026-07-31: (a) the M1 "the server
+advertises no URLs" rule is amended to best-effort self-advertisement
+for client attach only; (b) the reverse grant rides a NEW handshake call
+(`attach-registration`) rather than a change to the machine-credential
+wire, so pre-M5.6 callees keep pairing cleanly; (c) the reverse attach
+TTL matches the machine credential (365d, not the 30d forward attach
+session) because the registration is server-held with no re-mint path
+short of re-pairing.
 
 ### Vault
 
@@ -407,7 +449,7 @@ detail live in the history and reference files.
 | M4 — Takeover + divergence | Leases, activity chips, full takeover UX, diff-and-choose divergence. | ✅ 2026-07-18. |
 | M5 — Briefs + transcripts | "Conversations" pairing row + mirrored read-only threads + park/brief/resume. | ✅ 2026-07-22. |
 | M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | ✅ 2026-07-31 (PRs #89–#94; one visible-window field check pending — see history). |
-| M5.6 — Bidirectional pairing | The 2026-07-31 binding decision: the one handshake makes BOTH machines full citizens — each client sees the other machine's projects/threads live when reachable. Analysis pass first (reverse attach minting, server-provided client registration on the callee, reverse-unreachable behavior). | On the callee machine, the initiator's projects and threads appear live while it is reachable and grey out when not, under the same one-row rules. Canonical re-run. |
+| M5.6 — Bidirectional pairing | The 2026-07-31 binding decision: the one handshake makes BOTH machines full citizens — each client sees the other machine's projects/threads live when reachable. Analysis done 2026-07-31 (design section): reverse grant via a new best-effort handshake call; server-provided client registration source on the callee. | On the callee machine, the initiator's projects and threads appear live while it is reachable and grey out when not, under the same one-row rules. Canonical re-run. |
 | M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
 | M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 
