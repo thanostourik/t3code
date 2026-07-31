@@ -549,6 +549,14 @@ live in `21-roaming-history.md`.
   web records the link at DRAFT CREATION using the draft session's future
   threadId — the exclusion only bites once that thread actually exists,
   so an unsent draft never hides the source row.
+- Supersession transitions are NOT blob changes, so ws.ts additionally
+  watches thread.created/thread.deleted domain events: when the threadId
+  matches a resumption's resumed thread, it polls briefly for the
+  projection write to land and emits the source row's new state on the
+  shell stream — the live row when restored, a removal upsert synthesized
+  from the raw blob when superseded (the list query rightly refuses to
+  return it). Without this the field client kept the stale fallback row
+  until a reload (2026-07-31 field fix).
 - `POST /api/roaming/briefs/generate` (access:write, roaming-gated):
   stateless brief generation on THIS machine from its local transcript
   copy via `TranscriptSync.generateBrief` — the transcript's carried
@@ -581,7 +589,12 @@ live in `21-roaming-history.md`.
 - Sync-status copy (M5.5 f): every non-error, non-blocked state renders
   the label "Synced" on both machines (activity timestamps are
   machine-local); freshness/degradation detail lives in the tooltip and
-  dot color only.
+  dot color only. The pill reports WIP sync, which only exists for a
+  local checkout — a remote-only (unmaterialized) row renders no pill at
+  all (2026-07-31 field fix).
+- A project whose only rows are mirrored fallbacks does not render the
+  "No threads yet" empty state (`useMirroredFallbackRows` is shared by
+  the thread list and the fallback renderer; 2026-07-31 field fix).
 - Resume threads are ordinary local threads (new UUID) — never mirrored
   back as the same thread; no import path into the local event log exists.
 

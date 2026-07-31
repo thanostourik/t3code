@@ -52,6 +52,8 @@ import {
   AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  RoamingTranscriptPayload,
+  type RoamingThreadShell,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -83,6 +85,7 @@ import { Materializer } from "./roaming/Materializer.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
+import { RoamingThreadResumptions } from "./roaming/RoamingThreadResumptions.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
@@ -135,6 +138,12 @@ const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchComma
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
+
+// Synthesizing supersession removals (M5.5): the shell query rightly hides a
+// superseded source thread, so its removal upsert is built from the raw blob.
+const decodeWsTranscriptPayload = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(RoamingTranscriptPayload),
+);
 
 export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
@@ -368,6 +377,7 @@ const makeWsRpcLayer = (
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const roamingBlobStore = yield* RoamingBlobStore;
       const roamingPeers = yield* RoamingPeers;
+      const roamingThreadResumptions = yield* RoamingThreadResumptions;
       const materializer = yield* Materializer;
       const wipSnapshotReactor = yield* WipSnapshotReactor;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -1250,6 +1260,79 @@ const makeWsRpcLayer = (
                   sequence: 0,
                   wipStatus,
                 }),
+              );
+              // M5.5 supersession transitions are NOT blob changes: a source
+              // thread's fallback row disappears when its resumed local
+              // thread is created and returns when that thread is deleted —
+              // both driven by the projection row, so the blob source above
+              // never fires and live clients kept the stale row (field bug).
+              // Poll briefly for the projection write to land, then emit the
+              // row's new state; a removal is synthesized from the raw blob
+              // because the list query rightly refuses to return it.
+              yield* Effect.forkScoped(
+                orchestrationEngine.streamDomainEvents.pipe(
+                  Stream.runForEach((event) => {
+                    if (event.type !== "thread.created" && event.type !== "thread.deleted") {
+                      return Effect.void;
+                    }
+                    const resumedThreadId = (event.payload as { threadId?: unknown }).threadId;
+                    if (typeof resumedThreadId !== "string") {
+                      return Effect.void;
+                    }
+                    const expectVisible = event.type === "thread.deleted";
+                    return Effect.gen(function* () {
+                      const sources = yield* roamingThreadResumptions
+                        .findSourcesByResumedThreadId(resumedThreadId as ThreadId)
+                        .pipe(Effect.orElseSucceed(() => []));
+                      for (const sourceThreadId of sources) {
+                        let shell = undefined;
+                        for (let attempt = 0; attempt < 20; attempt++) {
+                          shell = yield* projectionSnapshotQuery
+                            .getRoamingThreadShellById(sourceThreadId)
+                            .pipe(
+                              Effect.map(Option.getOrUndefined),
+                              Effect.orElseSucceed(() => undefined),
+                            );
+                          if ((shell !== undefined) === expectVisible) break;
+                          yield* Effect.sleep(Duration.millis(250));
+                        }
+                        if (shell !== undefined) {
+                          yield* Queue.offer(roamingBuffer, {
+                            kind: "roaming-thread-upserted" as const,
+                            sequence: 0,
+                            roamingThread: shell,
+                          });
+                          continue;
+                        }
+                        const record = yield* roamingBlobStore
+                          .get({ kind: "transcript", key: sourceThreadId })
+                          .pipe(Effect.orElseSucceed(() => null));
+                        if (record === null) continue;
+                        const payload = yield* decodeWsTranscriptPayload(record.payload).pipe(
+                          Effect.orElseSucceed(() => null),
+                        );
+                        if (payload === null) continue;
+                        yield* Queue.offer(roamingBuffer, {
+                          kind: "roaming-thread-upserted" as const,
+                          sequence: 0,
+                          roamingThread: {
+                            threadId: sourceThreadId,
+                            workspaceProjectId: payload.workspaceProjectId,
+                            title: payload.title,
+                            authorEnvironmentId:
+                              record.authorEnvironmentId as RoamingThreadShell["authorEnvironmentId"],
+                            capturedAt: payload.capturedAt,
+                            updatedAt: payload.updatedAt,
+                            messageCount: payload.messages.length,
+                            hasBrief: false,
+                            deleted: true,
+                          },
+                        });
+                      }
+                    });
+                  }),
+                ),
+                { startImmediately: true },
               );
 
               // Pairing turns roaming on after the shell subscription already
