@@ -334,6 +334,7 @@ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { resolveComposerTimelineInset, resolveScrollToEndClearance } from "./composerFooterLayout";
 import { ChatHeader } from "./chat/ChatHeader";
+import { useContinueHere } from "~/hooks/useContinueHere";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -2129,6 +2130,19 @@ export default function ChatView(props: ChatViewProps) {
     primaryEnvironmentId,
     projectGroupingSettings,
   ]);
+  // Continue-here on a LIVE remote thread (M5.5, 2026-07-31 decision): the
+  // mirrored copy syncs behind the live connection, so continuing on this
+  // machine never requires the other machine to be offline.
+  const continueHereEligible =
+    routeKind === "server" &&
+    activeThread != null &&
+    primaryEnvironmentId !== null &&
+    activeThread.environmentId !== primaryEnvironmentId &&
+    activeProject?.workspaceProjectId !== undefined;
+  const remoteContinueHere = useContinueHere({
+    threadId: continueHereEligible && activeThread != null ? activeThread.id : null,
+    workspaceProjectId: continueHereEligible ? (activeProject?.workspaceProjectId ?? null) : null,
+  });
   const activeEnvironment =
     activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
@@ -8445,8 +8459,17 @@ export default function ChatView(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
+            onContinueHere={continueHereEligible ? remoteContinueHere.continueHere : undefined}
+            continueHereLabel={
+              remoteContinueHere.busy
+                ? "Preparing…"
+                : remoteContinueHere.needsMaterialize
+                  ? "Materialize & continue"
+                  : "Continue here"
+            }
           />
         </WorkspacePageHeader>
+        {continueHereEligible ? remoteContinueHere.dialog : null}
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">
           {/* Chat column */}

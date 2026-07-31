@@ -11,7 +11,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, ArrowRightLeftIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -73,7 +73,10 @@ interface ChatHeaderProps {
     input: NewProjectScriptInput,
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
-  /** Hand this conversation off to another machine (roaming M5); absent = hidden. */
+  /** Continue this remote conversation on THIS machine (roaming M5.5); absent = hidden. */
+  onContinueHere?: (() => void) | undefined;
+  /** Label reflecting what continue-here will do ("Materialize & continue" first). */
+  continueHereLabel?: string | undefined;
 }
 
 /**
@@ -140,6 +143,8 @@ export const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
+  onContinueHere,
+  continueHereLabel,
 }: ChatHeaderProps) {
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
@@ -429,6 +434,28 @@ export const ChatHeader = memo(function ChatHeader({
             availableEditors={availableEditors}
             openInCwd={openInCwd}
           />
+        )}
+        {onContinueHere && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  data-chat-header-continue-here
+                  className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  onClick={onContinueHere}
+                >
+                  <ArrowRightLeftIcon className="size-3.5" />
+                  <span className="hidden @3xl/header-actions:inline">
+                    {continueHereLabel ?? "Continue here"}
+                  </span>
+                </button>
+              }
+            />
+            <TooltipPopup side="bottom">
+              Continue this conversation on this machine, from its synced copy
+            </TooltipPopup>
+          </Tooltip>
         )}
         {activeProjectName && (
           <GitActionsControl
