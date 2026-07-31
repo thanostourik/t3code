@@ -1073,7 +1073,7 @@ const buildAppUnderTest = (options?: {
           ...options?.layers?.materializer,
         } satisfies Materializer["Service"]),
       ),
-      Layer.provide(Layer.succeed(RoamingThreadResumptions, { record: () => Effect.void })),
+      Layer.provide(Layer.succeed(RoamingThreadResumptions, { record: () => Effect.void, findSourcesByResumedThreadId: () => Effect.succeed([]) })),
       Layer.provide(Layer.mock(RoamingService)({})),
       Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
       Layer.provide(
