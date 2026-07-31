@@ -82,6 +82,7 @@ import {
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { Materializer } from "./roaming/Materializer.ts";
+import { RoamingAttachRegistrations } from "./roaming/RoamingAttachRegistrations.ts";
 import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
@@ -371,6 +372,7 @@ const makeWsRpcLayer = (
       const roamingBlobStore = yield* RoamingBlobStore;
       const roamingPeers = yield* RoamingPeers;
       const roamingThreadResumptions = yield* RoamingThreadResumptions;
+      const roamingAttachRegistrations = yield* RoamingAttachRegistrations;
       const materializer = yield* Materializer;
       const wipSnapshotReactor = yield* WipSnapshotReactor;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -1252,6 +1254,14 @@ const makeWsRpcLayer = (
                   kind: "roaming-wip-status-updated" as const,
                   sequence: 0,
                   wipStatus,
+                }),
+              );
+              // M5.6: payload-free nudge — clients refetch registrations
+              // over the authenticated no-store HTTP route.
+              yield* attachRoamingSource(roamingAttachRegistrations.subscribeChanges, () =>
+                Effect.succeed({
+                  kind: "roaming-attach-registrations-changed" as const,
+                  sequence: 0,
                 }),
               );
               // M5.5 supersession transitions are NOT blob changes: a source
