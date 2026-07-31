@@ -223,7 +223,6 @@ import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
-import { HandOffDialog } from "./HandOffDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -1310,7 +1309,6 @@ function ChatViewContent(props: ChatViewProps) {
   // Used by "Implement in a new thread" to carry the sidebar-open intent across navigation.
   const planSidebarOpenOnNextThreadRef = useRef(false);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
-  const [handOffOpen, setHandOffOpen] = useState(false);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
@@ -5778,23 +5776,8 @@ function ChatViewContent(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
-            onHandOff={
-              routeKind === "server" &&
-              activeProject?.workspaceProjectId !== undefined &&
-              activeThread.environmentId === primaryEnvironmentId
-                ? () => setHandOffOpen(true)
-                : undefined
-            }
           />
         </header>
-        {handOffOpen ? (
-          <HandOffDialog
-            threadId={activeThread.id}
-            open={handOffOpen}
-            onOpenChange={setHandOffOpen}
-          />
-        ) : null}
-
         <ThreadErrorBanner
           error={threadError}
           onDismiss={() => setThreadError(activeThread.id, null)}

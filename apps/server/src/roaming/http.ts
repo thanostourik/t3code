@@ -21,7 +21,6 @@ import {
   ROAMING_WIP_DIVERGENCE_RESOLVE_PATH,
   ROAMING_WIP_TAKEOVER_PATH,
   ROAMING_THREAD_TRANSCRIPT_PATH,
-  ROAMING_THREAD_PARK_PATH,
   ROAMING_THREAD_RESUMED_PATH,
   ROAMING_BRIEF_SAVE_PATH,
   ROAMING_BRIEF_GENERATE_PATH,
@@ -66,8 +65,6 @@ import {
   RoamingBriefSaveResponse,
   RoamingBriefGenerateRequest,
   RoamingBriefGenerateResponse,
-  RoamingThreadParkRequest,
-  RoamingThreadParkResponse,
   RoamingThreadResumedRequest,
   RoamingThreadResumedResponse,
   RoamingThreadTranscriptRequest,
@@ -601,30 +598,6 @@ const threadTranscriptRoute = HttpRouter.add(
   ),
 );
 
-const threadParkRoute = HttpRouter.add(
-  "POST",
-  ROAMING_THREAD_PARK_PATH,
-  handleRejection(
-    Effect.gen(function* () {
-      yield* requireRoamingScope(AuthAccessWriteScope);
-      const body = yield* decodeBody(RoamingThreadParkRequest);
-      const transcripts = yield* TranscriptSync;
-      const result = yield* transcripts
-        .park(body.threadId)
-        .pipe(
-          Effect.mapError((error) =>
-            error.reason === "thread-not-found"
-              ? reject(404, "Thread not found")
-              : error.reason === "project-not-enrolled"
-                ? reject(409, "This project does not sync between machines")
-                : reject(500, "Internal Server Error"),
-          ),
-        );
-      return yield* respondJson(RoamingThreadParkResponse, result);
-    }),
-  ),
-);
-
 const briefSaveRoute = HttpRouter.add(
   "POST",
   ROAMING_BRIEF_SAVE_PATH,
@@ -702,7 +675,6 @@ export const roamingRoutesLayer = Layer.mergeAll(
   wipDivergenceRoute,
   wipDivergenceResolveRoute,
   threadTranscriptRoute,
-  threadParkRoute,
   briefSaveRoute,
   briefGenerateRoute,
   threadResumedRoute,
