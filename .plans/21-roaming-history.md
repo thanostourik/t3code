@@ -2388,3 +2388,36 @@ it correct. A same-box two-instance harness cannot tell "reachable" from
 (asserts the full registration leg). Both pass, plus canonical
 accept-m2.5, plus a browser walk on the routable harness confirming the
 callee renders ONE live ungreyed row with no mismatch error.
+
+## 2026-08-01 — M5.6 standing-channel corrective (field round 2)
+
+Field verdict on the first M5.6 model, in the user's words: the reverse
+direction "does not even make sense" at pairing time — everything runs on
+the desktop until the user materializes and works on the laptop, so a
+permission frozen at handshake time serves the one moment it is least
+needed and forces re-pairing at the moment it is (network access off at
+pairing, or enabled later). Binding decision recorded: reverse
+reachability is a STANDING property. `ReverseAttach` now maintains the
+registration over the mirror credential after every successful mirror
+pass — push on address change, withdraw + session revocation on
+loopback-only — and the handshake-time reverse block was deleted
+entirely (with it, the P2 orphan-session class it carried). The register
+route accepts the mirror credential with a subject==environmentId tamper
+check; a withdraw route (mirror-credential-only) completes the pair.
+Settings copy now states the consequence where the fix lives ("your
+other machines show its threads as offline copies only").
+
+Consequences: one pairing ever; the network-access toggle is the whole
+story; pairing order and pairing-time reachability are irrelevant;
+pre-M5.6 pairings self-heal on upgrade (the mirror credential already
+exists) — the previously documented "re-pair to get bidirectional"
+instruction is dead.
+
+Acceptance: accept-m56 reworked into ONE run walking the full toggle
+story (pair loopback → nothing; restart routable, no re-pair →
+registration arrives; restart loopback → withdrawn + token dead; restart
+routable → returns; teardown both directions) — ALL PASS, plus canonical
+accept-m2.5 and the full roaming unit suite (116 tests). Process note:
+the first model shipped because its unit tests and the loopback harness
+encoded the wrong assumption together; the corrective's acceptance now
+exercises both bind modes in every run.

@@ -47,6 +47,7 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { ReverseAttach } from "./ReverseAttach.ts";
 import { isKnownBlobKind, RoamingBlobStore } from "./RoamingBlobStore.ts";
 import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 
@@ -150,6 +151,7 @@ const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const httpClient = yield* HttpClient.HttpClient;
+  const reverseAttach = yield* ReverseAttach;
 
   // The slot carries the trigger's provenance so a delivery can be
   // attributed to the write-trigger fast path vs the interval tick in the
@@ -289,6 +291,15 @@ const make = Effect.gen(function* () {
         const attemptStartedMs = yield* Clock.currentTimeMillis;
         const result = yield* syncWithPeerAt(peer, token, baseUrl, source).pipe(Effect.exit);
         if (result._tag === "Success") {
+          // The standing reverse half (M5.6, 2026-08-01): with the peer
+          // just proven reachable at this URL with this credential, bring
+          // its copy of our attach registration in line with our current
+          // advertised addresses. Never fails; no-ops while unchanged.
+          yield* reverseAttach.ensureForPeer({
+            peerEnvironmentId: peer.environmentId,
+            baseUrl,
+            mirrorToken: token,
+          });
           return;
         }
         // A stale first URL that stalls to a timeout delays every pass by
