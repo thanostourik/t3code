@@ -53,14 +53,16 @@ it("prefers the actual bound port when an http server address is available", () 
   expect(resolveListeningPort(null, 3773)).toBe(3773);
 });
 
-it("advertises only URLs the socket actually listens on", () => {
-  // Default bind (host undefined) is loopback-only.
-  expect(advertisedBaseUrls(undefined, 14801)).toEqual(["http://127.0.0.1:14801"]);
-  // A specific bind advertises exactly that address.
-  expect(advertisedBaseUrls("127.0.0.1", 14801)).toEqual(["http://127.0.0.1:14801"]);
+it("advertises only URLs a PEER can use — never loopback", () => {
+  // Loopback names the reader's own machine, so a loopback-only server has
+  // nothing to advertise (2026-07-31 field bug: the peer attached to itself).
+  expect(advertisedBaseUrls(undefined, 14801)).toEqual([]);
+  expect(advertisedBaseUrls("127.0.0.1", 14801)).toEqual([]);
+  expect(advertisedBaseUrls("localhost", 14801)).toEqual([]);
+  expect(advertisedBaseUrls("::1", 3773)).toEqual([]);
+  // A specific routable bind advertises exactly that address.
   expect(advertisedBaseUrls("100.64.0.7", 3773)).toEqual(["http://100.64.0.7:3773"]);
-  expect(advertisedBaseUrls("::1", 3773)).toEqual(["http://[::1]:3773"]);
-  // Wildcard bind: every external IPv4 interface, loopback last.
+  // Wildcard bind: every external IPv4 interface, loopback excluded.
   expect(
     advertisedBaseUrls("0.0.0.0", 3773, {
       en0: [
@@ -84,7 +86,9 @@ it("advertises only URLs the socket actually listens on", () => {
         },
       ],
     }),
-  ).toEqual(["http://192.168.1.42:3773", "http://127.0.0.1:3773"]);
+  ).toEqual(["http://192.168.1.42:3773"]);
+  // A wildcard bind with no external interface has nothing to offer either.
+  expect(advertisedBaseUrls("0.0.0.0", 3773, {})).toEqual([]);
 });
 
 it("builds a pairing URL that embeds the token in the hash", () => {

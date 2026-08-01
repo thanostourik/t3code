@@ -575,6 +575,19 @@ const make = Effect.gen(function* () {
             config.serverRuntimeStatePath,
           ).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
           const port = Option.isSome(runtimeState) ? runtimeState.value.port : config.port;
+          // Nothing routable to advertise (loopback-only server — network
+          // access is off): skip the reverse half rather than register a
+          // URL that names the READER's own machine. Pairing succeeds
+          // one-directionally, exactly as against a pre-M5.6 peer.
+          const baseUrls = advertisedBaseUrls(config.host, port);
+          if (baseUrls.length === 0) {
+            yield* Effect.logWarning(
+              "roaming: this machine is not reachable over the network, so the peer's" +
+                " clients cannot attach back to it; enable network access and re-pair" +
+                " to make its threads live on the other machine",
+            );
+            return;
+          }
           // The session represents the CALLEE on this machine's authorized
           // clients — name it after the callee, not the pairing link (which
           // names US).
@@ -592,7 +605,7 @@ const make = Effect.gen(function* () {
             const registrationBody = yield* encodeAttachRegistration({
               environmentId,
               label: ownLabel,
-              baseUrls: advertisedBaseUrls(config.host, port),
+              baseUrls,
               token: reverseSession.token,
               expiresAt: DateTime.formatIso(reverseSession.expiresAt),
             });

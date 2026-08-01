@@ -213,9 +213,20 @@ const unusedStubs = Layer.mergeAll(
   ),
   Layer.succeed(RepositoryIdentityResolver, {} as unknown as RepositoryIdentityResolver["Service"]),
   // M5.6 reverse attach reads the bind host + runtime-state path (the
-  // missing file falls back to config.port).
+  // missing file falls back to config.port). A ROUTABLE host: a
+  // loopback-only server advertises nothing and skips the reverse half.
   Layer.succeed(ServerConfig, {
-    host: undefined,
+    host: "192.168.1.42",
+    port: 14800,
+    serverRuntimeStatePath: "/nonexistent/server-runtime.json",
+  } as unknown as ServerConfig["Service"]),
+);
+
+/** Same stubs, but a loopback-only server (network access off). */
+const loopbackOnlyStubs = Layer.mergeAll(
+  unusedStubs,
+  Layer.succeed(ServerConfig, {
+    host: "127.0.0.1",
     port: 14800,
     serverRuntimeStatePath: "/nonexistent/server-runtime.json",
   } as unknown as ServerConfig["Service"]),
@@ -237,6 +248,8 @@ const makeAuthLayer = (issued: Ref.Ref<ReadonlyArray<{ scopes: ReadonlyArray<str
 const runAddPeer = (input: {
   readonly httpLayer: Layer.Layer<HttpClient.HttpClient>;
   readonly syncOptions?: { readonly secretsSync?: boolean };
+  /** Swap in the loopback-only ServerConfig (network access off). */
+  readonly stubs?: typeof unusedStubs;
 }) =>
   Effect.gen(function* () {
     const secrets = yield* Ref.make<ReadonlyMap<string, Uint8Array>>(new Map());
@@ -251,7 +264,7 @@ const runAddPeer = (input: {
           makeSecretStoreLayer(secrets),
           makePeersLayer(peerRows),
           makeAuthLayer(issued),
-          unusedStubs,
+          input.stubs ?? unusedStubs,
         ),
       ),
       // The settings assertions read through the same test settings service.
@@ -323,12 +336,32 @@ describe("RoamingService unified pairing handshake", () => {
       };
       assert.strictEqual(registration.environmentId, LOCAL_ENVIRONMENT_ID);
       assert.strictEqual(registration.label, "Test Laptop");
-      // Default bind advertises loopback only, at the config port (the
-      // runtime-state file is absent in tests).
-      assert.deepStrictEqual(registration.baseUrls, ["http://127.0.0.1:14800"]);
+      // The routable bind address, at the config port (the runtime-state
+      // file is absent in tests).
+      assert.deepStrictEqual(registration.baseUrls, ["http://192.168.1.42:14800"]);
       // The registered token is a freshly issued local session, never the
       // handshake or mirror bearer received from the callee.
       assert.strictEqual(registration.token, ISSUED_SESSION_TOKEN);
+    }),
+  );
+
+  // The 2026-07-31 field bug: a loopback-only server advertised
+  // `127.0.0.1`, so the peer's client attached to its OWN backend and sat
+  // on a permanent identity mismatch. Advertise nothing instead — pairing
+  // degrades to one-directional, exactly as against a pre-M5.6 peer.
+  it.effect("loopback-only server registers nothing (and mints no session) for the callee", () =>
+    Effect.gen(function* () {
+      const peer = yield* makePeerHttpLayer({
+        grantedScopes: [...AuthStandardClientScopes, AuthAccessWriteScope],
+      });
+      const { result } = yield* runAddPeer({
+        httpLayer: peer.layer,
+        stubs: loopbackOnlyStubs,
+      });
+      // The forward half is untouched: pairing still succeeds.
+      assert.isNotNull(result.peer);
+      assert.strictEqual(result.attach.token, ATTACH_TOKEN);
+      assert.lengthOf(yield* Ref.get(peer.attachRegistrations), 0);
     }),
   );
 
