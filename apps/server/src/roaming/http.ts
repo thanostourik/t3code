@@ -34,7 +34,9 @@ import {
   ROAMING_PEERS_REMOVE_PATH,
   ROAMING_PEERS_SYNC_PATH,
   ROAMING_ATTACH_REGISTRATION_PATH,
+  ROAMING_ATTACH_REGISTRATION_WITHDRAW_PATH,
   ROAMING_ATTACH_REGISTRATIONS_LIST_PATH,
+  EnvironmentId,
   RoamingAddPeerRequest,
   RoamingAttachRegistration,
   RoamingRegisterAttachResponse,
@@ -112,19 +114,22 @@ const CREDENTIAL_RESPONSE_HEADERS = {
   pragma: "no-cache",
 } as const;
 
+/** 401 on auth failure; scope checks live on top of this. */
+const authenticateSession = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const auth = yield* EnvironmentAuth.EnvironmentAuth;
+  return yield* auth.authenticateHttpRequest(request).pipe(
+    Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () => reject(401, "Unauthorized")),
+    Effect.mapError((error) =>
+      isRoamingRouteRejection(error) ? error : reject(500, "Internal Server Error"),
+    ),
+  );
+});
+
 /** 401/403 on auth failures; no roaming-setting gate (pairing routes). */
 const requireScope = (scope: AuthEnvironmentScope) =>
   Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const auth = yield* EnvironmentAuth.EnvironmentAuth;
-    const session = yield* auth.authenticateHttpRequest(request).pipe(
-      Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () =>
-        reject(401, "Unauthorized"),
-      ),
-      Effect.mapError((error) =>
-        isRoamingRouteRejection(error) ? error : reject(500, "Internal Server Error"),
-      ),
-    );
+    const session = yield* authenticateSession;
     if (!session.scopes.includes(scope)) {
       return yield* reject(403, "Forbidden");
     }
@@ -479,21 +484,39 @@ const handshakeCompleteRoute = HttpRouter.add(
 );
 
 /**
- * Reverse half of the unified handshake (M5.6): the initiator, still
- * holding the handshake bearer, registers how THIS machine's clients can
- * attach back to it. Requires the mirror half to have completed first —
- * a registration is only accepted for an environment that already exists
+ * Reverse half of bidirectional pairing (M5.6; standing-channel model
+ * 2026-08-01): a paired machine registers how THIS machine's clients can
+ * attach back to it, over the mirror credential it already holds — pushed
+ * whenever its advertised addresses change. Tamper-narrow: a mirror
+ * session may only write the registration of the machine its subject
+ * names. An administrative bearer may also write one (manual/ops path).
+ * A registration is only accepted for an environment that already exists
  * as a peer, so the standing trust decision (the admin pairing code) is
- * what authorizes it. Un-gated like the other pairing routes: it runs
- * inside the handshake that turns roaming on.
+ * what authorizes it. Deliberately NOT gated on sync pause: pause stops
+ * blob sync, never attach (same rule as the forward direction).
  */
+const requireAttachRegistrationAuthority = (environmentId: string) =>
+  Effect.gen(function* () {
+    const session = yield* authenticateSession;
+    if (session.scopes.includes(AuthAccessWriteScope)) {
+      return session;
+    }
+    if (
+      session.scopes.includes(AuthRoamingMirrorScope) &&
+      session.subject === `roaming-peer:${environmentId}`
+    ) {
+      return session;
+    }
+    return yield* reject(403, "A machine may only manage its own registration");
+  });
+
 const registerAttachRoute = HttpRouter.add(
   "POST",
   ROAMING_ATTACH_REGISTRATION_PATH,
   handleRejection(
     Effect.gen(function* () {
-      yield* requireScope(AuthAccessWriteScope);
       const body = yield* decodeBody(RoamingAttachRegistration);
+      yield* requireAttachRegistrationAuthority(body.environmentId);
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       if (body.environmentId === (yield* serverEnvironment.getEnvironmentId)) {
         return yield* reject(400, "A machine cannot register itself");
@@ -510,6 +533,31 @@ const registerAttachRoute = HttpRouter.add(
         .upsert(body)
         .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
       return yield* respondJson(RoamingRegisterAttachResponse, { registered: true });
+    }),
+  ),
+);
+
+/**
+ * A machine whose advertised addresses became empty (network access off)
+ * withdraws its own registration so this machine's clients fall back to
+ * the honest offline presentation. Mirror credential only; the subject
+ * names whose registration goes.
+ */
+const withdrawAttachRoute = HttpRouter.add(
+  "POST",
+  ROAMING_ATTACH_REGISTRATION_WITHDRAW_PATH,
+  handleRejection(
+    Effect.gen(function* () {
+      const session = yield* requireScope(AuthRoamingMirrorScope);
+      const match = /^roaming-peer:(.+)$/.exec(session.subject);
+      if (match === null) {
+        return yield* reject(403, "Forbidden");
+      }
+      const registrations = yield* RoamingAttachRegistrations;
+      const removed = yield* registrations
+        .remove(match[1] as EnvironmentId)
+        .pipe(Effect.mapError(() => reject(500, "Internal Server Error")));
+      return yield* respondJson(RoamingRemovePeerResponse, { removed });
     }),
   ),
 );
@@ -742,6 +790,7 @@ export const roamingRoutesLayer = Layer.mergeAll(
   setPeerSyncRoute,
   handshakeCompleteRoute,
   registerAttachRoute,
+  withdrawAttachRoute,
   listAttachRegistrationsRoute,
   enrollProjectRoute,
   materializeRoute,

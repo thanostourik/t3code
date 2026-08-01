@@ -3568,7 +3568,14 @@ export function ConnectionsSettings() {
             }
           />
         ) : desktopServerExposureState ? (
-          "Limited to this machine."
+          roamingEnabled ? (
+            // The reverse attach rides reachability (M5.6): while this
+            // machine is loopback-only, paired machines can only show its
+            // work as offline copies — say so where the fix lives.
+            "Limited to this machine. Your other machines show its threads as offline copies only."
+          ) : (
+            "Limited to this machine."
+          )
         ) : (
           "Loading…"
         )
@@ -3586,8 +3593,10 @@ export function ConnectionsSettings() {
       title={searchableSetting("network-access").title}
       description={
         currentAuthPolicy === "remote-reachable"
-          ? "Remote access is already configured. Change network exposure where the server starts."
-          : "Only this machine can connect. Restart with a non-loopback host for remote pairing."
+          ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
+          : roamingEnabled
+            ? "This backend is only reachable on this machine, so your other machines show its threads as offline copies only. Restart it with a non-loopback host to enable remote pairing."
+            : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
       }
       control={
         <Tooltip>

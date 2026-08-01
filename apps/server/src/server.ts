@@ -77,6 +77,7 @@ import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.
 import * as ThreadPullRequestReactor from "./orchestration/ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { layer as RoamingBlobStoreLayer } from "./roaming/RoamingBlobStore.ts";
+import { layer as ReverseAttachLayer } from "./roaming/ReverseAttach.ts";
 import { layer as RoamingAttachRegistrationsLayer } from "./roaming/RoamingAttachRegistrations.ts";
 import { layer as RoamingPeersLayer } from "./roaming/RoamingPeers.ts";
 import { layer as PeerMirrorLayer } from "./roaming/PeerMirror.ts";
@@ -298,6 +299,7 @@ const RoamingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(RoamingServiceLayer),
   Layer.provideMerge(VaultSyncLayer),
   Layer.provideMerge(PeerMirrorLayer),
+  Layer.provideMerge(ReverseAttachLayer),
   Layer.provideMerge(RoamingAttachRegistrationsLayer),
   Layer.provideMerge(RoamingPeersLayer),
   Layer.provideMerge(RoamingBlobStoreLayer),

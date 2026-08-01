@@ -1,20 +1,26 @@
-// M5.6 bidirectional-pairing acceptance on the fresh M0 two-instance harness.
-// B initiates the one handshake into A (A = callee). Server-verifiable exit
-// criteria:
-//   - the handshake leaves an attach registration on the CALLEE only:
-//     A can hand its clients {B's envId, label, URL, token}; B's list stays
-//     empty (nothing registered A-ward), and the route 404s before pairing
-//     (roaming gate);
-//   - the registered token really is a live standard-scoped session on B:
-//     it reads B's shell (projects + threads visible — the "live on the
-//     callee" half the client renders) but cannot call administrative
-//     routes;
-//   - teardown is honest in both directions: unpairing on B revokes the
-//     reverse session (token dies), unpairing on A drops the registration.
+// M5.6 bidirectional-pairing acceptance (standing-channel model,
+// 2026-08-01) on the fresh M0 two-instance harness. B initiates the one
+// handshake into A; ONE run walks the whole network-access toggle story:
+//
+//   1. Paired while B is loopback-only → A holds NO registration (a
+//      loopback address names the READER's machine — the 2026-07-31 field
+//      bug), and pairing still succeeds one-directionally.
+//   2. B restarts bound 0.0.0.0 — NO re-pairing — and its startup mirror
+//      pass pushes the registration over the standing mirror credential:
+//      A now hands its clients {B's envId, label, routable URL, token};
+//      the token reads B's shell (projects + threads — the live half) but
+//      cannot call administrative routes; B's own list stays empty.
+//   3. B restarts loopback-only again → its pass WITHDRAWS the
+//      registration and revokes the session: A's copy disappears and the
+//      old token dies (honest offline).
+//   4. Teardown both ways: unpairing on B revokes the reverse session;
+//      unpairing on A drops the registration.
+//
 // The row presentation (live rows while B is reachable, greyed fallbacks
-// when it is not) is client-side and verified by the M5.6 browser walk on
-// the same harness; the canonical pairing walk remains accept-m2.5.mjs.
+// when not) is client-side and verified by the browser walk on the same
+// harness; the canonical pairing walk remains accept-m2.5.mjs.
 
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -23,23 +29,21 @@ import {
   A,
   B,
   HARNESS_DIR,
+  REPO_ROOT,
   api,
   cli,
   fail,
   hasRoamingPeers,
   makeGitTrimmed,
   pass,
+  waitFor,
 } from "./harness-lib.mjs";
 
 const git = makeGitTrimmed("m56");
+const { execFileSync } = NodeChildProcess;
 const { randomUUID } = NodeCrypto;
-const { rmSync, writeFileSync } = NodeFS;
+const { readFileSync, rmSync, writeFileSync } = NodeFS;
 const { join } = NodePath;
-
-// Must match how the harness was started: a loopback-only server
-// deliberately advertises nothing, so the two modes assert opposite
-// outcomes. Run BOTH.
-const BIND_HOST = process.env.T3_ROAMING_HARNESS_BIND ?? "127.0.0.1";
 
 const ADMIN_SCOPES = [
   "orchestration:read",
@@ -64,7 +68,28 @@ const dispatch = async (instance, token, command) => {
 const listRegistrations = (instance, token) =>
   api(instance.url, "/api/roaming/attach-registration/list", { method: "POST", token, body: {} });
 
-// ── Preflight: fresh harness ─────────────────────────────────────────────
+const registrationsOn = async (instance, token) => {
+  const response = await listRegistrations(instance, token);
+  if (!response.ok) fail("registration list", `${response.status}`);
+  return (await response.json()).registrations;
+};
+
+/** Restart instance B on the given bind host, same base dir (no re-pair). */
+const restartB = (bindHost) => {
+  const pidPath = join(HARNESS_DIR, "instance-b/server.pid");
+  try {
+    process.kill(Number(readFileSync(pidPath, "utf8").trim()));
+  } catch {
+    // already down
+  }
+  rmSync(pidPath, { force: true });
+  execFileSync(join(REPO_ROOT, "scripts/roaming/harness.sh"), ["start"], {
+    encoding: "utf8",
+    env: { ...process.env, T3_ROAMING_HARNESS_BIND: bindHost },
+  });
+};
+
+// ── Preflight: fresh harness (loopback-bound — the default) ──────────────
 for (const instance of [A, B]) {
   const up = await api(instance.url, "/.well-known/t3/environment").then(
     (response) => response.ok,
@@ -77,6 +102,7 @@ pass("fresh M0 harness");
 
 const adminA = cli(["auth", "session", "issue", "--base-dir", A.base, "--token-only"]);
 const adminB = cli(["auth", "session", "issue", "--base-dir", B.base, "--token-only"]);
+const envA = (await (await api(A.url, "/.well-known/t3/environment")).json()).environmentId;
 const envB = (await (await api(B.url, "/.well-known/t3/environment")).json()).environmentId;
 
 // ── Gate: the list route does not exist before pairing ───────────────────
@@ -122,7 +148,7 @@ await dispatch(B, adminB, {
 });
 pass("project + thread created on B");
 
-// ── The one handshake: B pairs into A ────────────────────────────────────
+// ── The one handshake: B (loopback-only) pairs into A ────────────────────
 const codeResponse = await api(A.url, "/api/auth/pairing-token", {
   method: "POST",
   token: adminA,
@@ -139,67 +165,44 @@ const paired = await api(B.url, "/api/roaming/peers", {
   },
 });
 if (!paired.ok || (await paired.json()).peer === null) fail("pairing", `${paired.status}`);
-pass("paired once (B initiated into A)");
+pass("paired once (B initiated into A, while loopback-only)");
 
-// ── Loopback-only mode: nothing is advertised, nothing is registered ─────
-// The 2026-07-31 field bug: a loopback-only server advertised 127.0.0.1,
-// so the callee's client attached to its OWN backend and sat forever on
-// "connected environment X does not match Y". Advertising nothing is the
-// honest answer; pairing degrades to one-directional.
-if (BIND_HOST === "127.0.0.1") {
-  const loopbackListed = await listRegistrations(A, adminA);
-  if (!loopbackListed.ok) fail("loopback registration list", `${loopbackListed.status}`);
-  const loopbackRegistrations = (await loopbackListed.json()).registrations;
-  if (loopbackRegistrations.length !== 0) {
-    fail(
-      "loopback-only advertisement",
-      `a loopback-only initiator registered ${JSON.stringify(
-        loopbackRegistrations.map((entry) => entry.baseUrls),
-      )} — the callee would attach to itself`,
-    );
-  }
-  pass("loopback-only initiator registers nothing (field-bug regression)");
-  console.log(
-    "\nM5.6 loopback leg: PASS. Re-run with T3_ROAMING_HARNESS_BIND=0.0.0.0" +
-      " for the registration leg.",
-  );
-  process.exit(0);
+// ── 1. Loopback-only: nothing registered (field-bug regression) ──────────
+// The pairing's syncNow already ran a pass; give one interval-free beat.
+await new Promise((resolve) => setTimeout(resolve, 3000));
+if ((await registrationsOn(A, adminA)).length !== 0) {
+  fail("loopback advertisement", "a loopback-only initiator registered an address");
 }
+pass("loopback-only initiator registers nothing (field-bug regression)");
 
-// ── The callee holds the reverse registration; the initiator holds none ──
-const listedA = await listRegistrations(A, adminA);
-if (!listedA.ok) fail("callee registration list", `${listedA.status}`);
-if (listedA.headers.get("cache-control") !== "no-store") {
-  fail("callee registration list", "token response is missing cache-control: no-store");
-}
-const registrations = (await listedA.json()).registrations;
-if (registrations.length !== 1)
-  fail("callee registration", `expected 1, got ${registrations.length}`);
-const registration = registrations[0];
+// ── 2. Enable network access: restart B routable, NO re-pairing ──────────
+restartB("0.0.0.0");
+const registration = await waitFor(
+  "registration arrives via the standing channel",
+  90_000,
+  async () => {
+    const registrations = await registrationsOn(A, adminA);
+    return registrations.length === 1 ? registrations[0] : null;
+  },
+);
 if (registration.environmentId !== envB) {
-  fail("callee registration", `names ${registration.environmentId}, expected B (${envB})`);
+  fail("standing registration", `names ${registration.environmentId}, expected B (${envB})`);
 }
 if (registration.baseUrls.some((url) => /\/\/(127\.|localhost|\[::1\])/.test(url))) {
-  fail(
-    "callee registration",
-    `advertised a loopback URL (${registration.baseUrls.join(", ")}) — it names the READER's machine`,
-  );
+  fail("standing registration", `advertised a loopback URL: ${registration.baseUrls.join(", ")}`);
 }
-if (!registration.label) fail("callee registration", "registration has no label");
-pass(`callee registration names B at ${registration.baseUrls.join(", ")}`);
+if (!registration.label) fail("standing registration", "registration has no label");
+const listedHeaders = await listRegistrations(A, adminA);
+if (listedHeaders.headers.get("cache-control") !== "no-store") {
+  fail("standing registration", "token response is missing cache-control: no-store");
+}
+pass(`toggle ON → registration arrived, no re-pair (${registration.baseUrls.join(", ")})`);
 
-const listedB = await listRegistrations(B, adminB);
-if (!listedB.ok) fail("initiator registration list", `${listedB.status}`);
-if ((await listedB.json()).registrations.length !== 0) {
+if ((await registrationsOn(B, adminB)).length !== 0) {
   fail("initiator registration list", "the initiator must hold no reverse registration");
 }
-pass("initiator side holds no registration (one-directional handshake product)");
+pass("initiator side holds no registration (one-directional product)");
 
-// ── The registered token is a live standard-scoped session on B ──────────
-const identity = await api(registration.baseUrls[0], "/.well-known/t3/environment");
-if (!identity.ok || (await identity.json()).environmentId !== envB) {
-  fail("registration identity", "advertised URL does not answer as B");
-}
 const shellB = await api(B.url, "/api/orchestration/shell", { token: registration.token });
 if (!shellB.ok) fail("attach token", `shell read on B failed (${shellB.status})`);
 const shell = await shellB.json();
@@ -219,20 +222,36 @@ const privileged = await api(B.url, "/api/roaming/peers/list", {
 if (privileged.ok) fail("attach token scope", "registered token can call administrative routes");
 pass(`registered token is standard-scoped (peers/list → ${privileged.status})`);
 
-// ── Teardown direction 1: unpairing on B revokes the reverse session ─────
+// ── 3. Disable network access: restart B loopback, registration goes ─────
+restartB("127.0.0.1");
+await waitFor("registration withdrawn via the standing channel", 90_000, async () => {
+  const registrations = await registrationsOn(A, adminA);
+  return registrations.length === 0 ? true : null;
+});
+const withdrawnToken = await api(B.url, "/api/orchestration/shell", {
+  token: registration.token,
+});
+if (withdrawnToken.ok) fail("withdrawal", "the withdrawn session still authenticates");
+pass(`toggle OFF → registration withdrawn, session revoked (shell → ${withdrawnToken.status})`);
+
+// ── 4. Teardown both directions (re-enable first) ────────────────────────
+restartB("0.0.0.0");
+const reissued = await waitFor("registration returns after re-enable", 90_000, async () => {
+  const registrations = await registrationsOn(A, adminA);
+  return registrations.length === 1 ? registrations[0] : null;
+});
+pass("toggle ON again → registration returns (fresh token)");
+
 const removeOnB = await api(B.url, "/api/roaming/peers/remove", {
   method: "POST",
   token: adminB,
-  body: {
-    environmentId: (await (await api(A.url, "/.well-known/t3/environment")).json()).environmentId,
-  },
+  body: { environmentId: envA },
 });
 if (!removeOnB.ok) fail("remove on B", `${removeOnB.status}`);
-const revoked = await api(B.url, "/api/orchestration/shell", { token: registration.token });
+const revoked = await api(B.url, "/api/orchestration/shell", { token: reissued.token });
 if (revoked.ok) fail("remove on B", "the reverse attach session survived unpairing");
 pass(`unpairing on the initiator revokes the reverse session (shell → ${revoked.status})`);
 
-// ── Teardown direction 2: unpairing on A drops the registration ──────────
 const removeOnA = await api(A.url, "/api/roaming/peers/remove", {
   method: "POST",
   token: adminA,
@@ -247,4 +266,4 @@ if (afterRemoval.ok && (await afterRemoval.json()).registrations.length !== 0) {
 }
 pass("unpairing on the callee drops the registration");
 
-console.log("\nM5.6 server-verifiable acceptance: ALL PASS");
+console.log("\nM5.6 standing-channel acceptance: ALL PASS");
