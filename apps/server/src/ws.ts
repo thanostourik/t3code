@@ -5,7 +5,6 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as PubSub from "effect/PubSub";
 import type * as Scope from "effect/Scope";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -52,8 +51,6 @@ import {
   AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
-  RoamingTranscriptPayload,
-  type RoamingThreadShell,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -87,6 +84,7 @@ import { RoamingPeers } from "./roaming/RoamingPeers.ts";
 import { WipSnapshotReactor } from "./roaming/WipSnapshotReactor.ts";
 import { RoamingBlobStore } from "./roaming/RoamingBlobStore.ts";
 import { RoamingThreadResumptions } from "./roaming/RoamingThreadResumptions.ts";
+import { makeRoamingShellStream } from "./roaming/shellStream.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
@@ -139,12 +137,6 @@ const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchComma
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
-
-// Synthesizing supersession removals (M5.5): the shell query rightly hides a
-// superseded source thread, so its removal upsert is built from the raw blob.
-const decodeWsTranscriptPayload = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(RoamingTranscriptPayload),
-);
 
 export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
@@ -382,6 +374,17 @@ const makeWsRpcLayer = (
       const roamingAttachRegistrations = yield* RoamingAttachRegistrations;
       const materializer = yield* Materializer;
       const wipSnapshotReactor = yield* WipSnapshotReactor;
+      // Roaming's shell-stream contribution lives behind one roaming-owned
+      // seam (fork discipline — keep this hot upstream file to call sites).
+      const roamingShellStream = makeRoamingShellStream({
+        blobStore: roamingBlobStore,
+        threadResumptions: roamingThreadResumptions,
+        attachRegistrations: roamingAttachRegistrations,
+        materializer,
+        wipSnapshotReactor,
+        projectionSnapshotQuery,
+        orchestrationEngine,
+      });
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1187,163 +1190,12 @@ const makeWsRpcLayer = (
 
               // Roaming live sources (registry blobs, materializations, WIP
               // statuses) are not domain events; they merge in as sequence-0
-              // items — applied by key, not by snapshot ordering — so they
-              // bypass the coalescing buffer. Like the domain events above,
-              // each source SUBSCRIBES HERE, before any snapshot or catch-up
-              // work: a publish while the snapshot query or resume replay is
-              // in flight lands in this scope-bound buffer instead of being
-              // dropped (the pre-2026-07-22 code attached them lazily with
-              // the live tail, losing anything published in that window).
-              const roamingBuffer = yield* Queue.unbounded<OrchestrationShellStreamItem>();
-              const attachRoamingSource = <A>(
-                subscribe: Effect.Effect<PubSub.Subscription<A>, never, Scope.Scope>,
-                toItem: (value: A) => Effect.Effect<OrchestrationShellStreamItem | undefined>,
-              ) =>
-                Effect.gen(function* () {
-                  const subscription = yield* subscribe;
-                  yield* Effect.forkScoped(
-                    Effect.forever(
-                      PubSub.take(subscription).pipe(
-                        Effect.flatMap(toItem),
-                        Effect.flatMap((item) =>
-                          item === undefined ? Effect.void : Queue.offer(roamingBuffer, item),
-                        ),
-                      ),
-                    ),
-                    { startImmediately: true },
-                  );
-                });
-
-              yield* attachRoamingSource(roamingBlobStore.subscribeChanges, (record) =>
-                record.kind === "transcript" || record.kind === "brief"
-                  ? // Mirrored-thread rows (M5): tombstoned transcripts still
-                    // emit (deleted: true tells the reducer to drop the row).
-                    projectionSnapshotQuery.getRoamingThreadShellById(record.key as ThreadId).pipe(
-                      Effect.map(Option.getOrUndefined),
-                      Effect.orElseSucceed(() => undefined),
-                      Effect.map((shell) =>
-                        shell === undefined
-                          ? undefined
-                          : {
-                              kind: "roaming-thread-upserted" as const,
-                              sequence: 0,
-                              roamingThread: shell,
-                            },
-                      ),
-                    )
-                  : projectionSnapshotQuery.listRoamingProjectShells().pipe(
-                      Effect.map((shells) =>
-                        shells.find(
-                          (shell) => shell.workspaceProjectId === record.workspaceProjectId,
-                        ),
-                      ),
-                      Effect.orElseSucceed(() => undefined),
-                      Effect.map((shell) =>
-                        shell === undefined
-                          ? undefined
-                          : {
-                              kind: "roaming-project-upserted" as const,
-                              sequence: 0,
-                              roamingProject: shell,
-                            },
-                      ),
-                    ),
-              );
-              yield* attachRoamingSource(materializer.subscribeUpdates, (materialization) =>
-                Effect.succeed({
-                  kind: "roaming-materialization-updated" as const,
-                  sequence: 0,
-                  materialization,
-                }),
-              );
-              yield* attachRoamingSource(wipSnapshotReactor.subscribeUpdates, (wipStatus) =>
-                Effect.succeed({
-                  kind: "roaming-wip-status-updated" as const,
-                  sequence: 0,
-                  wipStatus,
-                }),
-              );
-              // M5.6: payload-free nudge — clients refetch registrations
-              // over the authenticated no-store HTTP route.
-              yield* attachRoamingSource(roamingAttachRegistrations.subscribeChanges, () =>
-                Effect.succeed({
-                  kind: "roaming-attach-registrations-changed" as const,
-                  sequence: 0,
-                }),
-              );
-              // M5.5 supersession transitions are NOT blob changes: a source
-              // thread's fallback row disappears when its resumed local
-              // thread is created and returns when that thread is deleted —
-              // both driven by the projection row, so the blob source above
-              // never fires and live clients kept the stale row (field bug).
-              // Poll briefly for the projection write to land, then emit the
-              // row's new state; a removal is synthesized from the raw blob
-              // because the list query rightly refuses to return it.
-              yield* Effect.forkScoped(
-                orchestrationEngine.streamDomainEvents.pipe(
-                  Stream.runForEach((event) => {
-                    if (event.type !== "thread.created" && event.type !== "thread.deleted") {
-                      return Effect.void;
-                    }
-                    const resumedThreadId = (event.payload as { threadId?: unknown }).threadId;
-                    if (typeof resumedThreadId !== "string") {
-                      return Effect.void;
-                    }
-                    const expectVisible = event.type === "thread.deleted";
-                    return Effect.gen(function* () {
-                      const sources = yield* roamingThreadResumptions
-                        .findSourcesByResumedThreadId(resumedThreadId as ThreadId)
-                        .pipe(Effect.orElseSucceed(() => []));
-                      for (const sourceThreadId of sources) {
-                        let shell = undefined;
-                        for (let attempt = 0; attempt < 20; attempt++) {
-                          shell = yield* projectionSnapshotQuery
-                            .getRoamingThreadShellById(sourceThreadId)
-                            .pipe(
-                              Effect.map(Option.getOrUndefined),
-                              Effect.orElseSucceed(() => undefined),
-                            );
-                          if ((shell !== undefined) === expectVisible) break;
-                          yield* Effect.sleep(Duration.millis(250));
-                        }
-                        if (shell !== undefined) {
-                          yield* Queue.offer(roamingBuffer, {
-                            kind: "roaming-thread-upserted" as const,
-                            sequence: 0,
-                            roamingThread: shell,
-                          });
-                          continue;
-                        }
-                        const record = yield* roamingBlobStore
-                          .get({ kind: "transcript", key: sourceThreadId })
-                          .pipe(Effect.orElseSucceed(() => null));
-                        if (record === null) continue;
-                        const payload = yield* decodeWsTranscriptPayload(record.payload).pipe(
-                          Effect.orElseSucceed(() => null),
-                        );
-                        if (payload === null) continue;
-                        yield* Queue.offer(roamingBuffer, {
-                          kind: "roaming-thread-upserted" as const,
-                          sequence: 0,
-                          roamingThread: {
-                            threadId: sourceThreadId,
-                            workspaceProjectId: payload.workspaceProjectId,
-                            title: payload.title,
-                            authorEnvironmentId:
-                              record.authorEnvironmentId as RoamingThreadShell["authorEnvironmentId"],
-                            capturedAt: payload.capturedAt,
-                            updatedAt: payload.updatedAt,
-                            messageCount: payload.messages.length,
-                            hasBrief: false,
-                            deleted: true,
-                          },
-                        });
-                      }
-                    });
-                  }),
-                ),
-                { startImmediately: true },
-              );
+              // items via a roaming-owned buffer (roaming/shellStream.ts).
+              // Like the domain events above, every source subscribes HERE,
+              // before any snapshot or catch-up work: a publish while the
+              // snapshot query or resume replay is in flight lands in the
+              // scope-bound buffer instead of being dropped.
+              const roamingBuffer = yield* roamingShellStream.attachSources;
 
               // Pairing turns roaming on after the shell subscription already
               // exists. The sources stay attached so that transition can
@@ -1366,23 +1218,7 @@ const makeWsRpcLayer = (
                 // snapshot carries the live WIP statuses. Every snapshot-emitting
                 // path below goes through this one helper.
                 Effect.flatMap((snapshot) =>
-                  roamingEnabled
-                    ? Effect.map(
-                        Effect.all([wipSnapshotReactor.listStatuses(), materializer.listRecords]),
-                        ([wipStatus, materializations]) => ({
-                          ...snapshot,
-                          roamingWipStatus: wipStatus,
-                          // D2: materialization progress lives in memory only.
-                          roamingMaterializations: materializations,
-                        }),
-                      )
-                    : Effect.succeed({
-                        ...snapshot,
-                        roamingProjects: [],
-                        roamingMaterializations: [],
-                        roamingWipStatus: [],
-                        roamingThreads: [],
-                      }),
+                  roamingShellStream.overlaySnapshot(snapshot, roamingEnabled),
                 ),
               );
 
@@ -1447,51 +1283,9 @@ const makeWsRpcLayer = (
                       }),
                   ),
                 );
-                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = yield* (
-                  roamingEnabled
-                    ? Effect.gen(function* () {
-                        const [shell, wipStatuses, materializations] = yield* Effect.all([
-                          projectionSnapshotQuery.getShellSnapshot(),
-                          wipSnapshotReactor.listStatuses(),
-                          materializer.listRecords,
-                        ]);
-                        const items: OrchestrationShellStreamItem[] = [];
-                        for (const roamingProject of shell.roamingProjects) {
-                          items.push({
-                            kind: "roaming-project-upserted",
-                            sequence: 0,
-                            roamingProject,
-                          });
-                        }
-                        for (const roamingThread of shell.roamingThreads) {
-                          items.push({
-                            kind: "roaming-thread-upserted",
-                            sequence: 0,
-                            roamingThread,
-                          });
-                        }
-                        for (const materialization of materializations) {
-                          items.push({
-                            kind: "roaming-materialization-updated",
-                            sequence: 0,
-                            materialization,
-                          });
-                        }
-                        items.push({
-                          kind: "roaming-wip-status-replaced",
-                          sequence: 0,
-                          wipStatuses,
-                        });
-                        return items;
-                      })
-                    : Effect.succeed([
-                        {
-                          kind: "roaming-wip-status-replaced" as const,
-                          sequence: 0,
-                          wipStatuses: [],
-                        },
-                      ])
-                ).pipe(
+                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = yield* roamingShellStream
+                  .catchUpItems(roamingEnabled)
+                  .pipe(
                   Effect.mapError(
                     (cause) =>
                       new OrchestrationGetSnapshotError({
