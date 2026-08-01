@@ -15,7 +15,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { useMaterialize } from "../components/Sidebar";
+import { useMaterialize } from "../components/roamingSidebar";
 import { toastManager } from "../components/ui/toast";
 import { useComposerDraftStore } from "../composerDraftStore";
 import {
