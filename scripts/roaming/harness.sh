@@ -15,6 +15,11 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HARNESS_DIR="${T3_ROAMING_HARNESS_DIR:-/tmp/t3-roaming-harness}"
+# Loopback by default. T3_ROAMING_HARNESS_BIND=0.0.0.0 binds every
+# interface, which is what the M5.6 reverse attach needs to advertise a
+# peer-usable address (a loopback-only server deliberately advertises
+# nothing). Instances stay addressable at 127.0.0.1 either way.
+BIND_HOST="${T3_ROAMING_HARNESS_BIND:-127.0.0.1}"
 HOST=127.0.0.1
 PORT_A=14801
 PORT_B=14802
@@ -33,7 +38,7 @@ start_instance() {
   fi
 
   node "$REPO_ROOT/apps/server/src/bin.ts" serve \
-    --base-dir "$dir/basedir" --host "$HOST" --port "$port" --no-browser \
+    --base-dir "$dir/basedir" --host "$BIND_HOST" --port "$port" --no-browser \
     >"$dir/server.log" 2>&1 &
   echo $! >"$dir/server.pid"
 

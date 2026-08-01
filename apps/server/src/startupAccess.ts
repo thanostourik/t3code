@@ -80,12 +80,18 @@ export const resolveHeadlessConnectionString = (
 /**
  * Candidate URLs at which OTHER machines might reach this server —
  * best-effort self-advertisement for the roaming reverse attach half
- * (M5.6). Only URLs the socket actually listens on: a specific bind
- * advertises exactly that address, the default bind is loopback-only,
- * and a wildcard bind advertises every external IPv4 interface (LAN and
- * tailnet addresses) with loopback last. Consumers probe in order and
- * identity-check the descriptor, so a stale or ambiguous candidate can
- * mislead no one.
+ * (M5.6). Only URLs the socket actually listens on AND that can mean
+ * anything to a peer: a specific non-loopback bind advertises exactly
+ * that address; a wildcard bind advertises every external IPv4 interface
+ * (LAN and tailnet addresses).
+ *
+ * Loopback is NEVER advertised. `127.0.0.1` does not name this machine to
+ * anyone else — it names the READER's own server, which on a default port
+ * is a live T3 backend that answers happily as the wrong environment
+ * (2026-07-31 field bug: the peer's client attached to itself and showed
+ * a permanent identity-mismatch row). An empty result is the honest
+ * answer for a loopback-only server: the caller skips the reverse half
+ * rather than advertise a lie.
  */
 export const advertisedBaseUrls = (
   host: string | undefined,
@@ -93,17 +99,19 @@ export const advertisedBaseUrls = (
   interfaces: NetworkInterfacesMap = NodeOS.networkInterfaces(),
 ): ReadonlyArray<string> => {
   if (host !== undefined && host.length > 0 && !isWildcardHost(host)) {
-    return [`http://${formatHostForUrl(host)}:${port}`];
+    return isLoopbackHost(host) ? [] : [`http://${formatHostForUrl(host)}:${port}`];
   }
-  const loopbackUrl = `http://127.0.0.1:${port}`;
   if (!isWildcardHost(host)) {
-    return [loopbackUrl];
+    return [];
   }
-  const external = Object.values(interfaces)
-    .flatMap((entries) => entries ?? [])
-    .filter((entry) => !entry.internal && isIpv4Family(entry.family))
-    .map((entry) => `http://${entry.address}:${port}`);
-  return [...new Set([...external, loopbackUrl])];
+  return [
+    ...new Set(
+      Object.values(interfaces)
+        .flatMap((entries) => entries ?? [])
+        .filter((entry) => !entry.internal && isIpv4Family(entry.family))
+        .map((entry) => `http://${entry.address}:${port}`),
+    ),
+  ];
 };
 
 export const resolveListeningPort = (address: unknown, fallbackPort: number): number => {

@@ -35,8 +35,13 @@ live in `21-roaming-history.md`.
   criteria (one row per thread, greyed fallback, resume-as-draft) are
   client-side and were verified by a browser walk on the harness —
   headless caveat in Accepted risks.
-  `accept-m56.mjs` (M5.6 server-verifiable criteria: attach registration
-  exists on the callee only and 404s pre-pairing; carries the
+  `accept-m56.mjs` runs in TWO modes and both must pass: default
+  (loopback harness) asserts a loopback-only initiator registers NOTHING
+  — the 2026-07-31 field-bug regression — and
+  `T3_ROAMING_HARNESS_BIND=0.0.0.0` (harness starts AND script) asserts
+  the full registration leg. M5.6 server-verifiable criteria: attach
+  registration exists on the callee only and 404s pre-pairing; advertises
+  no loopback URL; carries the
   initiator's envId/label/URLs with `no-store`; its token reads the
   initiator's shell but not admin routes; unpair on the initiator kills
   the token, unpair on the callee drops the registration). The M5.6 row
@@ -227,10 +232,17 @@ live in `21-roaming-history.md`.
   error, or rejection revokes the just-minted session and pairing stays
   one-directional; failures log failure TAGS only (bodies carry live
   bearers). Advertised URLs come from `advertisedBaseUrls` in
-  `startupAccess.ts` — only URLs the socket listens on: specific bind →
-  that address; default bind → loopback; wildcard → external IPv4
-  interfaces then loopback; actual port from the persisted
-  server-runtime state (config fallback).
+  `startupAccess.ts` — only URLs the socket listens on AND that mean
+  something to a PEER: routable specific bind → that address; wildcard →
+  external IPv4 interfaces; actual port from the persisted server-runtime
+  state (config fallback). **Loopback is never advertised** (2026-07-31
+  field bug): `127.0.0.1` names the READER's machine, whose own backend
+  answers as the wrong environment and pins the row on "connected
+  environment X does not match Y". A loopback-only server (desktop
+  Network access off → `--host 127.0.0.1`) therefore advertises NOTHING,
+  and the reverse half is skipped before minting — pairing degrades to
+  one-directional with a warning naming the fix (enable network access,
+  re-pair).
 - Callee storage: `roaming_attach_registrations` (migration 042 —
   environment_id PK, label, base_urls JSON, expires_at, registered_at);
   token in ServerSecretStore `roaming-attach-<envId>` (written BEFORE
@@ -251,10 +263,13 @@ live in `21-roaming-history.md`.
   platform entries — add/refresh/remove, never written to the browser
   catalog; primary/desktop-local claims win on envId collision. Candidate
   URLs are identity-probed in order (2s cap each; first descriptor
-  answering as the registered environment wins; a wrong-machine answer
-  is skipped); nothing answering installs UNVERIFIED on the first
-  candidate (supervisor retry = the offline presentation) and re-probes
-  each refresh. Failed list fetch keeps the previous cache; empty/404
+  answering as the registered environment wins). A wrong-machine answer
+  is POISON, never a fallback — only a SILENT candidate may be installed
+  unverified (silence is what an offline peer looks like; supervisor
+  retry = the offline presentation), and it re-probes each refresh. When
+  every candidate answers as another environment the registration is
+  SKIPPED entirely (2026-07-31 field bug: installing it rendered a
+  permanently failing row and pointed the client at its own backend). Failed list fetch keeps the previous cache; empty/404
   clears it (gate-off masking). Hosted static apps have no platform
   source → no server-provided registrations.
 - `enrollProject` losing the decider race to a concurrent enrollment

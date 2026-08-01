@@ -430,22 +430,41 @@ export const buildRoamingRegistration = Effect.fn(
   "web.connectionPlatform.buildRoamingRegistration",
 )(function* (registration: RoamingAttachRegistration) {
   let chosenBaseUrl: string | undefined;
+  // A candidate that answers as a DIFFERENT environment is poison, never a
+  // fallback: a loopback candidate reaches THIS reader's own backend, which
+  // answers as itself forever (2026-07-31 field bug — the row sat red on
+  // "connected environment X does not match Y"). Only a candidate that
+  // stayed SILENT may be installed unverified, because not answering is
+  // exactly what an offline peer looks like.
+  let silentBaseUrl: string | undefined;
   for (const candidate of registration.baseUrls) {
     const httpBaseUrl = normalizeHttpBaseUrl(candidate);
     const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
       Effect.timeout(ROAMING_PROBE_TIMEOUT),
       Effect.option,
     );
-    if (
-      Option.isSome(descriptor) &&
-      descriptor.value.environmentId === registration.environmentId
-    ) {
+    if (Option.isNone(descriptor)) {
+      silentBaseUrl ??= candidate;
+      continue;
+    }
+    if (descriptor.value.environmentId === registration.environmentId) {
       chosenBaseUrl = candidate;
       break;
     }
   }
   const verified = chosenBaseUrl !== undefined;
-  const httpBaseUrl = normalizeHttpBaseUrl(chosenBaseUrl ?? registration.baseUrls[0]!);
+  const usableBaseUrl = chosenBaseUrl ?? silentBaseUrl;
+  if (usableBaseUrl === undefined) {
+    // Every advertised address belongs to someone else — installing one
+    // would attach this client to the wrong machine and render a
+    // permanently failing row. Skip until the peer re-advertises.
+    yield* Effect.logWarning(
+      "Skipping a roaming registration whose addresses all answer as a different environment.",
+      { environmentId: registration.environmentId },
+    );
+    return null;
+  }
+  const httpBaseUrl = normalizeHttpBaseUrl(usableBaseUrl);
   const connectionId = `bearer:${registration.environmentId}`;
   return {
     signature: roamingRegistrationSignature(registration),
@@ -579,7 +598,10 @@ const platformConnectionSourceLayer = Layer.effect(
           next.set(registration.environmentId, cached);
           continue;
         }
-        next.set(registration.environmentId, yield* buildRoamingRegistration(registration));
+        const built = yield* buildRoamingRegistration(registration);
+        if (built !== null) {
+          next.set(registration.environmentId, built);
+        }
       }
       yield* Ref.set(roamingCacheRef, next);
     });
