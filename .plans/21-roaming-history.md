@@ -2351,3 +2351,40 @@ fallback plus the pre-existing "Failed to connect. Reconnecting…"
 saved-remote banner; with B restarted, live again. Mid-session
 convergence (row flipping without a reload) remains unmeasurable in the
 hidden tab — same visible-window field check as M5.5 still pending.
+
+## 2026-07-31 — M5.6 field round: loopback self-attach (P1, fixed)
+
+First real-machine test of M5.6 failed hard: the desktop's Remote
+environments row for the laptop sat red on "Connection failed. Reason:
+Connected environment <desktop id> does not match <laptop id>". Two of my
+bugs compounded:
+
+1. `advertisedBaseUrls` advertised loopback when the initiator's server
+   was bound loopback-only (desktop Network access OFF → `--host
+   127.0.0.1`). `127.0.0.1` does not name the advertiser to anyone else —
+   it names the READER's own machine, which on a default port runs a live
+   T3 backend that answers as the wrong environment forever.
+2. The client's identity probe correctly REJECTED the mismatching
+   candidate for selection, then installed it anyway as the "unverified"
+   fallback — so a URL already proven to be the wrong machine became the
+   connection profile, and the client dialed itself with the peer's
+   bearer.
+
+Fixes: loopback is never advertised (an unroutable server advertises
+nothing and the reverse half is skipped BEFORE minting, with a warning
+naming the remedy); a wrong-machine answer is poison, never a fallback —
+only a SILENT candidate may be installed unverified, and when every
+candidate answers as another environment the registration is skipped
+entirely.
+
+Process lesson (the real miss): the original unit tests ENCODED the bug —
+`advertisedBaseUrls(undefined, port)` was asserted to return
+`["http://127.0.0.1:port"]`, and the harness binds loopback, so every
+green acceptance run was exercising the broken configuration and calling
+it correct. A same-box two-instance harness cannot tell "reachable" from
+"reachable only because it's the same box". The harness now takes
+`T3_ROAMING_HARNESS_BIND` and accept-m56 runs in two modes: loopback
+(asserts nothing is registered — the regression test) and 0.0.0.0
+(asserts the full registration leg). Both pass, plus canonical
+accept-m2.5, plus a browser walk on the routable harness confirming the
+callee renders ONE live ungreyed row with no mismatch error.

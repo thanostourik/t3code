@@ -36,6 +36,11 @@ const { randomUUID } = NodeCrypto;
 const { rmSync, writeFileSync } = NodeFS;
 const { join } = NodePath;
 
+// Must match how the harness was started: a loopback-only server
+// deliberately advertises nothing, so the two modes assert opposite
+// outcomes. Run BOTH.
+const BIND_HOST = process.env.T3_ROAMING_HARNESS_BIND ?? "127.0.0.1";
+
 const ADMIN_SCOPES = [
   "orchestration:read",
   "orchestration:operate",
@@ -136,6 +141,31 @@ const paired = await api(B.url, "/api/roaming/peers", {
 if (!paired.ok || (await paired.json()).peer === null) fail("pairing", `${paired.status}`);
 pass("paired once (B initiated into A)");
 
+// ── Loopback-only mode: nothing is advertised, nothing is registered ─────
+// The 2026-07-31 field bug: a loopback-only server advertised 127.0.0.1,
+// so the callee's client attached to its OWN backend and sat forever on
+// "connected environment X does not match Y". Advertising nothing is the
+// honest answer; pairing degrades to one-directional.
+if (BIND_HOST === "127.0.0.1") {
+  const loopbackListed = await listRegistrations(A, adminA);
+  if (!loopbackListed.ok) fail("loopback registration list", `${loopbackListed.status}`);
+  const loopbackRegistrations = (await loopbackListed.json()).registrations;
+  if (loopbackRegistrations.length !== 0) {
+    fail(
+      "loopback-only advertisement",
+      `a loopback-only initiator registered ${JSON.stringify(
+        loopbackRegistrations.map((entry) => entry.baseUrls),
+      )} — the callee would attach to itself`,
+    );
+  }
+  pass("loopback-only initiator registers nothing (field-bug regression)");
+  console.log(
+    "\nM5.6 loopback leg: PASS. Re-run with T3_ROAMING_HARNESS_BIND=0.0.0.0" +
+      " for the registration leg.",
+  );
+  process.exit(0);
+}
+
 // ── The callee holds the reverse registration; the initiator holds none ──
 const listedA = await listRegistrations(A, adminA);
 if (!listedA.ok) fail("callee registration list", `${listedA.status}`);
@@ -149,8 +179,11 @@ const registration = registrations[0];
 if (registration.environmentId !== envB) {
   fail("callee registration", `names ${registration.environmentId}, expected B (${envB})`);
 }
-if (!registration.baseUrls.includes(B.url)) {
-  fail("callee registration", `advertised URLs ${registration.baseUrls} lack ${B.url}`);
+if (registration.baseUrls.some((url) => /\/\/(127\.|localhost|\[::1\])/.test(url))) {
+  fail(
+    "callee registration",
+    `advertised a loopback URL (${registration.baseUrls.join(", ")}) — it names the READER's machine`,
+  );
 }
 if (!registration.label) fail("callee registration", "registration has no label");
 pass(`callee registration names B at ${registration.baseUrls.join(", ")}`);

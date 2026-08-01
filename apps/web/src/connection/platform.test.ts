@@ -269,10 +269,10 @@ describe("buildRoamingRegistration (M5.6)", () => {
   it.effect("picks the first candidate whose descriptor matches the registered environment", () =>
     Effect.gen(function* () {
       const built = yield* buildRoamingRegistration(registration);
-      expect(built.verified).toBe(true);
-      expect(built.registration.profile.httpBaseUrl).toBe("http://127.0.0.1:14801/");
-      expect(built.registration.target.connectionId).toBe(`bearer:${INITIATOR_ID}`);
-      expect(built.registration.credential.token).toBe("attach-token");
+      expect(built?.verified).toBe(true);
+      expect(built?.registration.profile.httpBaseUrl).toBe("http://127.0.0.1:14801/");
+      expect(built?.registration.target.connectionId).toBe(`bearer:${INITIATOR_ID}`);
+      expect(built?.registration.credential.token).toBe("attach-token");
     }).pipe(
       // First candidate answers as the WRONG environment (loopback echo of
       // another machine) — it must be skipped, not trusted.
@@ -285,12 +285,41 @@ describe("buildRoamingRegistration (M5.6)", () => {
     ),
   );
 
-  it.effect("installs unverified on the first candidate when nothing answers", () =>
+  it.effect("installs unverified on the first SILENT candidate when nothing answers", () =>
     Effect.gen(function* () {
       const built = yield* buildRoamingRegistration(registration);
-      expect(built.verified).toBe(false);
-      expect(built.registration.profile.httpBaseUrl).toBe("http://10.0.0.5:14801/");
+      expect(built?.verified).toBe(false);
+      expect(built?.registration.profile.httpBaseUrl).toBe("http://10.0.0.5:14801/");
     }).pipe(Effect.provide(descriptorHttpLayer({}))),
+  );
+
+  // The 2026-07-31 field bug: a loopback-only advertisement made the reader
+  // probe its OWN backend, which answers as itself forever. Installing it
+  // produced a permanently red "does not match" row.
+  it.effect("skips the registration when every address answers as another environment", () =>
+    Effect.gen(function* () {
+      const built = yield* buildRoamingRegistration(registration);
+      expect(built).toBeNull();
+    }).pipe(
+      Effect.provide(
+        descriptorHttpLayer({
+          "http://10.0.0.5:14801": "env-someone-else",
+          "http://127.0.0.1:14801": "env-this-very-reader",
+        }),
+      ),
+    ),
+  );
+
+  // A wrong-machine answer must not shadow a silent candidate that could
+  // still be the peer coming back online.
+  it.effect("prefers a silent candidate over one that answered as another environment", () =>
+    Effect.gen(function* () {
+      const built = yield* buildRoamingRegistration(registration);
+      expect(built?.verified).toBe(false);
+      expect(built?.registration.profile.httpBaseUrl).toBe("http://10.0.0.5:14801/");
+    }).pipe(
+      Effect.provide(descriptorHttpLayer({ "http://127.0.0.1:14801": "env-this-very-reader" })),
+    ),
   );
 
   it("signature covers identity, label, urls, and token", () => {
