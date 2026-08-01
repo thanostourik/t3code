@@ -17,10 +17,8 @@ import {
   CommandId,
   EnvironmentId,
   ProjectId,
-  ROAMING_ATTACH_REGISTRATION_PATH,
   ROAMING_HANDSHAKE_COMPLETE_PATH,
   ROAMING_MACHINE_CREDENTIAL_PATH,
-  RoamingAttachRegistration,
   RoamingMachineCredentialRequest,
   RoamingMachineCredentialResponse,
   type RoamingAttachGrant,
@@ -36,7 +34,6 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -47,10 +44,7 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { EnvironmentAuth } from "../auth/EnvironmentAuth.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
-import { ServerConfig } from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
-import { advertisedBaseUrls } from "../startupAccess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../persistence/Services/ProjectionProjects.ts";
@@ -125,7 +119,6 @@ const decodeMachineCredentialResponse = Schema.decodeUnknownEffect(
   RoamingMachineCredentialResponse,
 );
 const encodeMachineCredentialRequest = Schema.encodeUnknownEffect(RoamingMachineCredentialRequest);
-const encodeAttachRegistration = Schema.encodeUnknownEffect(RoamingAttachRegistration);
 // Only the credential is needed; the full AuthPairingCredentialResult
 // carries DateTime fields whose wire codec belongs to the HttpApi client.
 const decodePairingCredentialResult = Schema.decodeUnknownEffect(
@@ -163,8 +156,6 @@ const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
-  const config = yield* ServerConfig;
-  const fileSystem = yield* FileSystem.FileSystem;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -562,95 +553,11 @@ const make = Effect.gen(function* () {
         attachLabel: credential?.label ?? ownLabel,
       });
 
-      // Reverse half (M5.6): make the CALLEE's clients full citizens too.
-      // Mint a standard-scoped attach bearer for them (subject
-      // `roaming-peer:<callee>` so the one-device grouping and the unpair
-      // revocation sweep cover it) and register it on the callee together
-      // with our best-effort self-advertised URLs. Best-effort end to end:
-      // a pre-M5.6 callee answers 404 and pairing stays one-directional.
-      // Runs while the handshake bearer is still valid.
-      if (credential !== null) {
-        yield* Effect.gen(function* () {
-          const runtimeState = yield* readPersistedServerRuntimeState(
-            config.serverRuntimeStatePath,
-          ).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
-          const port = Option.isSome(runtimeState) ? runtimeState.value.port : config.port;
-          // Nothing routable to advertise (loopback-only server — network
-          // access is off): skip the reverse half rather than register a
-          // URL that names the READER's own machine. Pairing succeeds
-          // one-directionally, exactly as against a pre-M5.6 peer.
-          const baseUrls = advertisedBaseUrls(config.host, port);
-          if (baseUrls.length === 0) {
-            yield* Effect.logWarning(
-              "roaming: this machine is not reachable over the network, so the peer's" +
-                " clients cannot attach back to it; enable network access and re-pair" +
-                " to make its threads live on the other machine",
-            );
-            return;
-          }
-          // The session represents the CALLEE on this machine's authorized
-          // clients — name it after the callee, not the pairing link (which
-          // names US).
-          const peerLabel = yield* fetchPeerDescriptor(reachableBaseUrl).pipe(
-            Effect.map((descriptor) => descriptor.label),
-            Effect.orElseSucceed(() => undefined),
-          );
-          const reverseSession = yield* auth.issueSession({
-            ttl: MACHINE_CREDENTIAL_TTL,
-            scopes: [...AuthStandardClientScopes],
-            subject: `roaming-peer:${credential.environmentId}`,
-            label: `${peerLabel ?? credential.environmentId} — attach`,
-          });
-          const registered = yield* Effect.gen(function* () {
-            const registrationBody = yield* encodeAttachRegistration({
-              environmentId,
-              label: ownLabel,
-              baseUrls,
-              token: reverseSession.token,
-              expiresAt: DateTime.formatIso(reverseSession.expiresAt),
-            });
-            const response = yield* httpClient
-              .pipe(
-                HttpClient.mapRequest(
-                  HttpClientRequest.setHeader("authorization", `Bearer ${exchange.token}`),
-                ),
-              )
-              .post(`${reachableBaseUrl.replace(/\/$/, "")}${ROAMING_ATTACH_REGISTRATION_PATH}`, {
-                body: HttpBody.jsonUnsafe(registrationBody),
-              });
-            if (response.status === 404) {
-              yield* Effect.logInfo(
-                "roaming: peer does not support bidirectional pairing; reverse attach skipped",
-              );
-              return false;
-            }
-            yield* HttpClientResponse.filterStatusOk(response);
-            return true;
-          }).pipe(
-            Effect.catch((cause) =>
-              // Never the raw cause: the request bodies above carry live
-              // bearer tokens a structured logger would emit.
-              Effect.logWarning("roaming: reverse attach registration failed", {
-                failureTag: (cause as { readonly _tag?: string })._tag ?? "unknown-failure",
-              }).pipe(Effect.as(false)),
-            ),
-          );
-          // The callee never received the token (404, network error, or a
-          // rejected registration): revoke the unused session instead of
-          // leaving a 365-day orphan in Authorized clients.
-          if (!registered) {
-            yield* auth.revokeSession(reverseSession.sessionId).pipe(Effect.ignore);
-          }
-        }).pipe(
-          // Minting is the only failure left out here; pairing stays
-          // best-effort one-directional if it breaks.
-          Effect.catch((cause) =>
-            Effect.logWarning("roaming: reverse attach session mint failed", {
-              failureTag: (cause as { readonly _tag?: string })._tag ?? "unknown-failure",
-            }),
-          ),
-        );
-      }
+      // The reverse half (callee's clients attaching back here) is NOT a
+      // handshake product (2026-08-01 decision): ReverseAttach maintains
+      // the registration continuously over the mirror credential — the
+      // syncNow below delivers it seconds after pairing when this machine
+      // is reachable, and the network-access toggle drives it thereafter.
 
       // Retire the handshake session: the generic revoke endpoint forbids
       // self-revocation, so the roaming handshake-complete route exists for

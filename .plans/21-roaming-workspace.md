@@ -54,8 +54,12 @@ the corrections are binding decisions below and landed as **M5.5** on
 remains open from M5.5 acceptance: a visible-window kill-the-desktop walk
 (the harness browser is headless — see history). **M5.6** (bidirectional pairing, the 2026-07-31 binding decision) done
 2026-07-31 (PRs #100–#105; results in the history file) — the same
-visible-window caveat applies to its row-flip convergence. Queue: M6
-bootstrap recipes, M7 cloud store. No milestone is active.
+visible-window caveat applies to its row-flip convergence. The
+2026-07-31/08-01 field rounds produced the loopback P1 fix (#107) and the
+**2026-08-01 standing-channel corrective** (binding decision; landed —
+one pairing ever, the network-access toggle drives reverse visibility,
+pre-M5.6 pairings self-heal). Queue: M6 bootstrap recipes, M7 cloud
+store. No milestone is active.
 
 ## Thesis
 
@@ -157,6 +161,18 @@ history file.
   its own analysis pass (mint attach both ways in the one handshake; the
   callee's server must hand the registration to its own clients; honest
   offline behavior when the reverse direction is unreachable).
+- **2026-08-01 — reverse reachability is a standing property, not a
+  handshake product (field):** supersedes M5.6's handshake-time reverse
+  mint. The reverse direction becomes RELEVANT only after pairing — the
+  paired-into machine has nothing of its own until the user materializes
+  and works there — so freezing the permission at handshake time was
+  wrong, period: it forced re-pairing when network access was off at
+  pairing time (the first field run) or enabled later. The registration
+  rides the STANDING mirror channel instead: whenever its advertised
+  addresses change, a machine pushes (or withdraws) its attach
+  registration over the mirror credential it already holds. One pairing,
+  ever; the network-access toggle is the whole story; pre-M5.6 pairings
+  self-heal with no new handshake.
 
 ## Architecture
 
@@ -211,34 +227,41 @@ making it a CRDT. Mirror connectivity stays one-directional (the initiator
 holds the only mirror credential) even after M5.6 — bidirectional attach
 does not move mirror traffic.
 
-### Bidirectional pairing (M5.6)
+### Bidirectional pairing (M5.6, standing-channel model 2026-08-01)
 
-One handshake, two full citizens. The initiator-orchestrated handshake
-gains a best-effort reverse half: after minting the mirror credential,
-the initiator mints an attach bearer for the callee (standard client
-scopes, machine-credential TTL, subject `roaming-peer:<envId>` — the
-existing one-device Authorized-clients grouping and unpair revocation
-sweep cover it for free) and posts it, together with its own label and
-best-effort candidate base URLs (bound port × network interfaces,
-loopback last), to a new callee route inside the same handshake. The
-callee stores the registration (metadata in SQLite, token in the secret
-store) and hands it to its own clients: a server-provided connection
-source — the third registration producer beside the browser catalog and
-the desktop platform source — reconciles the records into the client's
-environment registry as ordinary bearer connections, never persisted
-into the browser catalog. Everything downstream is existing machinery:
-connection supervisors, shell cache, the merged one project list, and
-the M5.5 one-row thread rules make the initiator's projects and threads
-live on the callee exactly while it is reachable.
+One pairing, two full citizens — with the reverse direction maintained
+continuously, not minted at handshake time. The machine that holds the
+mirror credential (the pairing initiator) keeps its attach registration
+current on its peer over that standing credential: on every mirror pass
+it computes its advertised addresses (only URLs the socket listens on
+AND that mean something to a peer — never loopback) and, when they
+changed, mints a standard-scoped attach bearer (subject
+`roaming-peer:<peer envId>` — the one-device Authorized-clients grouping
+and the unpair revocation sweep cover it for free) and pushes
+{label, addresses, token} to the peer; when the addresses become empty
+(network access off), it withdraws the registration and revokes the
+session. The peer stores the registration (metadata in SQLite, token in
+the secret store) and hands it to its own clients: a server-provided
+connection source — the third registration producer beside the browser
+catalog and the desktop platform source — reconciles the records into
+the client's environment registry as ordinary bearer connections, never
+persisted into the browser catalog. Everything downstream is existing
+machinery: connection supervisors, shell cache, the merged one project
+list, and the M5.5 one-row thread rules make the machine's projects and
+threads live on its peer exactly while it is reachable.
 
-Honesty rules: the reverse half is optional and best-effort — an old or
-non-answering callee route degrades to today's behavior (mirrored greyed
-rows, logged, pairing still succeeds); an unreachable, revoked, or
-expired initiator leaves the environment offline, which renders as the
-existing offline model (greyed rows + Materialize), never a dead row.
-Client-attach URL advertisement does not weaken mirror
-tamper-resistance: the callee still never dials caller-supplied URLs for
-mirror traffic.
+Consequences of the standing model: the network-access toggle is the
+whole user story (on → live on the other machine within ~a minute;
+off → back to greyed offline copies); pairing order and pairing-time
+reachability don't matter; pre-M5.6 pairings self-heal on upgrade with
+no new handshake. Honesty rules: an old peer without the route degrades
+to mirrored greyed rows (logged, sync unaffected); an unreachable,
+revoked, or withdrawn machine renders as the existing offline model
+(greyed rows + Materialize), never a dead row. The push is
+tamper-narrow — a mirror credential may only write/withdraw the
+registration of the machine it names — and client-attach URL
+advertisement does not weaken mirror tamper-resistance: a machine still
+never dials peer-supplied URLs for mirror traffic.
 
 ### Vault
 

@@ -35,11 +35,13 @@ live in `21-roaming-history.md`.
   criteria (one row per thread, greyed fallback, resume-as-draft) are
   client-side and were verified by a browser walk on the harness —
   headless caveat in Accepted risks.
-  `accept-m56.mjs` runs in TWO modes and both must pass: default
-  (loopback harness) asserts a loopback-only initiator registers NOTHING
-  — the 2026-07-31 field-bug regression — and
-  `T3_ROAMING_HARNESS_BIND=0.0.0.0` (harness starts AND script) asserts
-  the full registration leg. M5.6 server-verifiable criteria: attach
+  `accept-m56.mjs` walks the whole toggle story in ONE run (harness
+  starts loopback; the script restarts instance B per leg via
+  `T3_ROAMING_HARNESS_BIND`): pair while loopback-only → nothing
+  registered (2026-07-31 field-bug regression); restart routable, NO
+  re-pair → registration arrives over the standing channel; restart
+  loopback → withdrawn + session revoked; restart routable → returns;
+  then teardown both directions. M5.6 server-verifiable criteria: attach
   registration exists on the callee only and 404s pre-pairing; advertises
   no loopback URL; carries the
   initiator's envId/label/URLs with `no-store`; its token reads the
@@ -219,19 +221,32 @@ live in `21-roaming-history.md`.
   merged list and their mirrored offline+Materialize rows surface.
 - Credential hygiene: bearer responses `cache-control: no-store`; tokens
   never logged; all network steps complete before anything persists.
-- Attach registrations (M5.6 — the reverse half of the one handshake):
-  after the mirror credential is minted, the initiator mints a
-  standard-scoped 365-day session (subject `roaming-peer:<callee envId>`
-  so the one-device grouping and the removal sweep cover it; label
-  `<callee label> — attach`; TTL = MACHINE_CREDENTIAL_TTL) and POSTs
-  `RoamingAttachRegistration { environmentId, label, baseUrls, token,
-  expiresAt }` to the callee's `POST /api/roaming/attach-registration`
-  (handshake bearer; un-gated pairing-route family but only accepted for
-  an environment that already exists as a peer; self-registration
-  rejected). Best-effort end to end: 404 (pre-M5.6 callee), network
-  error, or rejection revokes the just-minted session and pairing stays
-  one-directional; failures log failure TAGS only (bodies carry live
-  bearers). Advertised URLs come from `advertisedBaseUrls` in
+- Attach registrations (M5.6, standing-channel model 2026-08-01 — NOT a
+  handshake product): `ReverseAttach.ensureForPeer` runs after every
+  successful mirror pass (PeerMirror hook, same credential + base URL the
+  pass used). It compares the current advertised addresses against the
+  last pushed signature (in-memory per boot; a restart re-pushes once —
+  idempotent upsert): changed + non-empty → sweep old sessions with
+  subject `roaming-peer:<peer>` on THIS machine (all such local sessions
+  are reverse-attach ones), mint a standard-scoped 365-day session
+  (label `<own label> — attach`), POST `RoamingAttachRegistration
+  { environmentId, label, baseUrls, token, expiresAt }` to the peer's
+  `POST /api/roaming/attach-registration`; empty (loopback-only bind,
+  network access off) → `POST .../attach-registration/withdraw` + sweep,
+  so the peer's clients fall back to honest offline. Register accepts the
+  MIRROR credential with a tamper-narrow subject check (a session may
+  only write the registration of the machine its subject names) or
+  access:write; withdraw is mirror-credential-only (subject names whose
+  registration goes); both deliberately NOT gated on sync pause (pause
+  stops blob sync, never attach — same as forward). Registration is only
+  accepted for an existing peer; self-registration rejected. 404
+  (pre-M5.6 peer) revokes the unused session and settles until addresses
+  change or restart; transient failures revoke and retry next pass;
+  failures log failure TAGS only (bodies carry live bearers).
+  Consequences: pairing order and pairing-time reachability don't
+  matter; the network-access toggle drives everything (on → live within
+  ~a mirror pass + client poll; off → withdrawn); pre-M5.6 pairings
+  self-heal on upgrade with no new handshake. Advertised URLs come from `advertisedBaseUrls` in
   `startupAccess.ts` — only URLs the socket listens on AND that mean
   something to a PEER: routable specific bind → that address; wildcard →
   external IPv4 interfaces; actual port from the persisted server-runtime
@@ -243,7 +258,7 @@ live in `21-roaming-history.md`.
   and the reverse half is skipped before minting — pairing degrades to
   one-directional with a warning naming the fix (enable network access,
   re-pair).
-- Callee storage: `roaming_attach_registrations` (migration 042 —
+- Peer-side storage: `roaming_attach_registrations` (migration 042 —
   environment_id PK, label, base_urls JSON, expires_at, registered_at);
   token in ServerSecretStore `roaming-attach-<envId>` (written BEFORE
   the row). `RoamingAttachRegistrations.list()` re-joins tokens and

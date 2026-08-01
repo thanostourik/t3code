@@ -961,14 +961,18 @@ export const RoamingPairMachineResponse = Schema.Struct({
 export type RoamingPairMachineResponse = typeof RoamingPairMachineResponse.Type;
 
 /**
- * The reverse half of the unified handshake (M5.6 bidirectional pairing):
- * after the mirror credential is minted, the initiator posts this to the
- * callee so the callee's OWN clients can attach back to the initiator —
- * one pairing makes both machines full citizens. Best-effort: a callee
- * without this route (pre-M5.6) answers 404 and pairing proceeds
- * one-directionally. Authenticated by the same handshake bearer
- * (access:write). Carries a bearer token — `cache-control: no-store` on
- * anything echoing it, and the token must never be logged.
+ * The reverse half of bidirectional pairing (M5.6; standing-channel model
+ * 2026-08-01): the machine holding the mirror credential keeps this
+ * registration current on its peer — pushed whenever its advertised
+ * addresses change and withdrawn when they become empty — so the peer's
+ * OWN clients can attach back to it. One pairing makes both machines full
+ * citizens, and the network-access toggle is the whole story. Best-effort:
+ * a peer without the route (pre-M5.6) answers 404 and visibility stays
+ * one-directional. Authenticated by the mirror credential (the write is
+ * tamper-narrow: a credential may only write the registration of the
+ * machine its session subject names) or an administrative bearer. Carries
+ * a bearer token — `cache-control: no-store` on anything echoing it, and
+ * the token must never be logged.
  */
 export const RoamingAttachRegistration = Schema.Struct({
   /** The environment this registration attaches to (the initiator). */
@@ -1067,6 +1071,8 @@ export const ROAMING_PEERS_REMOVE_PATH = "/api/roaming/peers/remove";
 export const ROAMING_PEERS_SYNC_PATH = "/api/roaming/peers/sync";
 export const ROAMING_HANDSHAKE_COMPLETE_PATH = "/api/roaming/handshake-complete";
 export const ROAMING_ATTACH_REGISTRATION_PATH = "/api/roaming/attach-registration";
+export const ROAMING_ATTACH_REGISTRATION_WITHDRAW_PATH =
+  "/api/roaming/attach-registration/withdraw";
 export const ROAMING_ATTACH_REGISTRATIONS_LIST_PATH = "/api/roaming/attach-registration/list";
 export const ROAMING_ENROLL_PROJECT_PATH = "/api/roaming/projects/enroll";
 export const ROAMING_MATERIALIZE_PATH = "/api/roaming/materialize";
