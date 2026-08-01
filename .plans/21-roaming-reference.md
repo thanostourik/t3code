@@ -5,6 +5,30 @@ invariants, harness facts. Updated alongside code changes (document-hygiene
 step of the plan's execution process). No narrative — results and rationale
 live in `21-roaming-history.md`.
 
+## Fork surface (upstream-file discipline)
+
+- Roaming code lives in roaming-owned files; touches to upstream files are
+  a cost to minimize (rebases are continuous). **Rule since 2026-08-02:**
+  when roaming needs more than ~20 lines inside a file upstream also
+  edits, it goes behind a seam in a roaming-owned module and the upstream
+  file keeps call sites only. Landed seams: `roaming/shellStream.ts`
+  (ws.ts shell subscription — live-source buffer, snapshot overlay,
+  warm-resume catch-up) and `components/roamingSidebar.tsx` (offline
+  project rows, materialize hook/dialog, sync indicator, M5.5 mirrored
+  rows). This cut ws.ts +317→+111 and Sidebar.tsx +847→+225.
+- Replacements of upstream BEHAVIOR (not additions) cannot be seamed away
+  and are permanent merge surface — currently `ConnectionsSettings.tsx`
+  (one-device session grouping, merged remote-environment rows, unified
+  handshake replacing `connectPairing`). Each traces to a locked product
+  decision; keep the list short.
+- Rebase reality check: the 2026-08-02 rebase (21 upstream commits,
+  including ws.ts / Sidebar.tsx / ConnectionsSettings.tsx / Migrations.ts)
+  conflicted in exactly ONE file — `serverRuntimeStartup.ts`, where each
+  milestone's reactor registration replays against upstream's
+  restructured startup. Resolution recipe: keep upstream's structure,
+  re-graft the `const x = yield* X` dep and its
+  `yield* x.start().pipe(Scope.provide(reactorScope))` line.
+
 ## Harness + acceptance
 
 - `scripts/roaming/harness.sh start|stop|status` — two `t3 serve` instances
