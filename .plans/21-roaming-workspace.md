@@ -455,6 +455,18 @@ is unchanged. M6 makes Connect a second producer of the SAME peer
 record, so syncing turns itself on with no code and no reachability
 setup, while pairing stays for LAN/offline/no-account use.
 
+**Direction control already exists — do not rebuild it.** Being logged
+into Connect does NOT make a machine reachable. Publishing is a separate
+per-environment switch upstream already owns ("T3 Connect — Make this
+environment available to your other devices", `ConnectionsSettings.tsx`),
+gated on relay-manage rights, and it only appears where there is a local
+environment to publish (a phone or browser client has none). That switch
+is the Connect-era equivalent of the network-access toggle and gives the
+asymmetry for free: publish the desktop, leave the laptop unpublished,
+and the laptop sees the desktop but not the reverse. Roaming adds no
+direction toggle of its own — that would duplicate an upstream control
+and violate the no-toggle-page prohibition.
+
 **Why a client must start it.** A server can only talk to the relay
 about itself (linking its own tunnel); it cannot enumerate the user's
 other environments — that list exists only where the account session
@@ -473,16 +485,30 @@ the hard way for pairing).
 
 **Authorization is the one thing that cannot be automated away.**
 Something must permit machine A to read machine B's secrets. The relay
-cannot grant it: an environment mints relay-brokered sessions with
-standard client scopes only, a 2-minute TTL, and a client-bound proof
-key, verified against a cloud-signed `environment:connect` scope we do
-not control. So M6 adds a **same-account elevation** path, entirely
-fork-side: B accepts a request proving it came from a session minted for
-B's OWN linked cloud account, requires an explicit confirm on B, and
-then mints the ordinary D4 mirror credential. Same trust model as
-pairing (one deliberate human authorization per machine pair), different
-proof (account ownership instead of a typed code). Everything downstream
-— mirror passes, blob reconciliation, consents — is untouched.
+cannot grant it directly: an environment mints relay-brokered sessions
+with standard client scopes only, a 2-minute TTL, and a client-bound
+proof key, verified against a cloud-signed `environment:connect` scope
+we do not control. So M6 adds a **same-account elevation** path,
+entirely fork-side: B accepts a request proving it came from a session
+minted for B's OWN linked cloud account and mints the ordinary D4
+mirror credential.
+
+**No per-pair confirmation dialog** (2026-08-02, corrected before
+coding): a relay-brokered session already carries
+`AuthStandardClientScopes`, which includes `terminal:operate` — whoever
+can trigger the elevation can already run shell commands on that machine
+and read every secret the vault would sync. A confirm would add friction
+without adding security, and would reintroduce exactly the per-device
+ritual Connect exists to remove. The user's authorization is linking the
+machine to Connect in the first place (see below).
+
+**What replaces it is lifecycle binding, which is the real risk.** The
+mirror credential is long-lived, so it must not outlive the link that
+justified it: unlinking a machine from T3 Connect, or removing it from
+the account, revokes its mirror credentials and drops the peer rows on
+both sides. Connect-introduced peers are therefore derived state, not
+durable grants — the opposite of pairing, where the credential IS the
+standing decision.
 
 **Consents move to Connection settings** (2026-08-02 decision): Secret
 files / Work in progress / Conversations become ordinary settings rows,
