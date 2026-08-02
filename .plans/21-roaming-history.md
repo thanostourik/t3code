@@ -9,14 +9,18 @@ without digging through git. Append-only; never loaded by kickoff prompts.
 **Numbering eras (records below keep the numbering of their date — never
 rewritten):**
 
-| Era | M3 | M4 | M5 | M6 |
-|---|---|---|---|---|
-| ≤ 2026-07-06 | Bootstrap recipes | WIP snapshots | Takeover + divergence | Briefs + transcripts |
-| 2026-07-06 → 2026-07-17 | WIP snapshots | Bootstrap recipes | Takeover + divergence | Briefs + transcripts |
-| ≥ 2026-07-17 | WIP snapshots | Takeover + divergence | Briefs + transcripts | Bootstrap recipes |
+| Era | M3 | M4 | M5 | M6 | M7 | M8 |
+|---|---|---|---|---|---|---|
+| ≤ 2026-07-06 | Bootstrap recipes | WIP snapshots | Takeover + divergence | Briefs + transcripts | Cloud store | — |
+| 2026-07-06 → 2026-07-17 | WIP snapshots | Bootstrap recipes | Takeover + divergence | Briefs + transcripts | Cloud store | — |
+| 2026-07-17 → 2026-08-02 | WIP snapshots | Takeover + divergence | Briefs + transcripts | Bootstrap recipes | Cloud store | — |
+| ≥ 2026-08-02 | WIP snapshots | Takeover + divergence | Briefs + transcripts | **Connect-introduced peers** | Bootstrap recipes | Cloud store |
 
-M0–M2.5, the M3.x sub-milestones, and M7 (cloud store) mean the same thing
-in every era.
+M0–M2.5 and the M3.x sub-milestones mean the same thing in every era.
+The 2026-08-02 renumber inserted M6 (Connect-introduced peers) when T3
+Connect became usable, pushing recipes and the cloud store down one —
+so **M7 means "cloud store" in every record written before 2026-08-02**
+and "bootstrap recipes" after it.
 
 ## Decisions log (full, as recorded through M2.5 — 2026-07-05)
 

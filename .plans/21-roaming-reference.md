@@ -216,6 +216,42 @@ live in `21-roaming-history.md`.
 - `workspaceProjectId` is persisted in the SQL projection path and carried
   by shell projections (sync pill depends on it).
 
+## T3 Connect introduction (M6 — planned, not yet built)
+
+- Facts established by the 2026-08-02 analysis pass (options and rejected
+  alternatives in `.plans/scratch/t3-connect-roaming-analysis.md`):
+  - Discovery is CLIENT-ONLY. A server's relay surface is limited to
+    linking/unlinking its OWN tunnel (`/v1/client/environment-links` in
+    `cloud/http.ts`); it cannot enumerate the user's environments, so a
+    client must always perform the introduction.
+  - A linked environment publishes a public `RelayManagedEndpoint
+    { httpBaseUrl, wsBaseUrl }` via plain `cloudflared tunnel run`
+    (`ManagedEndpointRuntime.ts`). The tunnel is a dumb reverse proxy to
+    `localHttpHost:localHttpPort` — requests hit the server's own HTTP
+    stack and its own auth, with no relay policy in the data path. A
+    credential minted WITHOUT a proof thumbprint is therefore usable as
+    an ordinary bearer over the public URL (no DPoP dependency for
+    server-to-server mirror traffic).
+  - The relay is an introducer, never an authority: `connectEnvironment`
+    signs a short-lived mint proof that the ENVIRONMENT verifies
+    (`cloudMintCredentialHandler`) against its own linked cloud user.
+  - **Relay-brokered sessions cannot carry mirror authority**: that
+    handler issues `AuthStandardClientScopes`, `ttl: 2 minutes`, bound to
+    the client's proof key, gated on a cloud-signed `environment:connect`
+    scope checked with `hasExactScope`. Widening it needs either T3's
+    cloud (not ours) or a downgrade of our own verification (rejected).
+- Design consequence: M6 keeps `roaming_peers` as internal state (derived
+  gate + pause + credential key) with Connect as a second producer behind
+  the `PeerIntroduction` seam; Connect-introduced rows store no base URLs
+  (the relay endpoint is authoritative, client-refreshed). Authorization
+  comes from a fork-side same-account elevation route: proof that the
+  request rides a session minted for THIS environment's own linked cloud
+  user (`readInstalledCloudUserId`) + an explicit confirm on the target,
+  then the ordinary D4 mirror credential is minted.
+- Not changed by Connect: the blob store, reconciliation, vault/WIP/
+  transcript mechanics, materialize, and the cloud-store milestone (M8) —
+  Connect supplies discovery and transport, never a store.
+
 ## Pairing + peers
 
 - ONE handshake, orchestrated by the initiator's server
@@ -709,7 +745,7 @@ live in `21-roaming-history.md`.
   (2026-07-22, O4/D2 — the persisted step machine and
   `roaming_materializations` table are gone, migration 039): resolve-path
   → clone → restore-wip → apply-vault → register-project → bootstrap
-  (M6). Records live in memory for the boot (progress streams unchanged
+  (M7 recipes). Records live in memory for the boot (progress streams unchanged
   over the shell — live overlay at the ws/HTTP entry points; the
   projection query returns []); a failed run continues in-boot; across
   restarts a fresh run is idempotent (clone-if-missing, recording vault
