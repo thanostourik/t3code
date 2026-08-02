@@ -503,12 +503,13 @@ ritual Connect exists to remove. The user's authorization is linking the
 machine to Connect in the first place (see below).
 
 **What replaces it is lifecycle binding, which is the real risk.** The
-mirror credential is long-lived, so it must not outlive the link that
-justified it: unlinking a machine from T3 Connect, or removing it from
-the account, revokes its mirror credentials and drops the peer rows on
-both sides. Connect-introduced peers are therefore derived state, not
-durable grants — the opposite of pairing, where the credential IS the
-standing decision.
+mirror credential is long-lived, so it must not outlive the *deliberate
+decision* that justified it. **2026-08-02 decision — unlink kills sync,
+logout does not:** an explicit unlink (or removing the machine from the
+account) revokes its mirror credentials and drops the peer rows on both
+sides; merely signing out must NOT, because a user closing a session is
+not withdrawing consent to sync their own machines. Connect-introduced
+peers are derived from the LINK, not from the session.
 
 **Consents move to Connection settings** (2026-08-02 decision): Secret
 files / Work in progress / Conversations become ordinary settings rows,
