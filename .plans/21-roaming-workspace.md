@@ -19,10 +19,13 @@ any other sentence in this document conflicts with it, this section wins and
 the document must be corrected before coding.
 
 1. **Open T3 Code on the laptop.** You see your local projects. Nothing else.
-2. **Pair the desktop — once.** This is the *existing* pairing/thin-client
-   flow (one code, one dialog), which gains a JetBrains-style **what to
-   sync** step: Projects (always on), Secret files (pre-checked, default
-   patterns), Work in progress (M3), Conversations (M5).
+2. **Introduce the desktop — once.** Either the *existing* pairing/thin-
+   client flow (one code, one dialog) or, since M6, simply both machines
+   being on T3 Connect (no code, no dialog). Both produce the same peer
+   record and the same **what to sync** decision: Projects (always on),
+   Secret files (pre-checked, default patterns), Work in progress (M3),
+   Conversations (M5) — carried by the pairing dialog, and by ordinary
+   Connection-settings rows for the Connect path (2026-08-02).
 3. **Remote conversations work immediately.** The desktop's projects appear
    live in the ONE project list; opening one runs on the desktop (thin
    client). If pairing succeeded but a remote conversation doesn't work,
@@ -38,7 +41,8 @@ Permanent prohibitions: no user-visible "roaming", "machine sync", or
 project list; sync options appear only inside the one pairing flow (plus
 ordinary settings rows for changing your mind later); pairing must never
 leave the user in a state where the other machine's projects are visible but
-dead.
+dead. "Introduction" may be pairing or T3 Connect; it is never a
+roaming-specific flow of our own.
 
 ## Status
 
@@ -58,8 +62,8 @@ visible-window caveat applies to its row-flip convergence. The
 2026-07-31/08-01 field rounds produced the loopback P1 fix (#107) and the
 **2026-08-01 standing-channel corrective** (binding decision; landed —
 one pairing ever, the network-access toggle drives reverse visibility,
-pre-M5.6 pairings self-heal). Queue: M6 bootstrap recipes, M7 cloud
-store. No milestone is active.
+pre-M5.6 pairings self-heal). Queue: M6 Connect-introduced
+peers, M7 bootstrap recipes, M8 cloud store. No milestone is active.
 
 ## Thesis
 
@@ -76,7 +80,7 @@ user's own machines.
 **Deployment reality:** this repo is a fork of upstream T3 Code. Upstream's
 cloud service (T3 Connect) is invite-gated and unusable here — nothing in v1
 depends on it; all storage goes through `RoamingBlobStore` so a cloud backend
-can arrive in M7 without touching callers. Upstream flows into `main`
+can arrive in M8 without touching callers. Upstream flows into `main`
 continuously, so roaming stays additive (new directories, new contract
 files, minimal touches to existing files) on the long-lived `feature/roaming`
 branch — see Execution process.
@@ -85,7 +89,7 @@ branch — see Execution process.
 both machines were online together; uncommitted code doesn't depend on the
 mirror at all (origin hidden refs). The one real failure case — project
 never opened on the laptop, desktop unreachable, secrets needed now — is
-what M7 removes.
+what M8 removes.
 
 ## Binding decisions
 
@@ -93,7 +97,7 @@ Dated user decisions still in force; full text and superseded entries in the
 history file.
 
 - **2026-07-04 — transport:** v1 small-state transport = machine-to-machine
-  mirror; cloud store deferred to gated M7 behind the same `RoamingBlobStore`
+  mirror; cloud store deferred to gated M8 behind the same `RoamingBlobStore`
   interface.
 - **2026-07-05 — product model locked:** one project list; no user-visible
   roaming concept; "pairing" means the EXISTING pairing/thin-client flow,
@@ -115,10 +119,12 @@ history file.
   nothing; auto-switch on an untouched checkout is accepted (parking makes
   it lossless). Now fully expressed by the WIP sync design section below.
 - **2026-07-17 — milestone numbers always match execution order:** current
-  order M4 takeover + divergence, M5 briefs + transcripts, M6 bootstrap
-  recipes, M7 cloud store — the first two finish the core sync story;
-  recipes are the open-ended comfort feature and run last before the gated
-  cloud milestone. Kickoff prompts address milestones by number; records
+  order M4 takeover + divergence, M5 briefs + transcripts, M6
+  Connect-introduced peers, M7 bootstrap recipes, M8 cloud store — the
+  sync story finishes first, Connect folds in the introduction upstream
+  now provides, recipes are the open-ended comfort feature and run last
+  before the gated cloud milestone. Renumbered 2026-08-02 when Connect
+  became usable (fourth era in the history map). Kickoff prompts address milestones by number; records
   keep the numbering of their date (era map at the top of the history
   file).
 
@@ -157,7 +163,8 @@ history file.
   visibility must work in BOTH directions — the callee machine seeing the
   initiator's threads only as greyed mirrors defeats the one-list
   promise. The one-directional attach (M2.5/D4 minted credentials for the
-  initiator only) is not the end state; runs as **M5.6** before M6, with
+  initiator only) is not the end state; runs as **M5.6** before the
+  remaining milestones, with
   its own analysis pass (mint attach both ways in the one handshake; the
   callee's server must hand the registration to its own clients; honest
   offline behavior when the reverse direction is unreachable).
@@ -180,7 +187,7 @@ history file.
   Connect-linked machines the live half needs nothing from us and
   reachability stops being a user problem. It does NOT supply a blob
   store, so the data layer (registry/vault/WIP/transcripts/materialize)
-  and M7 are unaffected. Decisions: (a) **sync consents move to
+  and the cloud-store milestone are unaffected. Decisions: (a) **sync consents move to
   Connection settings** — Secret files / Work in progress /
   Conversations get ordinary settings rows, because Connect has no
   pairing dialog to carry the one-decision step; (b) **pairing stays**
@@ -198,7 +205,7 @@ history file.
   (`roaming_blobs`) on every machine, reconciled through the
   `RoamingBlobStore` interface. V1 backend: `PeerMirror` — paired machines
   exchange manifests and transfer newer versions over the fork's existing
-  authenticated channel. M7 adds a cloud backend behind the same interface.
+  authenticated channel. M8 adds a cloud backend behind the same interface.
 - **D1 — Two-tier identity:** `WorkspaceProjectId` (machine-independent,
   minted automatically at pairing/creation) alongside the untouched local
   `ProjectId`. A project is roaming iff it has one. No user-facing
@@ -219,10 +226,10 @@ history file.
   Machine identity = the persisted server `environmentId`. Since M5.6 the
   same handshake also carries a reverse attach grant (initiator-minted,
   standard client scopes) so the callee's clients are full citizens too.
-- **D5 — Encryption deferred to M7 deliberately:** v1 blobs move only
+- **D5 — Encryption deferred to M8 deliberately:** v1 blobs move only
   between the user's own machines over the authenticated channel. Any cloud
   backend makes E2E encryption mandatory, key-management design reviewed
-  before M7 code.
+  before M8 code.
 
 ## Design
 
@@ -439,7 +446,55 @@ text. Accepted v1 gaps: attachment bytes don't roam; file/diff
 affordances inert in the read-only view. Deliberately no
 provider-session transplants. Mechanics in the reference.
 
-### Bootstrap recipes (M6)
+### Connect-introduced peers (M6)
+
+T3 Connect supplies what pairing was carrying by hand: discovery and a
+public per-environment URL. It supplies no blob store, so everything
+below the introduction — registry, vault, WIP, transcripts, materialize —
+is unchanged. M6 makes Connect a second producer of the SAME peer
+record, so syncing turns itself on with no code and no reachability
+setup, while pairing stays for LAN/offline/no-account use.
+
+**Why a client must start it.** A server can only talk to the relay
+about itself (linking its own tunnel); it cannot enumerate the user's
+other environments — that list exists only where the account session
+lives, in the client. So the client is the introducer in every design;
+the only question is what the introduction has to carry.
+
+**The peer record stays, the ritual goes.** The row remains internal
+state (it is the derived gate, the pause switch, and the key the mirror
+credential is filed under). What disappears is any user-facing step: the
+client, seeing a sibling environment, hands its own server that
+sibling's identity + public URL, and the peer row appears by itself.
+Connect-introduced rows carry no stored URLs of their own — the relay's
+endpoint is authoritative and refreshed by the client, so a machine that
+moves networks needs nothing (this is what M5.6's advertisement solved
+the hard way for pairing).
+
+**Authorization is the one thing that cannot be automated away.**
+Something must permit machine A to read machine B's secrets. The relay
+cannot grant it: an environment mints relay-brokered sessions with
+standard client scopes only, a 2-minute TTL, and a client-bound proof
+key, verified against a cloud-signed `environment:connect` scope we do
+not control. So M6 adds a **same-account elevation** path, entirely
+fork-side: B accepts a request proving it came from a session minted for
+B's OWN linked cloud account, requires an explicit confirm on B, and
+then mints the ordinary D4 mirror credential. Same trust model as
+pairing (one deliberate human authorization per machine pair), different
+proof (account ownership instead of a typed code). Everything downstream
+— mirror passes, blob reconciliation, consents — is untouched.
+
+**Consents move to Connection settings** (2026-08-02 decision): Secret
+files / Work in progress / Conversations become ordinary settings rows,
+because Connect has no pairing dialog to carry the one-decision step.
+Pairing keeps its dialog; the rows and the dialog write the same
+settings.
+
+Mechanics, the exact proof checks, and the rejected alternatives live in
+the reference file; the option analysis is in
+`.plans/scratch/t3-connect-roaming-analysis.md`.
+
+### Bootstrap recipes (M7)
 
 The clone was never the expensive part — setup is. First materialization
 runs an agent thread that sets up the repo, verifies the dev server boots,
@@ -454,8 +509,8 @@ setups; capture-what-happened over guaranteed-boot.
 - A required always-on daemon/server/VPS — origins carry code and WIP; the
   mirror carries the rest.
 - A dependency on upstream's invite-gated T3 Connect service (kept open as
-  one possible M7 backend).
-- An E2E encryption layer in v1 (mandatory in M7 before any cloud backend).
+  one possible M8 backend).
+- An E2E encryption layer in v1 (mandatory in M8 before any cloud backend).
 - A custom content-addressed file-sync engine — shadow refs over git.
 - Native provider-session transfer — briefs + rebuild instead.
 - Cross-machine replication of the internal orchestration event log.
@@ -482,8 +537,9 @@ detail live in the history and reference files.
 | M5 — Briefs + transcripts | "Conversations" pairing row + mirrored read-only threads + park/brief/resume. | ✅ 2026-07-22. |
 | M5.5 — Surfacing corrective | The 2026-07-30 product corrections: one row per thread, resume-as-draft with user-chosen model, optional hand-off, delete-race + header-inset + status-copy fixes. | ✅ 2026-07-31 (PRs #89–#94; one visible-window field check pending — see history). |
 | M5.6 — Bidirectional pairing | The 2026-07-31 binding decision: the one handshake makes BOTH machines full citizens — reverse attach grant + server-provided client registration on the callee. | ✅ 2026-07-31 (PRs #100–#105; accept-m56 + canonical + m5/m55 re-runs ALL PASS; browser walk verified live/greyed/recovered on fresh mounts — visible-window row-flip check pending as in M5.5). |
-| M6 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
-| M7 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
+| M6 — Connect-introduced peers | T3 Connect becomes a second producer of the same peer record: client-supplied introduction, no codes, no reachability setup; same-account elevation mints the mirror credential; consents move to Connection settings. Pairing stays. | Two machines on T3 Connect and never paired sync end-to-end (registry + secrets + WIP + transcripts) after one confirm, with no code typed and no network-access toggle; pairing-only machines still pass the full ladder. Canonical re-run. |
+| M7 — Bootstrap recipes | Step 4; analysis pass scopes honest limits first. | First materialize triggers an agent setup thread that writes a recipe; second replays it; a broken recipe escalates. Canonical re-run. |
+| M8 — Cloud store backend (gated) | E2E encryption (key-management one-pager is the entry gate) + a cloud `RoamingBlobStore`. Re-asks secrets consent. Unaffected by Connect, which supplies discovery + transport but no store. | Small state reaches a fresh machine with zero overlap; a test asserts the cloud holds ciphertext only. |
 
 ## Execution process
 
