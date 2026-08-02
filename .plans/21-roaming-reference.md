@@ -240,6 +240,22 @@ live in `21-roaming-history.md`.
     the client's proof key, gated on a cloud-signed `environment:connect`
     scope checked with `hasExactScope`. Widening it needs either T3's
     cloud (not ours) or a downgrade of our own verification (rejected).
+- **Connect is OFF in source builds unless configured.** `publicConfig.ts`
+  reads build-time defines injected by `apps/server/vite.config.ts` from
+  the repo `.env` (`loadRepoEnv`): `T3CODE_RELAY_URL`,
+  `T3CODE_CLERK_PUBLISHABLE_KEY`, `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID`,
+  `T3CODE_CLERK_JWT_TEMPLATE`. Unset (this fork today) → Connect features
+  are disabled entirely, which is why fork builds are not connected.
+  These are PUBLIC values (a publishable key and a URL); `.env.example`
+  documents them and forbids server-side secrets in that file. Release
+  builds inject their own. A fork build therefore reaches whichever relay
+  its `.env` names — official T3 Connect, or a self-hosted `infra/relay`
+  deployment (in-tree, and its deploys write the URL back automatically).
+- Environments are keyed by `baseDir` (`stateDir = <baseDir>/userdata`, or
+  `dev` under a devUrl), so a fork build and an official install on the
+  same machine are DIFFERENT environments with different environmentIds:
+  both can link, both appear in the account, and both consume tunnel
+  quota (`maxTunnels` is a per-account relay limit).
 - Design consequence: M6 keeps `roaming_peers` as internal state (derived
   gate + pause + credential key) with Connect as a second producer behind
   the `PeerIntroduction` seam; Connect-introduced rows store no base URLs
