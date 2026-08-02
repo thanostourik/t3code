@@ -174,6 +174,23 @@ history file.
   ever; the network-access toggle is the whole story; pre-M5.6 pairings
   self-heal with no new handshake.
 
+- **2026-08-02 — T3 Connect is a second introduction, not a
+  replacement:** Connect became usable (the service opened; no code
+  landed). It supplies discovery + a public per-environment URL, so for
+  Connect-linked machines the live half needs nothing from us and
+  reachability stops being a user problem. It does NOT supply a blob
+  store, so the data layer (registry/vault/WIP/transcripts/materialize)
+  and M7 are unaffected. Decisions: (a) **sync consents move to
+  Connection settings** — Secret files / Work in progress /
+  Conversations get ordinary settings rows, because Connect has no
+  pairing dialog to carry the one-decision step; (b) **pairing stays**
+  for the immediate future (LAN/offline/no-account), reviewed once
+  Connect has field time — so M5.6's reachability machinery is retained,
+  not deleted; (c) no de-duplication work is needed for a machine
+  introduced both ways — the client catalog is keyed by environmentId
+  and platform/relay registrations already shadow saved ones.
+  Mechanics + options in `.plans/scratch/t3-connect-roaming-analysis.md`.
+
 ## Architecture
 
 - **D0 — Transport:** all small roaming state is versioned blobs addressed
