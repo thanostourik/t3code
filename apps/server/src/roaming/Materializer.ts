@@ -106,8 +106,8 @@ export const ROAMING_WORKSPACE_MARKER = "t3-roaming-workspace";
 const decodeRegistryPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RoamingRegistryPayload),
 );
-const decodeRawJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
-const encodeRawJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeRawJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const encodeRawJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeVaultBundle = Schema.decodeUnknownEffect(Schema.fromJsonString(RoamingVaultBundle));
 const sqlError = (operation: string) => (cause: unknown) =>
   new MaterializeError({ reason: "internal", detail: operation, cause });

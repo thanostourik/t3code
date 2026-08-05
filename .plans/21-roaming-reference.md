@@ -334,7 +334,7 @@ live in `21-roaming-history.md`.
   and the reverse half is skipped before minting — pairing degrades to
   one-directional with a warning naming the fix (enable network access,
   re-pair).
-- Peer-side storage: `roaming_attach_registrations` (migration 042 —
+- Peer-side storage: `roaming_attach_registrations` (migration 057 —
   environment_id PK, label, base_urls JSON, expires_at, registered_at);
   token in ServerSecretStore `roaming-attach-<envId>` (written BEFORE
   the row). `RoamingAttachRegistrations.list()` re-joins tokens and
@@ -693,7 +693,7 @@ live in `21-roaming-history.md`.
   Transcript/brief blob changes emit `roaming-thread-upserted`
   (sequence 0; `deleted: true` upsert = removal, no separate event);
   resume catch-up seeds the rows. Gate-off masks to `[]`.
-- `roaming_thread_resumptions` (migration 041): machine-local, never
+- `roaming_thread_resumptions` (migration 056): machine-local, never
   mirrored — `source_thread_id PK, resumed_thread_id, created_at`,
   insert-or-replace via `RoamingThreadResumptions.record`, written by
   `POST /api/roaming/threads/resumed` (access:write, roaming-gated). The
@@ -759,7 +759,7 @@ live in `21-roaming-history.md`.
 
 - Synchronous `POST /api/roaming/materialize`, stateless and idempotent
   (2026-07-22, O4/D2 — the persisted step machine and
-  `roaming_materializations` table are gone, migration 039): resolve-path
+  `roaming_materializations` table are gone, migration 055): resolve-path
   → clone → restore-wip → apply-vault → register-project → bootstrap
   (M7 recipes). Records live in memory for the boot (progress streams unchanged
   over the shell — live overlay at the ws/HTTP entry points; the

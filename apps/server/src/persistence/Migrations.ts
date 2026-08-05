@@ -62,13 +62,13 @@ import Migration0047 from "./Migrations/047_ProjectionProjectIcon.ts";
 import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
 import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
-import Migration0036Roaming from "./Migrations/036_RoamingBlobs.ts";
-import Migration0037Roaming from "./Migrations/037_RoamingPeersAndProjectionWorkspaceId.ts";
-import Migration0038Roaming from "./Migrations/038_RoamingMaterializations.ts";
-import Migration0039Roaming from "./Migrations/039_RoamingPeerSyncEnabled.ts";
-import Migration0040Roaming from "./Migrations/040_DropRoamingMaterializations.ts";
-import Migration0041Roaming from "./Migrations/041_RoamingThreadResumptions.ts";
-import Migration0042Roaming from "./Migrations/042_RoamingAttachRegistrations.ts";
+import Migration0051 from "./Migrations/051_RoamingBlobs.ts";
+import Migration0052 from "./Migrations/052_RoamingPeersAndProjectionWorkspaceId.ts";
+import Migration0053 from "./Migrations/053_RoamingMaterializations.ts";
+import Migration0054 from "./Migrations/054_RoamingPeerSyncEnabled.ts";
+import Migration0055 from "./Migrations/055_DropRoamingMaterializations.ts";
+import Migration0056 from "./Migrations/056_RoamingThreadResumptions.ts";
+import Migration0057 from "./Migrations/057_RoamingAttachRegistrations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -131,13 +131,13 @@ const migrationEntries = [
   [48, "ProjectionThreadBranchPullRequest", Migration0048],
   [49, "ProjectionThreadsActiveOrderKey", Migration0049],
   [50, "ProjectionThreadPullRequests", Migration0050],
-  [51, "RoamingBlobs", Migration0036Roaming],
-  [52, "RoamingPeersAndProjectionWorkspaceId", Migration0037Roaming],
-  [53, "RoamingMaterializations", Migration0038Roaming],
-  [54, "RoamingPeerSyncEnabled", Migration0039Roaming],
-  [55, "DropRoamingMaterializations", Migration0040Roaming],
-  [56, "RoamingThreadResumptions", Migration0041Roaming],
-  [57, "RoamingAttachRegistrations", Migration0042Roaming],
+  [51, "RoamingBlobs", Migration0051],
+  [52, "RoamingPeersAndProjectionWorkspaceId", Migration0052],
+  [53, "RoamingMaterializations", Migration0053],
+  [54, "RoamingPeerSyncEnabled", Migration0054],
+  [55, "DropRoamingMaterializations", Migration0055],
+  [56, "RoamingThreadResumptions", Migration0056],
+  [57, "RoamingAttachRegistrations", Migration0057],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
