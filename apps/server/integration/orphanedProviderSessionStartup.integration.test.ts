@@ -1,3 +1,8 @@
+import { PeerMirror } from "../src/roaming/PeerMirror.ts";
+import { RoamingAutoEnroll } from "../src/roaming/RoamingAutoEnroll.ts";
+import { TranscriptSync } from "../src/roaming/TranscriptSync.ts";
+import { VaultSync } from "../src/roaming/VaultSync.ts";
+import { WipSnapshotReactor } from "../src/roaming/WipSnapshotReactor.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
@@ -69,6 +74,12 @@ const makePersistedRuntimeLayer = (dbPath: string) => {
 };
 
 const startupDependencies = Layer.mergeAll(
+  Layer.mock(PeerMirror)({ start: () => Effect.void }),
+  Layer.mock(RoamingAutoEnroll)({ start: () => Effect.void }),
+  Layer.mock(TranscriptSync)({ start: () => Effect.void }),
+  Layer.mock(VaultSync)({ start: () => Effect.void }),
+  Layer.mock(WipSnapshotReactor)({ start: () => Effect.void }),
+
   Layer.mock(Keybindings.Keybindings)({
     start: Effect.void,
   }),

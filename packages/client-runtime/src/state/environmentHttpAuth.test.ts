@@ -70,6 +70,10 @@ const SESSION = {
 const UNAUTHENTICATED_SESSION = { authenticated: false, auth: AUTH } satisfies AuthSessionState;
 const SHELL = {
   snapshotSequence: 1,
+  roamingProjects: [],
+  roamingMaterializations: [],
+  roamingWipStatus: [],
+  roamingThreads: [],
   projects: [],
   threads: [],
   updatedAt: "2026-09-04T00:00:00.000Z",

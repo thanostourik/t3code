@@ -137,7 +137,6 @@ import {
 import {
   addRoamingPeer,
   listRoamingPeers,
-  removeRoamingPeer,
   setRoamingPeerSync,
 } from "~/environments/primary/roaming";
 import type { RoamingPeer, RoamingWipStatusEntry } from "@t3tools/contracts";
@@ -2684,6 +2683,9 @@ export function ConnectionsSettings() {
     savedBackendSshPort,
     savedBackendSshUsername,
     savedBackendSyncEnabled,
+    savedBackendWipSync,
+    savedBackendTranscriptSync,
+    roamingPeersById,
   ]);
 
   const handleSavedBackendSshFieldKeyDown = useCallback(

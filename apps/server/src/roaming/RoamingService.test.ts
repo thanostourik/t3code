@@ -201,6 +201,9 @@ const unusedStubs = Layer.mergeAll(
     getDescriptor: Effect.succeed({ label: "Test Laptop" }) as never,
   }),
   Layer.succeed(OrchestrationEngineService, {
+    readThreadEvents: () => Stream.empty,
+    getThreadReplayStats: () => Effect.die("unused"),
+    subscribeDomainEvents: Effect.succeed(Stream.empty),
     readEvents: () => Stream.empty,
     latestSequence: Effect.succeed(0),
     streamDomainEvents: Stream.empty,

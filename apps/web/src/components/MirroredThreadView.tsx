@@ -276,17 +276,16 @@ export function MirroredThreadView() {
       <div className="min-h-0 flex-1">
         <MessagesTimeline
           isWorking={false}
-          activeTurnInProgress={false}
           activeTurnStartedAt={null}
           listRef={listRef}
           timelineEntries={timelineEntries}
           latestTurn={null}
           runningTurnId={null}
-          turnDiffSummaryByAssistantMessageId={EMPTY_DIFF_SUMMARIES}
+          turnDiffSummaries={EMPTY_DIFF_SUMMARIES}
           routeThreadKey={scopedThreadKey(scopeThreadRef(primaryEnvironmentId, threadId))}
           onOpenTurnDiff={noop}
-          revertTurnCountByUserMessageId={EMPTY_REVERT_COUNTS}
-          onRevertUserMessage={noop}
+          supportsConversationRollback={false}
+          onRevertToTurnCount={noop}
           isRevertingCheckpoint={false}
           onImageExpand={noop}
           activeThreadEnvironmentId={primaryEnvironmentId}
@@ -296,8 +295,8 @@ export function MirroredThreadView() {
           workspaceRoot={undefined}
           anchorMessageId={null}
           onAnchorReady={noop}
-          onAnchorSizeChanged={noop}
           contentInsetEndAdjustment={0}
+          liveFollowEnabled={false}
           onIsAtEndChange={noop}
           onManualNavigation={noop}
         />
@@ -308,5 +307,4 @@ export function MirroredThreadView() {
 }
 
 const noop = () => {};
-const EMPTY_DIFF_SUMMARIES = new Map<never, never>();
-const EMPTY_REVERT_COUNTS = new Map<never, never>();
+const EMPTY_DIFF_SUMMARIES: [] = [];

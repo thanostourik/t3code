@@ -196,6 +196,10 @@ function makeService(input: {
           getShellSnapshot: () =>
             Effect.succeed({
               snapshotSequence: 1,
+              roamingProjects: [],
+              roamingMaterializations: [],
+              roamingWipStatus: [],
+              roamingThreads: [],
               projects: input.projects,
               threads: [],
               updatedAt: "2026-07-01T00:00:00Z",

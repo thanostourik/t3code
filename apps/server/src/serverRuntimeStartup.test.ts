@@ -320,6 +320,9 @@ it.effect(
         Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
           getUserInputActivity: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.die("unused"),
+          listRoamingProjectShells: () => Effect.succeed([]),
+          listRoamingThreadShells: () => Effect.succeed([]),
+          getRoamingThreadShellById: () => Effect.succeed(Option.none()),
           getSnapshot: () => Effect.die("unused"),
           getShellSnapshot: () => Effect.die("unused"),
           getArchivedShellSnapshot: () => Effect.die("unused"),

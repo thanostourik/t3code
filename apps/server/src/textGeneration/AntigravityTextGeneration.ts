@@ -26,6 +26,7 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  buildResumptionBriefPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
@@ -401,7 +402,18 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
       return { title: sanitizeThreadTitle(generated.title) };
     });
 
+  const generateResumptionBrief: TextGeneration.TextGeneration["Service"]["generateResumptionBrief"] =
+    Effect.fn("AntigravityTextGeneration.generateResumptionBrief")(function* (input) {
+      const generated = yield* runAntigravityJson({
+        operation: "generateResumptionBrief",
+        ...buildResumptionBriefPrompt(input),
+        modelSelection: input.modelSelection,
+      });
+      return { markdown: generated.markdown.trim() };
+    });
+
   return {
+    generateResumptionBrief,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

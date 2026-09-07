@@ -36,12 +36,19 @@ const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => (
 /** Only `getShellSnapshot` is exercised; the rest must not be called. */
 const makeProjectionSnapshotQueryLayer = (importedWorkspaceRoots: ReadonlyArray<string>) =>
   Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+    listRoamingProjectShells: () => Effect.succeed([]),
+    listRoamingThreadShells: () => Effect.succeed([]),
+    getRoamingThreadShellById: () => Effect.succeed(Option.none()),
     getCommandReadModel: () => Effect.die("unused"),
     getUserInputActivity: () => Effect.die("unused"),
     getSnapshot: () => Effect.die("unused"),
     getShellSnapshot: () =>
       Effect.succeed({
         snapshotSequence: 0,
+        roamingProjects: [],
+        roamingMaterializations: [],
+        roamingWipStatus: [],
+        roamingThreads: [],
         projects: importedWorkspaceRoots.map((workspaceRoot) => makeProjectShell(workspaceRoot)),
         threads: [],
         updatedAt: "2026-01-01T00:00:00.000Z",

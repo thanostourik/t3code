@@ -288,6 +288,7 @@ it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
             '```json\n{"title":" Repair Google login\\nExtra line","body":"  ## Summary\\nSupport remote callbacks.  "}\n```',
             '{"branch":" Repair Google Login "}',
             '{"title":"  \\"Repair Google login\\"  "}',
+            '{"markdown":"  Continue fixing remote callbacks.  "}',
           ],
         });
         const common = { cwd: fixture.projectDirectory, modelSelection };
@@ -323,11 +324,25 @@ it.layer(NodeServices.layer)("AntigravityTextGeneration", (it) => {
         expect(yield* fixture.textGeneration.generateThreadTitle(fixture.titleInput)).toEqual({
           title: "Repair Google login",
         });
-        expect(new Set(fixture.state.workspaces).size).toBe(4);
+        expect(
+          yield* fixture.textGeneration.generateResumptionBrief({
+            ...common,
+            title: "Repair Google login",
+            branch: "feature/login",
+            transcriptText: "user: fix remote callbacks",
+          }),
+        ).toEqual({ markdown: "Continue fixing remote callbacks." });
+        expect(new Set(fixture.state.workspaces).size).toBe(5);
         expect(fixture.state.workspaces).not.toContain(fixture.projectDirectory);
-        expect(fixture.state.nativeFilesAtClose).toEqual([true, true, true, true]);
-        expect(fixture.state.selectedModes).toEqual(["default", "default", "default", "default"]);
-        expect(fixture.state.selectedModels).toEqual(Array(4).fill(modelSelection.model));
+        expect(fixture.state.nativeFilesAtClose).toEqual([true, true, true, true, true]);
+        expect(fixture.state.selectedModes).toEqual([
+          "default",
+          "default",
+          "default",
+          "default",
+          "default",
+        ]);
+        expect(fixture.state.selectedModels).toEqual(Array(5).fill(modelSelection.model));
         expect(fixture.state.prompts[0]?.prompt).toEqual([
           { type: "text", text: expect.stringContaining("+handleRemoteCallback()") },
         ]);

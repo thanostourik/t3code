@@ -1,6 +1,14 @@
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
-import { ProjectSyncIndicator, SidebarMirroredThreadRows, SidebarOfflineProjectRow, useMaterialize, useMirroredFallbackRows, useRoamingPeerSyncEnabled } from "./roamingSidebar";
+import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
+import {
+  ProjectSyncIndicator,
+  SidebarMirroredThreadRows,
+  SidebarOfflineProjectRow,
+  useMaterialize,
+  useMirroredFallbackRows,
+  useRoamingPeerSyncEnabled,
+} from "./roamingSidebar";
 import { selectOfflineRoamingProjects } from "../sidebarProjectGrouping";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
@@ -230,7 +238,13 @@ import {
   ComboboxTrigger,
   useComboboxFilter,
 } from "./ui/combobox";
-import { SidebarContent, SidebarGroup, SidebarMenu, SidebarMenuItem, SidebarMenuButton, useSidebar } from "./ui/sidebar";
+import {
+  SidebarContent,
+  SidebarGroup,
+  SidebarMenu,
+  SidebarMenuButton,
+  useSidebar,
+} from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -2110,10 +2124,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 });
 
 /**
- * "Offline — available" rows of the single project list: registry entries
- * mirrored from other machines whose repository has no live row here. Same
- * list as local/attached projects (no separate section — 2026-07-05 product
- * model), greyed, with an honest staleness label and a Materialize action.
+ * Sync status and local materialization in the project selector.
  */
 function MaterializeProjectButton({ project }: { project: SidebarProjectSnapshot }) {
   const roamingEntries = useRoamingProjects();
@@ -2196,13 +2207,32 @@ function MaterializeProjectButton({ project }: { project: SidebarProjectSnapshot
     [project, roamingEntries, materialize],
   );
 
-  if (!showMaterialize) return <ProjectSyncIndicator workspaceProjectId={syncWorkspaceProjectId} projectTitle={project.displayName} />;
-  return <><ProjectSyncIndicator workspaceProjectId={syncWorkspaceProjectId} projectTitle={project.displayName} />{materializeDialog}<Button size="icon-xs" variant="ghost-muted" aria-label={`Materialize ${project.displayName} on this machine`} title={materializeBlockedReason ?? "Materialize on this machine"} disabled={materializeBlockedReason !== null} onClick={handleMaterializeClick}><FolderPlusIcon className="size-3.5" /></Button></>;
-}
-
-function ProjectMirroredThreadRows(props: { workspaceProjectId: string; reachableEnvironmentIds: ReadonlySet<string> }) {
-  const rows = useMirroredFallbackRows(props.workspaceProjectId, props.reachableEnvironmentIds);
-  return <SidebarMirroredThreadRows rows={rows} />;
+  if (!showMaterialize)
+    return (
+      <ProjectSyncIndicator
+        workspaceProjectId={syncWorkspaceProjectId}
+        projectTitle={project.displayName}
+      />
+    );
+  return (
+    <>
+      <ProjectSyncIndicator
+        workspaceProjectId={syncWorkspaceProjectId}
+        projectTitle={project.displayName}
+      />
+      {materializeDialog}
+      <Button
+        size="icon-xs"
+        variant="ghost-muted"
+        aria-label={`Materialize ${project.displayName} on this machine`}
+        title={materializeBlockedReason ?? "Materialize on this machine"}
+        disabled={materializeBlockedReason !== null}
+        onClick={handleMaterializeClick}
+      >
+        <FolderPlusIcon className="size-3.5" />
+      </Button>
+    </>
+  );
 }
 
 export default function Sidebar() {
@@ -2210,8 +2240,12 @@ export default function Sidebar() {
   const roamingProjects = useRoamingProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const reachableEnvironmentIds = useAtomValue(reachableEnvironmentIdsAtom);
+  const allMirroredRows = useMirroredFallbackRows(null, reachableEnvironmentIds);
   const allThreads = useThreadShells();
-  const threads = useMemo(() => allThreads.filter((thread) => reachableEnvironmentIds.has(thread.environmentId)), [allThreads, reachableEnvironmentIds]);
+  const threads = useMemo(
+    () => allThreads.filter((thread) => reachableEnvironmentIds.has(thread.environmentId)),
+    [allThreads, reachableEnvironmentIds],
+  );
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -2372,10 +2406,23 @@ export default function Sidebar() {
       ),
     [environments],
   );
+  const desktopLocalEnvironmentIds = useMemo(
+    () =>
+      new Set(
+        environments
+          .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
+          .map((environment) => environment.environmentId),
+      ),
+    [environments],
+  );
   const liveProjects = useMemo(
     () =>
       projects.filter((project) => {
-        if (project.environmentId === primaryEnvironmentId) return true;
+        if (
+          project.environmentId === primaryEnvironmentId ||
+          desktopLocalEnvironmentIds.has(project.environmentId)
+        )
+          return true;
         if (erroredEnvironmentIds.has(project.environmentId)) return false;
         const status = environmentShellStatuses.get(project.environmentId);
         return status === "live" || status === "synchronizing";
@@ -2385,9 +2432,13 @@ export default function Sidebar() {
       primaryEnvironmentId,
       environmentShellStatuses,
       erroredEnvironmentIds,
+      desktopLocalEnvironmentIds,
     ],
   );
-  const offlineRoamingProjects = useMemo(() => selectOfflineRoamingProjects({ roamingProjects, liveProjects }), [roamingProjects, liveProjects]);
+  const offlineRoamingProjects = useMemo(
+    () => selectOfflineRoamingProjects({ roamingProjects, liveProjects }),
+    [roamingProjects, liveProjects],
+  );
   const orderedProjects = useMemo(
     () =>
       orderItemsByPreferredIds({
@@ -2414,7 +2465,7 @@ export default function Sidebar() {
       orderedProjects,
       primaryEnvironmentId,
       projectGroupingSettings,
-      projects,
+      liveProjects,
       sidebarProjectSortOrder,
     ],
   );
@@ -2522,6 +2573,18 @@ export default function Sidebar() {
         : (projectGroups.find((project) => project.projectKey === projectScopeKey) ?? null),
     [projectGroups, projectScopeKey],
   );
+  const mirroredRows = useMemo(() => {
+    const workspaceIds = new Set(
+      (scopedProjectGroup ? [scopedProjectGroup] : projectGroups).flatMap((project) =>
+        project.memberProjects.flatMap((member) =>
+          member.workspaceProjectId ? [member.workspaceProjectId] : [],
+        ),
+      ),
+    );
+    return allMirroredRows.filter((thread) => workspaceIds.has(thread.workspaceProjectId));
+  }, [allMirroredRows, scopedProjectGroup, projectGroups]);
+  const visibleOfflineProjects = scopedProjectGroup ? [] : offlineRoamingProjects;
+
   const scopedProjectKeys = useMemo(
     () =>
       scopedProjectGroup === null
@@ -5040,6 +5103,8 @@ export default function Sidebar() {
           ) : null}
           {!isSearchingThreads &&
           visibleDraftSessionCount === 0 &&
+          mirroredRows.length === 0 &&
+          visibleOfflineProjects.length === 0 &&
           pinnedThreads.length +
             activeThreads.length +
             snoozedThreads.length +
@@ -5066,8 +5131,22 @@ export default function Sidebar() {
             </div>
           ) : null}
         </SidebarGroup>
-        <SidebarMenu>{Array.from(new Set((scopedProjectGroup ? [scopedProjectGroup] : projectGroups).flatMap((project) => project.memberProjects.flatMap((member) => member.workspaceProjectId ? [member.workspaceProjectId] : [])))).map((workspaceProjectId) => <ProjectMirroredThreadRows key={workspaceProjectId} workspaceProjectId={workspaceProjectId} reachableEnvironmentIds={reachableEnvironmentIds} />)}</SidebarMenu>
-        <SidebarMenu>{offlineRoamingProjects.map((entry) => <SidebarOfflineProjectRow key={`${entry.environmentId}:${entry.roamingProject.workspaceProjectId}`} entry={entry} reachableEnvironmentIds={reachableEnvironmentIds} />)}</SidebarMenu>
+        {!isSearchingThreads ? (
+          <SidebarMenu>
+            <SidebarMirroredThreadRows rows={mirroredRows} />
+          </SidebarMenu>
+        ) : null}
+        {!isSearchingThreads ? (
+          <SidebarMenu>
+            {visibleOfflineProjects.map((entry) => (
+              <SidebarOfflineProjectRow
+                key={`${entry.environmentId}:${entry.roamingProject.workspaceProjectId}`}
+                entry={entry}
+                reachableEnvironmentIds={reachableEnvironmentIds}
+              />
+            ))}
+          </SidebarMenu>
+        ) : null}
       </SidebarContent>
       <SidebarChromeFooter />
     </>

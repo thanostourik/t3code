@@ -41,6 +41,9 @@ const makeLayer = (input: { readonly enrollCalls: Ref.Ref<ReadonlyArray<ProjectI
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(
       Layer.succeed(OrchestrationEngineService, {
+        readThreadEvents: () => Stream.empty,
+        getThreadReplayStats: () => Effect.die("unused"),
+        subscribeDomainEvents: Effect.succeed(Stream.empty),
         readEvents: () => Stream.empty,
         latestSequence: Effect.succeed(0),
         streamDomainEvents: Stream.empty,
@@ -70,6 +73,8 @@ const seedProject = Effect.gen(function* () {
     workspaceRoot: "/tmp/auto-enroll",
     workspaceProjectId: null,
     defaultModelSelection: null,
+    defaultThreadEnvMode: null,
+    autoPull: false,
     scripts: [],
     createdAt: now,
     updatedAt: now,
@@ -139,6 +144,8 @@ it.effect(
             workspaceRoot: markedRoot,
             workspaceProjectId: null,
             defaultModelSelection: null,
+            defaultThreadEnvMode: null,
+            autoPull: false,
             scripts: [],
             createdAt: now,
             updatedAt: now,

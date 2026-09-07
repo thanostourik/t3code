@@ -10,6 +10,7 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -80,7 +81,7 @@ import Migration0057 from "./Migrations/057_RoamingAttachRegistrations.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-const migrationEntries = [
+export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -174,7 +175,52 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+  const sql = yield* SqlClient.SqlClient;
+  const executedMigrations = yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const tables =
+        yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+      const applied =
+        tables.length === 0
+          ? []
+          : yield* sql<{
+              readonly migration_id: number;
+              readonly name: string;
+            }>`SELECT migration_id, name FROM effect_sql_migrations`;
+      // Before this rebase, roaming occupied 50–56 (and earlier 37–43). Free
+      // those slots and replay any missing upstream migrations, retaining the
+      // roaming schema and data while recording its migrations at 51–57.
+      const roamingNames = new Set(
+        migrationEntries.filter(([id]) => id >= 51).map(([, name]) => name),
+      );
+      const currentById = new Map(migrationEntries.map(([id, name]) => [id, name]));
+      const legacy = applied.filter(
+        (row) => roamingNames.has(row.name) && currentById.get(row.migration_id) !== row.name,
+      );
+      if (legacy.length === 0)
+        return yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+      if (toMigrationInclusive !== undefined && toMigrationInclusive < 57) {
+        return yield* new Migrator.MigrationError({
+          kind: "BadState",
+          message: "An existing roaming database requires the complete migration sequence.",
+        });
+      }
+      const existingRoamingNames = new Set(legacy.map((row) => row.name));
+      for (const row of legacy) {
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = ${row.migration_id} AND name = ${row.name}`;
+      }
+      return yield* run({
+        loader: Migrator.fromRecord(
+          Object.fromEntries(
+            migrationEntries.map(([id, name, migration]) => [
+              `${id}_${name}`,
+              existingRoamingNames.has(name) ? Effect.void : migration,
+            ]),
+          ),
+        ),
+      });
+    }),
+  );
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")

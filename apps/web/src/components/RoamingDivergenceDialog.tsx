@@ -132,7 +132,6 @@ export function RoamingDivergenceDialog(props: {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch only on open
   }, [props.open, props.workspaceProjectId]);
 
   const resolve = useCallback(

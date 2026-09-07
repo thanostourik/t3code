@@ -22,6 +22,10 @@ function shellState(status: EnvironmentShellState["status"]): EnvironmentShellSt
         ? Option.none()
         : Option.some({
             snapshotSequence: 1,
+            roamingProjects: [],
+            roamingMaterializations: [],
+            roamingWipStatus: [],
+            roamingThreads: [],
             updatedAt: "2026-09-04T00:00:00.000Z",
             projects: [],
             threads: [],

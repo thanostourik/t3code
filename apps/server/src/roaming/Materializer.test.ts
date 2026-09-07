@@ -109,6 +109,9 @@ const makeEngineLayer = (
   rows: Ref.Ref<ReadonlyArray<ProjectionProject>>,
 ) =>
   Layer.succeed(OrchestrationEngineService, {
+    readThreadEvents: () => Stream.empty,
+    getThreadReplayStats: () => Effect.die("unused"),
+    subscribeDomainEvents: Effect.succeed(Stream.empty),
     readEvents: () => Stream.empty,
     latestSequence: Effect.succeed(0),
     streamDomainEvents: Stream.empty,
@@ -124,6 +127,8 @@ const makeEngineLayer = (
               workspaceRoot: command.workspaceRoot,
               workspaceProjectId: null,
               defaultModelSelection: null,
+              defaultThreadEnvMode: null,
+              autoPull: false,
               scripts: [],
               createdAt: command.createdAt,
               updatedAt: command.createdAt,

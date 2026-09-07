@@ -1051,30 +1051,36 @@ const buildAppUnderTest = (options?: {
       ),
     );
 
-    const appLayer = servedRoutesLayer.pipe(
-      Layer.provide(
-        Layer.mock(RoamingBlobStore)({
-          // The shell live tail always attaches the roaming sources
-          // (pairing can enable roaming mid-subscription), so any test that
-          // pulls live items reaches this subscription.
-          subscribeChanges: Effect.gen(function* () {
-            const pubsub = yield* PubSub.unbounded<never>();
-            return yield* PubSub.subscribe(pubsub);
+    const appLayer = servedRoutesLayer
+      .pipe(
+        Layer.provide(
+          Layer.mock(RoamingBlobStore)({
+            // The shell live tail always attaches the roaming sources
+            // (pairing can enable roaming mid-subscription), so any test that
+            // pulls live items reaches this subscription.
+            subscribeChanges: Effect.gen(function* () {
+              const pubsub = yield* PubSub.unbounded<never>();
+              return yield* PubSub.subscribe(pubsub);
+            }),
           }),
-        }),
-      ),
-      Layer.provide(
-        Layer.succeed(Materializer, {
-          materialize: () => Effect.die("unused"),
-          subscribeUpdates: Effect.gen(function* () {
-            const pubsub = yield* PubSub.unbounded<never>();
-            return yield* PubSub.subscribe(pubsub);
+        ),
+        Layer.provide(
+          Layer.succeed(Materializer, {
+            materialize: () => Effect.die("unused"),
+            subscribeUpdates: Effect.gen(function* () {
+              const pubsub = yield* PubSub.unbounded<never>();
+              return yield* PubSub.subscribe(pubsub);
+            }),
+            listRecords: Effect.succeed([]),
+            ...options?.layers?.materializer,
+          } satisfies Materializer["Service"]),
+        ),
+        Layer.provide(
+          Layer.succeed(RoamingThreadResumptions, {
+            record: () => Effect.void,
+            findSourcesByResumedThreadId: () => Effect.succeed([]),
           }),
-          listRecords: Effect.succeed([]),
-          ...options?.layers?.materializer,
-        } satisfies Materializer["Service"]),
-      ),
-      Layer.provide(Layer.succeed(RoamingThreadResumptions, { record: () => Effect.void, findSourcesByResumedThreadId: () => Effect.succeed([]) })),
+        ),
         Layer.provide(
           Layer.succeed(RoamingAttachRegistrations, {
             upsert: () => Effect.void,
@@ -1086,93 +1092,73 @@ const buildAppUnderTest = (options?: {
             }),
           } satisfies RoamingAttachRegistrations["Service"]),
         ),
-      Layer.provide(Layer.mock(RoamingService)({})),
-      Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
-      Layer.provide(
-        Layer.succeed(TranscriptSync, {
-          start: () => Effect.void,
-          captureThread: () => Effect.void,
-          captureAll: () => Effect.void,
-          saveBrief: () => Effect.die("unused"),
-          generateBrief: () => Effect.die("unused"),
-        } satisfies TranscriptSync["Service"]),
-      ),
-      Layer.provide(
-        Layer.succeed(WipSnapshotReactor, {
-          start: () => Effect.void,
-          snapshotProject: () => Effect.void,
-          takeover: () => Effect.succeed({ applied: false }),
-          divergence: () => Effect.succeed(null),
-          resolveDivergence: () => Effect.succeed({ resolved: false }),
-          snapshotAll: () => Effect.void,
-          listStatuses: () => Effect.succeed([]),
-          subscribeUpdates: Effect.gen(function* () {
-            const pubsub = yield* PubSub.unbounded<never>();
-            return yield* PubSub.subscribe(pubsub);
+        Layer.provide(Layer.mock(RoamingService)({})),
+        Layer.provide(Layer.mock(RoamingPeers)({ roamingEnabled: Effect.succeed(false) })),
+        Layer.provide(
+          Layer.succeed(TranscriptSync, {
+            start: () => Effect.void,
+            captureThread: () => Effect.void,
+            captureAll: () => Effect.void,
+            saveBrief: () => Effect.die("unused"),
+            generateBrief: () => Effect.die("unused"),
+          } satisfies TranscriptSync["Service"]),
+        ),
+        Layer.provide(
+          Layer.succeed(WipSnapshotReactor, {
+            start: () => Effect.void,
+            snapshotProject: () => Effect.void,
+            takeover: () => Effect.succeed({ applied: false }),
+            divergence: () => Effect.succeed(null),
+            resolveDivergence: () => Effect.succeed({ resolved: false }),
+            snapshotAll: () => Effect.void,
+            listStatuses: () => Effect.succeed([]),
+            subscribeUpdates: Effect.gen(function* () {
+              const pubsub = yield* PubSub.unbounded<never>();
+              return yield* PubSub.subscribe(pubsub);
+            }),
+          } satisfies WipSnapshotReactor["Service"]),
+        ),
+      )
+      .pipe(
+        Layer.provide(resourceTelemetryLayer),
+        Layer.provide(UsageService.layerTest),
+        Layer.provide(
+          Layer.mock(AnalyticsService.AnalyticsService)({
+            record: () => Effect.void,
+            flush: Effect.void,
+            ...options?.layers?.analyticsService,
           }),
-        } satisfies WipSnapshotReactor["Service"]),
-      ),
-    ).pipe(
-      Layer.provide(resourceTelemetryLayer),
-      Layer.provide(UsageService.layerTest),
-      Layer.provide(
-        Layer.mock(AnalyticsService.AnalyticsService)({
-          record: () => Effect.void,
-          flush: Effect.void,
-          ...options?.layers?.analyticsService,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
-          record: () => Effect.void,
-          ...options?.layers?.browserTraceCollector,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({
-          publish: (event) => Effect.succeed({ ...(event as any), sequence: 1 }),
-          snapshot: Effect.succeed({ sequence: 0, events: [] }),
-          stream: Stream.empty,
-          ...options?.layers?.serverLifecycleEvents,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
-          awaitCommandReady: Effect.void,
-          markHttpListening: Effect.void,
-          markRunningProviderSessionsForContinuation: Effect.succeed([]),
-          clearProviderSessionContinuationMarkers: () => Effect.void,
-          enqueueCommand: (effect) => effect,
-          ...options?.layers?.serverRuntimeStartup,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(BackgroundPolicy.BackgroundPolicy)({
-          reportClientActivity: () => Effect.void,
-          removeRpcClient: () => Effect.void,
-          reportHostPowerState: () => Effect.void,
-          snapshot: Effect.succeed({
-            hostPower: {
-              source: "unknown",
-              idle: "unknown",
-              idleSeconds: null,
-              locked: "unknown",
-              suspended: false,
-              onBattery: "unknown",
-              lowPowerMode: "unknown",
-              thermalState: "unknown",
-              stale: true,
-              updatedAt: TEST_EPOCH,
-            },
-            leases: [],
-            activeForegroundLeaseCount: 0,
-            activeScopeKeys: [],
-            shouldRunOpportunisticWork: false,
-            updatedAt: TEST_EPOCH,
+        ),
+        Layer.provide(
+          Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
+            record: () => Effect.void,
+            ...options?.layers?.browserTraceCollector,
           }),
-          streamChanges: Stream.empty,
-          subscribe: Effect.succeed({
-            latest: {
+        ),
+        Layer.provide(
+          Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({
+            publish: (event) => Effect.succeed({ ...(event as any), sequence: 1 }),
+            snapshot: Effect.succeed({ sequence: 0, events: [] }),
+            stream: Stream.empty,
+            ...options?.layers?.serverLifecycleEvents,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+            awaitCommandReady: Effect.void,
+            markHttpListening: Effect.void,
+            markRunningProviderSessionsForContinuation: Effect.succeed([]),
+            clearProviderSessionContinuationMarkers: () => Effect.void,
+            enqueueCommand: (effect) => effect,
+            ...options?.layers?.serverRuntimeStartup,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+            reportClientActivity: () => Effect.void,
+            removeRpcClient: () => Effect.void,
+            reportHostPowerState: () => Effect.void,
+            snapshot: Effect.succeed({
               hostPower: {
                 source: "unknown",
                 idle: "unknown",
@@ -1190,84 +1176,106 @@ const buildAppUnderTest = (options?: {
               activeScopeKeys: [],
               shouldRunOpportunisticWork: false,
               updatedAt: TEST_EPOCH,
-            },
-            changes: Stream.empty,
-          }),
-          hasDemand: () => Effect.succeed(false),
-          shouldRunScopeWork: () => Effect.succeed(false),
-          shouldRunOpportunisticWork: Effect.succeed(false),
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerEnvironment.ServerEnvironment)({
-          getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
-          getDescriptor: Effect.succeed(testEnvironmentDescriptor),
-          ...options?.layers?.serverEnvironment,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
-          resolve: () => Effect.succeed(null),
-          ...options?.layers?.repositoryIdentityResolver,
-        }),
-      ),
-      Layer.provide(
-        Layer.succeed(
-          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
-          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
-            applyConfig: () => Effect.succeed({ status: "disabled" }),
-            ...options?.layers?.cloudManagedEndpointRuntime,
-          }),
-        ),
-      ),
-      Layer.provide(
-        Layer.succeed(
-          RelayClient.RelayClient,
-          RelayClient.RelayClient.of({
-            resolve: Effect.succeed({
-              status: "missing",
-              version: RelayClient.CLOUDFLARED_VERSION,
             }),
-            install: Effect.die("unused relay-client install"),
-            installWithProgress: () => Effect.die("unused relay-client install"),
-            ...options?.layers?.relayClient,
+            streamChanges: Stream.empty,
+            subscribe: Effect.succeed({
+              latest: {
+                hostPower: {
+                  source: "unknown",
+                  idle: "unknown",
+                  idleSeconds: null,
+                  locked: "unknown",
+                  suspended: false,
+                  onBattery: "unknown",
+                  lowPowerMode: "unknown",
+                  thermalState: "unknown",
+                  stale: true,
+                  updatedAt: TEST_EPOCH,
+                },
+                leases: [],
+                activeForegroundLeaseCount: 0,
+                activeScopeKeys: [],
+                shouldRunOpportunisticWork: false,
+                updatedAt: TEST_EPOCH,
+              },
+              changes: Stream.empty,
+            }),
+            hasDemand: () => Effect.succeed(false),
+            shouldRunScopeWork: () => Effect.succeed(false),
+            shouldRunOpportunisticWork: Effect.succeed(false),
           }),
         ),
-      ),
-      Layer.provide(
-        Layer.mock(CloudCliTokenManager.CloudCliTokenManager)({
-          get: Effect.die(new Error("Unexpected T3 Connect CLI authorization request.")),
-          getExisting: Effect.succeed(Option.none()),
-          hasCredential: Effect.succeed(false),
-          clear: Effect.void,
-          ...options?.layers?.cloudCliTokenManager,
-        }),
-      ),
-      Layer.updateService(PairingGrantStore.PairingGrantStore, (grants) => {
-        const subscribed = options?.onPairingChangesSubscribed;
-        if (!subscribed) return grants;
-        return {
-          ...grants,
-          streamChanges: Stream.unwrap(
-            Effect.gen(function* () {
-              const changes = yield* Queue.unbounded<PairingGrantStore.BootstrapCredentialChange>();
-              yield* grants.streamChanges.pipe(
-                Stream.runForEach((change) => Queue.offer(changes, change)),
-                Effect.forkScoped({ startImmediately: true }),
-              );
-              yield* subscribed;
-              return Stream.fromQueue(changes);
+        Layer.provide(
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
+            getDescriptor: Effect.succeed(testEnvironmentDescriptor),
+            ...options?.layers?.serverEnvironment,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+            resolve: () => Effect.succeed(null),
+            ...options?.layers?.repositoryIdentityResolver,
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
+            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
+              applyConfig: () => Effect.succeed({ status: "disabled" }),
+              ...options?.layers?.cloudManagedEndpointRuntime,
             }),
           ),
-        };
-      }),
-      Layer.provideMerge(makeAuthTestLayer()),
-      Layer.provideMerge(ServerSecretStore.layer),
-      Layer.provide(workspaceAndProjectServicesLayer),
-      Layer.provideMerge(FetchHttpClient.layer),
-      Layer.provide(VcsProcess.layer),
-      Layer.provide(layerConfig),
-    );
+        ),
+        Layer.provide(
+          Layer.succeed(
+            RelayClient.RelayClient,
+            RelayClient.RelayClient.of({
+              resolve: Effect.succeed({
+                status: "missing",
+                version: RelayClient.CLOUDFLARED_VERSION,
+              }),
+              install: Effect.die("unused relay-client install"),
+              installWithProgress: () => Effect.die("unused relay-client install"),
+              ...options?.layers?.relayClient,
+            }),
+          ),
+        ),
+        Layer.provide(
+          Layer.mock(CloudCliTokenManager.CloudCliTokenManager)({
+            get: Effect.die(new Error("Unexpected T3 Connect CLI authorization request.")),
+            getExisting: Effect.succeed(Option.none()),
+            hasCredential: Effect.succeed(false),
+            clear: Effect.void,
+            ...options?.layers?.cloudCliTokenManager,
+          }),
+        ),
+        Layer.updateService(PairingGrantStore.PairingGrantStore, (grants) => {
+          const subscribed = options?.onPairingChangesSubscribed;
+          if (!subscribed) return grants;
+          return {
+            ...grants,
+            streamChanges: Stream.unwrap(
+              Effect.gen(function* () {
+                const changes =
+                  yield* Queue.unbounded<PairingGrantStore.BootstrapCredentialChange>();
+                yield* grants.streamChanges.pipe(
+                  Stream.runForEach((change) => Queue.offer(changes, change)),
+                  Effect.forkScoped({ startImmediately: true }),
+                );
+                yield* subscribed;
+                return Stream.fromQueue(changes);
+              }),
+            ),
+          };
+        }),
+        Layer.provideMerge(makeAuthTestLayer()),
+        Layer.provideMerge(ServerSecretStore.layer),
+        Layer.provide(workspaceAndProjectServicesLayer),
+        Layer.provideMerge(FetchHttpClient.layer),
+        Layer.provide(VcsProcess.layer),
+        Layer.provide(layerConfig),
+      );
 
     yield* Layer.build(appLayer);
     return config;
@@ -9097,6 +9105,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 snapshotCalls += 1;
                 return {
                   snapshotSequence: headSequence,
+                  roamingProjects: [],
+                  roamingMaterializations: [],
+                  roamingWipStatus: [],
+                  roamingThreads: [],
                   projects: headSequence === 1 ? [project] : [],
                   threads: headSequence === 1 ? [thread] : [],
                   updatedAt: "2026-01-01T00:00:02.000Z",
@@ -9388,6 +9400,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   Stream.runCollect,
                 );
                 assert.deepEqual(shellItems, [
+                  { kind: "roaming-wip-status-replaced", sequence: 0, wipStatuses: [] },
                   { kind: "thread-removed", sequence: deleted.sequence, threadId: defaultThreadId },
                   { kind: "synchronized" },
                 ]);
@@ -9593,6 +9606,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 snapshotSequence: 5,
                 projects: [],
                 threads: [shell],
+                roamingProjects: [],
+                roamingMaterializations: [],
+                roamingWipStatus: [],
+                roamingThreads: [],
                 updatedAt: "2026-01-01T00:00:00.000Z",
               }),
           },

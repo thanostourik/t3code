@@ -104,6 +104,10 @@ function makeSnapshot(
 ): OrchestrationShellSnapshot {
   return {
     snapshotSequence: 1,
+    roamingProjects: [],
+    roamingMaterializations: [],
+    roamingWipStatus: [],
+    roamingThreads: [],
     projects,
     threads,
     updatedAt: NOW,

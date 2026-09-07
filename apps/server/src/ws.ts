@@ -1561,7 +1561,6 @@ const makeWsRpcLayer = (
               // exists. The sources stay attached so that transition can
               // publish registry, materialization, and WIP status immediately;
               // the producers themselves are gated while roaming is off.
-              const liveTail = Stream.merge(bufferedLiveStream, Stream.fromQueue(roamingBuffer));
 
               const loadSnapshot = projectionSnapshotQuery.getShellSnapshot().pipe(
                 Effect.tapError((cause) =>
@@ -1585,20 +1584,23 @@ const makeWsRpcLayer = (
               // Offer the completion marker into the same queue as live events.
               // Anything buffered while snapshot/replay work was in flight is
               // therefore delivered before the client is told it is synchronized.
-              const synchronizedThenLive = liveBudget.deliver(
-                input.requestCompletionMarker === true
-                  ? Stream.concat(
-                      Stream.fromEffect(
-                        liveBudget.retain({ kind: "synchronized" as const }).pipe(
-                          Effect.flatMap((item) => Queue.offer(liveBuffer, item)),
-                          Effect.uninterruptible,
-                          Effect.andThen(Queue.takeAll(liveBuffer)),
-                          Effect.flatMap(coalesceRetainedInputs),
-                        ),
-                      ).pipe(Stream.flatMap((items) => Stream.fromIterable(items))),
-                      liveTail,
-                    )
-                  : liveTail,
+              const synchronizedThenLive = Stream.merge(
+                liveBudget.deliver(
+                  input.requestCompletionMarker === true
+                    ? Stream.concat(
+                        Stream.fromEffect(
+                          liveBudget.retain({ kind: "synchronized" as const }).pipe(
+                            Effect.flatMap((item) => Queue.offer(liveBuffer, item)),
+                            Effect.uninterruptible,
+                            Effect.andThen(Queue.takeAll(liveBuffer)),
+                            Effect.flatMap(coalesceRetainedInputs),
+                          ),
+                        ).pipe(Stream.flatMap((items) => Stream.fromIterable(items))),
+                        bufferedLiveStream,
+                      )
+                    : bufferedLiveStream,
+                ),
+                Stream.fromQueue(roamingBuffer),
               );
 
               // When the client already holds a shell snapshot (cached, or loaded
@@ -1652,17 +1654,16 @@ const makeWsRpcLayer = (
                       }),
                   ),
                 );
-                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> = yield* roamingShellStream
-                  .catchUpItems(roamingEnabled)
-                  .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationGetSnapshotError({
-                        message: "Failed to seed roaming shell overlay on resume",
-                        cause,
-                      }),
-                  ),
-                );
+                const roamingCatchUp: ReadonlyArray<OrchestrationShellStreamItem> =
+                  yield* roamingShellStream.catchUpItems(roamingEnabled).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationGetSnapshotError({
+                          message: "Failed to seed roaming shell overlay on resume",
+                          cause,
+                        }),
+                    ),
+                  );
                 return Stream.concat(
                   Stream.fromIterable(roamingCatchUp),
                   Stream.concat(catchUpStream, synchronizedThenLive),

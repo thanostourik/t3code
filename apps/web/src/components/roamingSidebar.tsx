@@ -57,9 +57,7 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
 } from "./ui/sidebar";
-import {
-  usePrimarySettings,
-} from "~/hooks/useSettings";
+import { usePrimarySettings } from "~/hooks/useSettings";
 
 /**
  * "Offline — available" rows of the single project list: registry entries
@@ -503,9 +501,6 @@ export function useMirroredFallbackRows(
   const roamingThreads = useEnvironmentRoamingThreads(primaryEnvironmentId);
   const allThreadShells = useThreadShells();
   return useMemo(() => {
-    if (workspaceProjectId === null) {
-      return [];
-    }
     const liveRowThreadIds = new Set<string>();
     for (const shell of allThreadShells) {
       if (reachableEnvironmentIds.has(shell.environmentId)) {
@@ -514,7 +509,7 @@ export function useMirroredFallbackRows(
     }
     return roamingThreads.filter(
       (thread) =>
-        thread.workspaceProjectId === workspaceProjectId &&
+        (workspaceProjectId === null || thread.workspaceProjectId === workspaceProjectId) &&
         !reachableEnvironmentIds.has(thread.authorEnvironmentId) &&
         !liveRowThreadIds.has(thread.threadId),
     );
@@ -627,48 +622,62 @@ export function SidebarOfflineProjectRow(props: {
 
   return (
     <SidebarMenuItem key={`${environmentId}:${roamingProject.workspaceProjectId}`}>
-      <div
-        className="group/offline flex items-center gap-2 rounded-md px-2 py-1.5"
-        title={`${roamingProject.title} — offline, available from its mirror copy (${staleness})`}
-      >
-        <CloudIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
-        <div className="min-w-0 flex-1 opacity-60">
-          <div className="flex items-center gap-1.5">
-            <span className="truncate text-sm text-muted-foreground">{roamingProject.title}</span>
-            {showConflictNotice ? (
-              <button
-                type="button"
-                className="shrink-0"
-                title="Sync conflict auto-resolved — both machines changed this project's synced settings while apart, and the newest change won. Click to dismiss."
-                aria-label="Dismiss resolved sync conflict"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  localStorage.setItem(conflictDismissKey, latestConflictAt);
-                  setDismissedConflictAt(latestConflictAt);
-                }}
+      <Tooltip>
+        <TooltipTrigger
+          render={<div className="group/offline flex items-center gap-2 rounded-md px-2 py-1.5" />}
+        >
+          <CloudIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+          <div className="min-w-0 flex-1 opacity-60">
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-sm text-muted-foreground">{roamingProject.title}</span>
+              {showConflictNotice ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={<button type="button" className="shrink-0" />}
+                    aria-label="Dismiss resolved sync conflict"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      localStorage.setItem(conflictDismissKey, latestConflictAt);
+                      setDismissedConflictAt(latestConflictAt);
+                    }}
+                  >
+                    <TriangleAlertIcon className="size-3 shrink-0 text-warning" />
+                  </TooltipTrigger>
+                  <TooltipPopup>
+                    Sync conflict auto-resolved — both machines changed this project's synced
+                    settings while apart, and the newest change won. Click to dismiss.
+                  </TooltipPopup>
+                </Tooltip>
+              ) : null}
+            </div>
+            <div className="truncate text-[10px] text-muted-foreground/60">
+              {isMaterializing ? `materializing: ${runningStep}…` : `${repository} · ${staleness}`}
+            </div>
+          </div>
+          {isMaterializing ? (
+            <LoaderIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground/60" />
+          ) : (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className="hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground group-hover/offline:flex"
+                  />
+                }
+                onClick={handleMaterialize}
               >
-                <TriangleAlertIcon className="size-3 shrink-0 text-warning" />
-              </button>
-            ) : null}
-          </div>
-          <div className="truncate text-[10px] text-muted-foreground/60">
-            {isMaterializing ? `materializing: ${runningStep}…` : `${repository} · ${staleness}`}
-          </div>
-        </div>
-        {isMaterializing ? (
-          <LoaderIcon className="size-3.5 shrink-0 animate-spin text-muted-foreground/60" />
-        ) : (
-          <button
-            type="button"
-            className="hidden shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground group-hover/offline:flex"
-            onClick={handleMaterialize}
-            title="Clone this project here, apply synced secret files, and open it"
-          >
-            <FolderPlusIcon className="size-3" />
-            Materialize
-          </button>
-        )}
-      </div>
+                <FolderPlusIcon className="size-3" />
+                Materialize
+              </TooltipTrigger>
+              <TooltipPopup>
+                Clone this project here, apply synced secret files, and open it
+              </TooltipPopup>
+            </Tooltip>
+          )}
+        </TooltipTrigger>
+        <TooltipPopup>{`${roamingProject.title} — offline, available from its mirror copy (${staleness})`}</TooltipPopup>
+      </Tooltip>
       <SidebarMenuSub className="mx-0.5 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1 py-0 sm:mx-1 sm:px-1.5">
         <SidebarMirroredThreadRows rows={offlineMirroredRows} />
       </SidebarMenuSub>
