@@ -46,7 +46,7 @@ const WATCH_DEBOUNCE = Duration.millis(500);
 // when the watcher is dead, so it must still feel live.
 const VAULT_INTERVAL = Duration.seconds(30);
 
-export class VaultPathEscapeError extends Schema.TaggedErrorClass<VaultPathEscapeError>()(
+export class VaultPathEscapeError extends Schema.TaggedError<VaultPathEscapeError>()(
   "VaultPathEscapeError",
   { path: Schema.String },
 ) {}

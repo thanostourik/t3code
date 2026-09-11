@@ -128,6 +128,10 @@ function makeSnapshot(
     snapshotSequence,
     projects: [makeProject()],
     threads,
+    roamingProjects: [],
+    roamingMaterializations: [],
+    roamingWipStatus: [],
+    roamingThreads: [],
     updatedAt: NOW,
   };
 }

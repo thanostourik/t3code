@@ -190,12 +190,14 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       // Before this rebase, roaming occupied 50–56 (and earlier 37–43). Free
       // those slots and replay any missing upstream migrations, retaining the
       // roaming schema and data while recording its migrations at 51–57.
-      const roamingNames = new Set(
+      const roamingNames = new Set<string>(
         migrationEntries.filter(([id]) => id >= 51).map(([, name]) => name),
       );
-      const currentById = new Map(migrationEntries.map(([id, name]) => [id, name]));
+      const currentNameById = new Map<number, string>(
+        migrationEntries.map(([id, name]) => [id, name]),
+      );
       const legacy = applied.filter(
-        (row) => roamingNames.has(row.name) && currentById.get(row.migration_id) !== row.name,
+        (row) => roamingNames.has(row.name) && currentNameById.get(row.migration_id) !== row.name,
       );
       if (legacy.length === 0)
         return yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });

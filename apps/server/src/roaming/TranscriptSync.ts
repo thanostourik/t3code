@@ -52,7 +52,7 @@ import { RoamingPeers } from "./RoamingPeers.ts";
 /** Character budget for the transcript text handed to brief generation. */
 const BRIEF_INPUT_MAX_CHARS = 50_000;
 
-export class TranscriptBriefError extends Schema.TaggedErrorClass<TranscriptBriefError>()(
+export class TranscriptBriefError extends Schema.TaggedError<TranscriptBriefError>()(
   "TranscriptBriefError",
   {
     reason: Schema.Literals(["thread-unknown", "internal"]),

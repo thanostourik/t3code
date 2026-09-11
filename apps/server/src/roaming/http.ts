@@ -100,7 +100,7 @@ import { RoamingThreadResumptions } from "./RoamingThreadResumptions.ts";
 import { TranscriptSync } from "./TranscriptSync.ts";
 import { WipSnapshotReactor } from "./WipSnapshotReactor.ts";
 
-class RoamingRouteRejection extends Schema.TaggedErrorClass<RoamingRouteRejection>()(
+class RoamingRouteRejection extends Schema.TaggedError<RoamingRouteRejection>()(
   "RoamingRouteRejection",
   { status: Schema.Int, body: Schema.String },
 ) {}

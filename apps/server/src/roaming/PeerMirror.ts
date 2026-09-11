@@ -88,7 +88,7 @@ const encodeFetchRequest = Schema.encodeUnknownEffect(RoamingFetchBlobsRequest);
 const encodePushRequest = Schema.encodeUnknownEffect(RoamingPushBlobsRequest);
 const encodeWaitRequest = Schema.encodeUnknownEffect(RoamingWaitChangesRequest);
 
-class PeerMirrorRequestError extends Schema.TaggedErrorClass<PeerMirrorRequestError>()(
+class PeerMirrorRequestError extends Schema.TaggedError<PeerMirrorRequestError>()(
   "PeerMirrorRequestError",
   { operation: Schema.String, cause: Schema.Defect() },
 ) {}

@@ -56,7 +56,7 @@ import { RoamingPeers, roamingPeerSecretName } from "./RoamingPeers.ts";
 /** D4 machine-to-machine credential lifetime. */
 const MACHINE_CREDENTIAL_TTL = Duration.days(365);
 
-export class RoamingEnrollError extends Schema.TaggedErrorClass<RoamingEnrollError>()(
+export class RoamingEnrollError extends Schema.TaggedError<RoamingEnrollError>()(
   "RoamingEnrollError",
   {
     reason: Schema.Literals([

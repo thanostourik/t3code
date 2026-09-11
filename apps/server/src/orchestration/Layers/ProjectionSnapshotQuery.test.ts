@@ -3387,6 +3387,8 @@ it.effect("omits foreign-host PRs from legacy snapshots while preserving native 
       assert.equal(thread.linkedPullRequest?.url, "https://github.com/acme/web/pull/42");
     }
   }).pipe(Effect.provide(layer));
+});
+
 // ── Mirrored thread shells (M5.5 exclusions) ────────────────────────────
 //
 // A mirrored row must come from a paired peer (this machine is never its

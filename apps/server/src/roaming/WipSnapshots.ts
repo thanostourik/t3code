@@ -27,7 +27,7 @@ export const WIP_BRANCH_UNBORN = "T3:unborn";
 
 const REF_SAFE_ID = /^[A-Za-z0-9._-]+$/;
 
-export class WipRefIdError extends Schema.TaggedErrorClass<WipRefIdError>()("WipRefIdError", {
+export class WipRefIdError extends Schema.TaggedError<WipRefIdError>()("WipRefIdError", {
   id: Schema.String,
 }) {}
 

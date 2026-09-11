@@ -61,14 +61,11 @@ const STEP_ORDER: ReadonlyArray<RoamingMaterializeStepName> = [
 
 const MIRROR_STALE_MS = 10 * 60 * 1_000;
 
-export class MaterializeError extends Schema.TaggedErrorClass<MaterializeError>()(
-  "MaterializeError",
-  {
-    reason: Schema.Literals(["not-found", "invalid-target", "clone-failed", "internal"]),
-    detail: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
+export class MaterializeError extends Schema.TaggedError<MaterializeError>()("MaterializeError", {
+  reason: Schema.Literals(["not-found", "invalid-target", "clone-failed", "internal"]),
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {
   override get message(): string {
     return `Roaming materialize failed (${this.reason}): ${this.detail}`;
   }

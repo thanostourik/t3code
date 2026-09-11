@@ -14,7 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-export class RoamingThreadResumptionError extends Schema.TaggedErrorClass<RoamingThreadResumptionError>()(
+export class RoamingThreadResumptionError extends Schema.TaggedError<RoamingThreadResumptionError>()(
   "RoamingThreadResumptionError",
   {
     detail: Schema.optional(Schema.String),
